@@ -1066,6 +1066,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 2815C4E0150D559800136082 /* BetaDist.xcconfig */;
 			buildSettings = {
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = BetaDist;
 		};
@@ -1088,6 +1089,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 2815C4DE150D559800136082 /* AppStore.xcconfig */;
 			buildSettings = {
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = AppStore;
 		};
@@ -1110,6 +1112,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 2815C4E6150D55BC00136082 /* Debug.xcconfig */;
 			buildSettings = {
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				ONLY_ACTIVE_ARCH = YES;
 			};
 			name = Debug;
@@ -1118,6 +1121,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 2815C4E1150D559800136082 /* Release.xcconfig */;
 			buildSettings = {
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = Release;
 		};
