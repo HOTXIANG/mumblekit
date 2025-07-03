@@ -148,10 +148,10 @@
 }
 
 - (void) socketReader:(int)sock {
-    struct sockaddr addr;
-    socklen_t addrlen = sizeof(struct sockaddr);
+    struct sockaddr_storage addr;
+    socklen_t addrlen = sizeof(struct sockaddr_storage);
     char buf[64];
-    ssize_t nread = recvfrom(sock, buf, 64, 0, &addr, &addrlen);
+    ssize_t nread = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *) &addr, &addrlen);
     if (nread == 24) {
         NSData *recvAddr = [NSData dataWithBytesNoCopy:&addr length:addrlen freeWhenDone:NO];
         NSArray *addrPingers = [_pingers objectForKey:recvAddr];
