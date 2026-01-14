@@ -10,6 +10,8 @@
 #import "MKAudioOutput.h"
 #import "MKCryptState.h"
 #import "MKPacketDataStream.h"
+#import "MKAudio.h"
+#import "MKAudioOutput.h"
 
 #include <dispatch/dispatch.h>
 
@@ -135,7 +137,9 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
 @implementation MKConnection
 
-@synthesize audioOutput = _audioOutput;
+- (MKAudioOutput *) audioOutput {
+    return [[MKAudio sharedAudio] output];
+}
 
 - (id) init {
     self = [super init];

@@ -272,6 +272,10 @@ static void MKAudio_UpdateAudioSessionSettings(MKAudio *audio) {
 
 @implementation MKAudio
 
+- (MKAudioOutput *) output {
+    return _audioOutput;
+}
+
 + (MKAudio *) sharedAudio {
     static dispatch_once_t pred;
     static MKAudio *audio;

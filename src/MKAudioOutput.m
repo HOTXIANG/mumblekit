@@ -196,15 +196,17 @@
 
     if ([mix count] > 0) {
         for (MKAudioOutputUser *ou in mix) {
+            
+            // 1. 获取 Session ID (确保类型匹配)
             NSUInteger sessionID = [ou userSession];
             NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:sessionID];
             
-            // 1. 检查是否被屏蔽
+            // 2. 检查屏蔽 (Local Mute)
             if ([[_sessionMutes objectForKey:sessionKey] boolValue]) {
-                continue; // 如果屏蔽了，直接跳过混音 (静音)
+                continue; // 直接跳过，不混音
             }
             
-            // 2. 获取自定义音量 (默认为 1.0)
+            // 3. 获取自定义音量
             float volMultiplier = 1.0f;
             NSNumber *customVol = [_sessionVolumes objectForKey:sessionKey];
             if (customVol) {
@@ -213,13 +215,15 @@
             
             const float * restrict userBuffer = [ou buffer];
             for (s = 0; s < nchan; ++s) {
-                const float str = _speakerVolume[s];
+                // 4. 应用音量乘数
+                const float str = _speakerVolume[s] * volMultiplier;
+                
                 float * restrict o = (float *)mixBuffer + s;
                 for (i = 0; i < nsamp; ++i) {
                     o[i*nchan] += userBuffer[i] * str;
                 }
             }
-        }
+                }
 
         short *outputBuffer = (short *)frames;
         for (i = 0; i < nsamp * _numChannels; ++i) {

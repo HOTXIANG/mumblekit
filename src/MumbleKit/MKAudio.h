@@ -135,6 +135,8 @@ typedef struct _MKAudioSettings {
 /// @return Retruns the shared MKAudio object.
 + (MKAudio *) sharedAudio;
 
+- (MKAudioOutput *) output;
+
 ///------------------------------------
 /// @name Delegate
 ///------------------------------------
