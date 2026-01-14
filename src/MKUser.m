@@ -33,9 +33,12 @@
 
 @implementation MKUser
 
+@synthesize localVolume = _localVolume;
+
 - (id) init {
     if (self = [super init]) {
         _userId = -1;
+        _localVolume = 1.0f;
     }
     return self;
 }

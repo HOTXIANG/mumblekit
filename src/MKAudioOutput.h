@@ -20,4 +20,7 @@
 - (void) addFrameToBufferWithSession:(NSUInteger)session data:(NSData *)data sequence:(NSUInteger)seq type:(MKUDPMessageType)msgType;
 - (NSDictionary *) copyMixerInfo;
 
+- (void) setVolume:(float)volume forSession:(NSUInteger)session;
+- (void) setMuted:(BOOL)muted forSession:(NSUInteger)session;
+
 @end

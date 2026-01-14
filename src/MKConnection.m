@@ -135,6 +135,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
 @implementation MKConnection
 
+@synthesize audioOutput = _audioOutput;
+
 - (id) init {
     self = [super init];
     if (self == nil)

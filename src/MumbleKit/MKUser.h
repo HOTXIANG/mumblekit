@@ -26,7 +26,11 @@ typedef enum {
 /// 
 /// Thus, if all inspection of the MKChannel's properties happen in response to
 /// MKServerModelDelegate callbacks, everything should be OK.
-@interface MKUser : NSObject
+@interface MKUser : NSObject{
+    float _localVolume;
+}
+
+@property (nonatomic, assign) float localVolume;
 
 /// Returns a user's user ID. Only registered users have user IDs.
 /// For non-registered users, this ID will be negative.

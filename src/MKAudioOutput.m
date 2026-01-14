@@ -33,6 +33,9 @@
     long                  _cngRegister1;
     long                  _cngRegister2;
     BOOL                  _cngEnabled;
+    
+    NSMutableDictionary  *_sessionVolumes;
+    NSMutableDictionary  *_sessionMutes;
 }
 @end
 
@@ -47,6 +50,9 @@
         _mixerFrequency = 0;
         _outputLock = [[NSLock alloc] init];
         _outputs = [[NSMutableDictionary alloc] init];
+        
+        _sessionVolumes = [[NSMutableDictionary alloc] init];
+        _sessionMutes = [[NSMutableDictionary alloc] init];
         
         _mixerFrequency = [_device inputSampleRate];
         _numChannels = [_device numberOfOutputChannels];
@@ -91,6 +97,8 @@
     [_device release];
     [_outputLock release];
     [_outputs release];
+    [_sessionVolumes release];
+    [_sessionMutes release];
     [super dealloc];
 }
 
@@ -188,6 +196,21 @@
 
     if ([mix count] > 0) {
         for (MKAudioOutputUser *ou in mix) {
+            NSUInteger sessionID = [ou userSession];
+            NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:sessionID];
+            
+            // 1. 检查是否被屏蔽
+            if ([[_sessionMutes objectForKey:sessionKey] boolValue]) {
+                continue; // 如果屏蔽了，直接跳过混音 (静音)
+            }
+            
+            // 2. 获取自定义音量 (默认为 1.0)
+            float volMultiplier = 1.0f;
+            NSNumber *customVol = [_sessionVolumes objectForKey:sessionKey];
+            if (customVol) {
+                volMultiplier = [customVol floatValue];
+            }
+            
             const float * restrict userBuffer = [ou buffer];
             for (s = 0; s < nchan; ++s) {
                 const float str = _speakerVolume[s];
@@ -287,6 +310,18 @@
     mixerInfoCopy = [_mixerInfo copy];
     [_mixerInfoLock unlock];
     return mixerInfoCopy;
+}
+
+- (void) setVolume:(float)volume forSession:(NSUInteger)session {
+    [_outputLock lock];
+    [_sessionVolumes setObject:[NSNumber numberWithFloat:volume] forKey:[NSNumber numberWithUnsignedInteger:session]];
+    [_outputLock unlock];
+}
+
+- (void) setMuted:(BOOL)muted forSession:(NSUInteger)session {
+    [_outputLock lock];
+    [_sessionMutes setObject:[NSNumber numberWithBool:muted] forKey:[NSNumber numberWithUnsignedInteger:session]];
+    [_outputLock unlock];
 }
 
 @end

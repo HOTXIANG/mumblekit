@@ -11,6 +11,7 @@
 @class MKPacketDataStream;
 @class MKCryptState;
 @class MKCertificate;
+@class MKAudioOutput;
 
 typedef enum {
     UDPVoiceCELTAlphaMessage = 0,
@@ -253,6 +254,8 @@ typedef enum {
 /// It is mostly used together with MKServerModel which translates the wire protocol
 /// to Objective-C delegate callbacks.
 @interface MKConnection : NSThread <NSStreamDelegate>
+
+@property (nonatomic, readonly) MKAudioOutput *audioOutput;
 
 /// Initialize a new MKConnection object.
 - (id) init;
