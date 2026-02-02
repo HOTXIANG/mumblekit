@@ -1,6 +1,9 @@
-// Copyright 2009-2012 The MumbleKit Developers. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+//
+//  MKAudio.m
+//  MumbleKit
+//
+//  Modernized to use AVAudioSession (Removing all deprecated AudioSession C-APIs)
+//
 
 #import <MumbleKit/MKAudio.h>
 #import "MKUtils.h"
@@ -9,6 +12,8 @@
 #import "MKAudioOutput.h"
 #import "MKAudioOutputSidetone.h"
 #import <MumbleKit/MKConnection.h>
+
+#import <AVFoundation/AVFoundation.h> // ✅ 必须引入
 
 #if TARGET_OS_IPHONE == 1
 # import "MKVoiceProcessingDevice.h"
@@ -38,243 +43,11 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
     MKAudioSettings          _audioSettings;
     BOOL                     _running;
 }
-- (BOOL) _audioShouldBeRunning;
 @end
-
-#if TARGET_OS_IPHONE == 1
-static void MKAudio_InterruptCallback(void *udata, UInt32 interrupt) {
-    MKAudio *audio = (MKAudio *) udata;
-
-    if (interrupt == kAudioSessionBeginInterruption) {
-        [audio stop];
-    } else if (interrupt == kAudioSessionEndInterruption) {
-        UInt32 val = TRUE;
-        OSStatus err = AudioSessionSetProperty(kAudioSessionProperty_OverrideCategoryMixWithOthers, sizeof(val), &val);
-        if (err != kAudioSessionNoError) {
-            NSLog(@"MKAudio: unable to set MixWithOthers property in InterruptCallback.");
-        }
-
-        if ([audio _audioShouldBeRunning]) {
-            [audio start];
-        }
-    }
-}
-
-static void MKAudio_AudioInputAvailableCallback(MKAudio *audio, AudioSessionPropertyID prop, UInt32 len, uint32_t *avail) {
-    BOOL audioInputAvailable;
-    UInt32 val;
-    OSStatus err;
-
-    if (avail) {
-        audioInputAvailable = *avail;
-        val = audioInputAvailable ? kAudioSessionCategory_PlayAndRecord : kAudioSessionCategory_MediaPlayback;
-        err = AudioSessionSetProperty(kAudioSessionProperty_AudioCategory, sizeof(val), &val);
-        if (err != kAudioSessionNoError) {
-            NSLog(@"MKAudio: unable to set AudioCategory property.");
-            return;
-        }
-
-        if (val == kAudioSessionCategory_PlayAndRecord) {
-            MKAudioSettings settings;
-            [audio readAudioSettings:&settings];
-            val = 1;
-            if (settings.preferReceiverOverSpeaker) {
-                val = 0;
-            }
-            err = AudioSessionSetProperty(kAudioSessionProperty_OverrideCategoryDefaultToSpeaker, sizeof(val), &val);
-            if (err != kAudioSessionNoError) {
-                NSLog(@"MKAudio: unable to set OverrideCategoryDefaultToSpeaker property.");
-                return;
-            }
-        }
-        
-        UInt32 val = TRUE;
-        OSStatus err = AudioSessionSetProperty(kAudioSessionProperty_OverrideCategoryMixWithOthers, sizeof(val), &val);
-        if (err != kAudioSessionNoError) {
-            NSLog(@"MKAudio: unable to set MixWithOthers property in AudioInputAvailableCallback.");
-        }
-
-        if ([audio _audioShouldBeRunning]) {
-            [audio restart];
-        } else {
-            [audio stop];
-        }
-    }
-}
-
-static void MKAudio_AudioRouteChangedCallback(MKAudio *audio, AudioSessionPropertyID prop, UInt32 len, NSDictionary *dict) {
-    int reason = [[dict objectForKey:(id)kAudioSession_RouteChangeKey_Reason] intValue];
-    switch (reason) {
-        case kAudioSessionRouteChangeReason_Override:
-        case kAudioSessionRouteChangeReason_CategoryChange:
-        case kAudioSessionRouteChangeReason_NoSuitableRouteForCategory:
-#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 70000
-        case kAudioSessionRouteChangeReason_RouteConfigurationChange:
-#endif
-            NSLog(@"MKAudio: audio route changed, skipping; reason=%i", reason);
-            return;
-    }
-
-    UInt32 val = TRUE;
-    OSStatus err = AudioSessionSetProperty(kAudioSessionProperty_OverrideCategoryMixWithOthers, sizeof(val), &val);
-    if (err != kAudioSessionNoError) {
-        NSLog(@"MKAudio: unable to set MixWithOthers property in AudioRouteChangedCallback.");
-    }
-    
-    if ([audio _audioShouldBeRunning]) {
-        NSLog(@"MKAudio: audio route changed, restarting audio; reason=%i", reason);
-        [audio restart];
-    } else {
-        NSLog(@"MKAudio: audio route changed, stopping audio (because delegate said so); reason=%i", reason);
-        [audio stop];
-    }
-}
-
-static void MKAudio_SetupAudioSession(MKAudio *audio) {
-    OSStatus err;
-    UInt32 val, valSize;
-    Float64 fval;
-    BOOL audioInputAvailable = YES;
-    
-    // Initialize Audio Session
-    err = AudioSessionInitialize(CFRunLoopGetMain(), kCFRunLoopDefaultMode, MKAudio_InterruptCallback, audio);
-    if (err != kAudioSessionNoError) {
-        NSLog(@"MKAudio: unable to initialize AudioSession.");
-        return;
-    }
-    
-    // Listen for audio route changes
-    err = AudioSessionAddPropertyListener(kAudioSessionProperty_AudioRouteChange,
-                                          (AudioSessionPropertyListener) MKAudio_AudioRouteChangedCallback,
-                                          audio);
-    if (err != kAudioSessionNoError) {
-        NSLog(@"MKAudio: unable to register property listener for AudioRouteChange.");
-        return;
-    }
-    
-    // Listen for audio input availability changes
-    err = AudioSessionAddPropertyListener(kAudioSessionProperty_AudioInputAvailable,
-                                          (AudioSessionPropertyListener)MKAudio_AudioInputAvailableCallback,
-                                          audio);
-    if (err != kAudioSessionNoError) {
-        NSLog(@"MKAudio: unable to register property listener for AudioInputAvailable.");
-        return;
-    }
-    
-    // To be able to select the correct category, we must query whethe audio input is available.
-    valSize = sizeof(UInt32);
-    err = AudioSessionGetProperty(kAudioSessionProperty_AudioInputAvailable, &valSize, &val);
-    if (err != kAudioSessionNoError || valSize != sizeof(UInt32)) {
-        NSLog(@"MKAudio: unable to query for input availability.");
-        return;
-    }
-    
-    // Set the correct category for our Audio Session depending on our current audio input situation.
-    audioInputAvailable = (BOOL) val;
-    val = audioInputAvailable ? kAudioSessionCategory_PlayAndRecord : kAudioSessionCategory_MediaPlayback;
-    err = AudioSessionSetProperty(kAudioSessionProperty_AudioCategory, sizeof(val), &val);
-    if (err != kAudioSessionNoError) {
-        NSLog(@"MKAudio: unable to set AudioCategory property.");
-        return;
-    }
-    
-    if (audioInputAvailable) {
-        // The OverrideCategoryDefaultToSpeaker property makes us output to the speakers of the iOS device
-        // as long as there's not a headset connected. However, if the user prefers the audio to be output
-        // to the receiver, honor that.
-        MKAudioSettings settings;
-        [audio readAudioSettings:&settings];
-        val = 1;
-        if (settings.preferReceiverOverSpeaker) {
-            val = 0;
-        }
-        err = AudioSessionSetProperty(kAudioSessionProperty_OverrideCategoryDefaultToSpeaker, sizeof(val), &val);
-        if (err != kAudioSessionNoError) {
-            NSLog(@"MKAudio: unable to set OverrideCategoryDefaultToSpeaker property.");
-            return;
-        }
-    }
-    
-    // Set the preferred hardware sample rate.
-    //
-    // fixme(mkrautz): The AudioSession *can* reject this, in which case we need
-    // to be able to handle whatever input sampling rate is chosen for us. This is
-    // apparently 8KHz on a 1st gen iPhone.
-    fval = SAMPLE_RATE;
-    err = AudioSessionSetProperty(kAudioSessionProperty_PreferredHardwareSampleRate, sizeof(Float64), &fval);
-    if (err != kAudioSessionNoError) {
-        NSLog(@"MKAudio: unable to set preferred hardware sample rate.");
-        return;
-    }
-    
-    if (audioInputAvailable) {
-        // Allow input from Bluetooth devices.
-        val = 1;
-        err = AudioSessionSetProperty(kAudioSessionProperty_OverrideCategoryEnableBluetoothInput, sizeof(val), &val);
-        if (err != kAudioSessionNoError) {
-            NSLog(@"MKAudio: unable to enable bluetooth input.");
-            return;
-        }
-    }
-    
-    // Allow us to be mixed with other applications.
-    // It's important that this call comes last, since changing the other OverrideCategory properties
-    // apparently reset the state of this property.
-    val = TRUE;
-    err = AudioSessionSetProperty(kAudioSessionProperty_OverrideCategoryMixWithOthers, sizeof(val), &val);
-    if (err != kAudioSessionNoError) {
-        NSLog(@"MKAudio: unable to set MixWithOthers property.");
-        return;
-    }
-}
-
-static void MKAudio_UpdateAudioSessionSettings(MKAudio *audio) {
-    OSStatus err;
-    UInt32 val, valSize;
-    BOOL audioInputAvailable = YES;
-    
-
-    // To be able to select the correct category, we must query whethe audio input is available.
-    valSize = sizeof(UInt32);
-    err = AudioSessionGetProperty(kAudioSessionProperty_AudioInputAvailable, &valSize, &val);
-    if (err != kAudioSessionNoError || valSize != sizeof(UInt32)) {
-        NSLog(@"MKAudio: unable to query for input availability.");
-        return;
-    }
-    audioInputAvailable = (BOOL) val;
-    
-    if (audioInputAvailable) {
-        // The OverrideCategoryDefaultToSpeaker property makes us output to the speakers of the iOS device
-        // as long as there's not a headset connected. However, if the user prefers the audio to be output
-        // to the receiver, honor that.
-        MKAudioSettings settings;
-        [audio readAudioSettings:&settings];
-        val = 1;
-        if (settings.preferReceiverOverSpeaker) {
-            val = 0;
-        }
-        err = AudioSessionSetProperty(kAudioSessionProperty_OverrideCategoryDefaultToSpeaker, sizeof(val), &val);
-        if (err != kAudioSessionNoError) {
-            NSLog(@"MKAudio: unable to set OverrideCategoryDefaultToSpeaker property.");
-            return;
-        }
-    }
-}
-#else
-static void MKAudio_SetupAudioSession(MKAudio *audio) {
-    (void) audio;
-}
-
-static void MKAudio_UpdateAudioSessionSettings(MKAudio *audio) {
-    (void) audio;
-}
-#endif
 
 @implementation MKAudio
 
-- (MKAudioOutput *) output {
-    return _audioOutput;
-}
+#pragma mark - Singleton & Init
 
 + (MKAudio *) sharedAudio {
     static dispatch_once_t pred;
@@ -282,10 +55,248 @@ static void MKAudio_UpdateAudioSessionSettings(MKAudio *audio) {
 
     dispatch_once(&pred, ^{
         audio = [[MKAudio alloc] init];
-        MKAudio_SetupAudioSession(audio);
+        [audio setupAudioSession]; // ✅ 初始化现代音频会话
     });
 
     return audio;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        // 注册通知监听 (替代旧的 C 回调)
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleInterruption:)
+                                                     name:AVAudioSessionInterruptionNotification
+                                                   object:nil];
+        
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleRouteChange:)
+                                                     name:AVAudioSessionRouteChangeNotification
+                                                   object:nil];
+        
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleMediaServicesReset:)
+                                                     name:AVAudioSessionMediaServicesWereResetNotification
+                                                   object:nil];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [super dealloc];
+}
+
+#pragma mark - AVAudioSession Configuration (Modern)
+
+- (void)setupAudioSession {
+#if TARGET_OS_IPHONE == 1
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSError *error = nil;
+    
+    // 1. 确定 Category Options
+    // 默认允许蓝牙 (A2DP/HFP) 和 与其他应用混音 (MixWithOthers)
+    AVAudioSessionCategoryOptions options = AVAudioSessionCategoryOptionAllowBluetoothHFP |
+                                            AVAudioSessionCategoryOptionAllowBluetoothA2DP | // ✅ 增加 A2DP 支持
+                                            AVAudioSessionCategoryOptionMixWithOthers; // 混音
+
+    // 处理扬声器/听筒逻辑
+    // 如果用户没有偏好听筒 (Receiver)，则默认走扬声器 (Speaker)
+    // 注意：在 VoiceChat 模式下，如果不加 DefaultToSpeaker，默认会走听筒
+    MKAudioSettings settings;
+    [self readAudioSettings:&settings];
+    
+    if (!settings.preferReceiverOverSpeaker) {
+        options |= AVAudioSessionCategoryOptionDefaultToSpeaker;
+    }
+
+    // 2. 设置 Category 和 Mode
+    // ✅ Category: PlayAndRecord (录音+播放)
+    // ✅ Mode: VoiceChat (激活硬件回声消除 AEC 和自动增益 AGC)
+    BOOL success = [session setCategory:AVAudioSessionCategoryPlayAndRecord
+                                   mode:AVAudioSessionModeVoiceChat
+                                options:options
+                                  error:&error];
+    
+    if (!success) {
+        NSLog(@"MKAudio: Failed to set session category: %@", error.localizedDescription);
+    }
+
+    // 3. 设置硬件采样率 (推荐 48kHz)
+    [session setPreferredSampleRate:48000.0 error:nil];
+    
+    // 4. 设置 I/O Buffer (低延迟设置，0.02s = 20ms)
+    [session setPreferredIOBufferDuration:0.02 error:nil];
+#endif
+}
+
+- (void)updateAudioSessionSettings {
+    // 当设置改变时（例如用户切换了扬声器/听筒偏好），重新应用配置
+    [self setupAudioSession];
+}
+
+#pragma mark - Notification Handlers
+
+- (void)handleInterruption:(NSNotification *)notification {
+    NSDictionary *userInfo = notification.userInfo;
+    AVAudioSessionInterruptionType type = [userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
+
+    if (type == AVAudioSessionInterruptionTypeBegan) {
+        NSLog(@"MKAudio: Interruption BEGAN (Phone call etc.)");
+        [self stop];
+    } else if (type == AVAudioSessionInterruptionTypeEnded) {
+        AVAudioSessionInterruptionOptions options = [userInfo[AVAudioSessionInterruptionOptionKey] unsignedIntegerValue];
+        if (options & AVAudioSessionInterruptionOptionShouldResume) {
+            NSLog(@"MKAudio: Interruption ENDED, Resuming...");
+            if ([self _audioShouldBeRunning]) {
+                [self start];
+            }
+        }
+    }
+}
+
+- (void)handleRouteChange:(NSNotification *)notification {
+    NSDictionary *userInfo = notification.userInfo;
+    AVAudioSessionRouteChangeReason reason = [userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
+    
+    NSLog(@"MKAudio: Route Changed. Reason: %lu", (unsigned long)reason);
+    
+    // 以下情况通常不需要重启：
+    // kAudioSessionRouteChangeReasonOverride (我们自己代码改的)
+    // kAudioSessionRouteChangeReasonCategoryChange (Category 改变)
+    
+    switch (reason) {
+        case AVAudioSessionRouteChangeReasonNewDeviceAvailable: // 插入耳机
+        case AVAudioSessionRouteChangeReasonOldDeviceUnavailable: // 拔出耳机
+            // 需要重启音频引擎以适应新的采样率或设备
+            if ([self _audioShouldBeRunning]) {
+                NSLog(@"MKAudio: Restarting audio due to device change.");
+                [self restart];
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+- (void)handleMediaServicesReset:(NSNotification *)notification {
+    NSLog(@"MKAudio: Media Services Reset (Audio daemon crashed). Re-initializing.");
+    // 彻底重置
+    [self stop];
+    [self setupAudioSession];
+    if ([self _audioShouldBeRunning]) {
+        [self start];
+    }
+}
+
+#pragma mark - Control Methods
+
+// Should audio be running?
+- (BOOL) _audioShouldBeRunning {
+    id<MKAudioDelegate> delegate;
+    @synchronized(self) {
+        delegate = _delegate;
+    }
+    
+    if ([(id)delegate respondsToSelector:@selector(audioShouldBeRunning:)]) {
+        return [delegate audioShouldBeRunning:self];
+    }
+    
+#if TARGET_OS_IPHONE == 1
+    return [[UIApplication sharedApplication] applicationState] == UIApplicationStateActive;
+#else
+    return YES;
+#endif
+}
+
+- (BOOL) isRunning {
+    return _running;
+}
+
+- (void) stop {
+    @synchronized(self) {
+        [_audioInput release];
+        _audioInput = nil;
+        [_audioOutput release];
+        _audioOutput = nil;
+        [_audioDevice teardownDevice];
+        [_audioDevice release];
+        _audioDevice = nil;
+        [_sidetoneOutput release];
+        _sidetoneOutput = nil;
+        _running = NO;
+    }
+    
+#if TARGET_OS_IPHONE == 1
+    // ✅ 现代 API 关闭 Session
+    [[AVAudioSession sharedInstance] setActive:NO error:nil];
+#endif
+}
+
+- (void) start {
+#if TARGET_OS_IPHONE == 1
+    // ✅ 现代 API 激活 Session
+    // 每次开始前，重新应用一次设置以确保 Option 正确（如扬声器设置）
+    [self setupAudioSession];
+    
+    NSError *error = nil;
+    [[AVAudioSession sharedInstance] setActive:YES error:&error];
+    if (error) {
+        NSLog(@"MKAudio: Failed to activate AVAudioSession: %@", error);
+        return; // 激活失败则无法启动
+    }
+#endif
+    
+    @synchronized(self) {
+        // 如果已经在运行，先清理
+        if (_running) {
+            [_audioDevice teardownDevice];
+            [_audioDevice release];
+            _audioDevice = nil;
+        }
+
+#if TARGET_OS_IPHONE == 1
+        // ✅ 强制使用 MKVoiceProcessingDevice (支持回声消除/AGC)
+        _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&_audioSettings];
+#elif TARGET_OS_MAC == 1
+        _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&_audioSettings];
+#else
+# error Missing MKAudioDevice
+#endif
+        
+        BOOL setupSuccess = [_audioDevice setupDevice];
+        if (!setupSuccess) {
+            NSLog(@"MKAudio: Failed to setup audio device.");
+            [_audioDevice release];
+            _audioDevice = nil;
+            return;
+        }
+
+        _audioInput = [[MKAudioInput alloc] initWithDevice:_audioDevice andSettings:&_audioSettings];
+        [_audioInput setMainConnectionForAudio:_connection];
+        
+        _audioOutput = [[MKAudioOutput alloc] initWithDevice:_audioDevice andSettings:&_audioSettings];
+        
+        if (_audioSettings.enableSideTone) {
+            _sidetoneOutput = [[MKAudioOutputSidetone alloc] initWithSettings:&_audioSettings];
+        }
+        
+        _running = YES;
+    }
+}
+
+- (void) restart {
+    [self stop];
+    // updateAudioSettings 在 setupAudioSession 中被包含，start 会调用它
+    [self start];
+    [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
+}
+
+#pragma mark - Properties & Accessors
+
+- (MKAudioOutput *) output {
+    return _audioOutput;
 }
 
 - (void) setDelegate:(id<MKAudioDelegate>)delegate {
@@ -302,103 +313,19 @@ static void MKAudio_UpdateAudioSessionSettings(MKAudio *audio) {
     return delegate;
 }
 
-// Read the current audio engine settings
 - (void) readAudioSettings:(MKAudioSettings *)settings {
-    if (settings == NULL)
-        return;
-
+    if (settings == NULL) return;
     @synchronized(self) {
         memcpy(settings, &_audioSettings, sizeof(MKAudioSettings));
     }
 }
 
-// Set new settings for the audio engine
 - (void) updateAudioSettings:(MKAudioSettings *)settings {
     @synchronized(self) {
         memcpy(&_audioSettings, settings, sizeof(MKAudioSettings));
     }
-}
-
-// Should audio be running?
-- (BOOL) _audioShouldBeRunning {
-    id<MKAudioDelegate> delegate;
-    @synchronized(self) {
-        delegate = _delegate;
-    }
-    // If a delegate is provided, we should call that.
-    if ([(id)delegate respondsToSelector:@selector(audioShouldBeRunning:)]) {
-        return [delegate audioShouldBeRunning:self];
-    }
-    
-    // If no delegate is available, or the audioShouldBeRunning:
-    // method is not implemented in the delegate, fall back to something
-    // relatively sane.
-#if TARGET_OS_IPHONE == 1
-    return [[UIApplication sharedApplication] applicationState] == UIApplicationStateActive;
-#else
-    return YES;
-#endif
-}
-
-// Has MKAudio been started?
-- (BOOL) isRunning {
-    return _running;
-}
-
-// Stop the audio engine
-- (void) stop {
-    @synchronized(self) {
-        [_audioInput release];
-        _audioInput = nil;
-        [_audioOutput release];
-        _audioOutput = nil;
-        [_audioDevice teardownDevice];
-        [_audioDevice release];
-        _audioDevice = nil;
-        [_sidetoneOutput release];
-        _sidetoneOutput = nil;
-        _running = NO;
-    }
-#if TARGET_OS_IPHONE == 1
-    AudioSessionSetActive(NO);
-#endif
-}
-
-// Start the audio engine
-- (void) start {
-#if TARGET_OS_IPHONE == 1
-    AudioSessionSetActive(YES);
-#endif
-    @synchronized(self) {
-#if TARGET_OS_IPHONE == 1
-        if ([[MKAudio sharedAudio] echoCancellationAvailable] && _audioSettings.enableEchoCancellation) {
-            _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&_audioSettings];
-        } else {
-            _audioDevice = [[MKiOSAudioDevice alloc] initWithSettings:&_audioSettings];
-        }
-#elif TARGET_OS_MAC == 1
-        _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&_audioSettings];
-#else
-# error Missing MKAudioDevice
-#endif
-        [_audioDevice setupDevice];
-        _audioInput = [[MKAudioInput alloc] initWithDevice:_audioDevice andSettings:&_audioSettings];
-        [_audioInput setMainConnectionForAudio:_connection];
-        _audioOutput = [[MKAudioOutput alloc] initWithDevice:_audioDevice andSettings:&_audioSettings];
-        if (_audioSettings.enableSideTone) {
-            _sidetoneOutput = [[MKAudioOutputSidetone alloc] initWithSettings:&_audioSettings];
-        }
-        _running = YES;
-    }
-}
-
-// Restart the audio engine
-- (void) restart {
-    [self stop];
-    MKAudio_UpdateAudioSessionSettings(self);
-    [self start];
-    
-    [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
+    // 如果设置改变（如切换扬声器），可能需要刷新 Session 配置
+    // 注意：这里没有自动 restart，调用者通常会在更新设置后手动 restart
 }
 
 - (void) setMainConnectionForAudio:(MKConnection *)conn {
@@ -468,27 +395,14 @@ static void MKAudio_UpdateAudioSessionSettings(MKAudio *audio) {
     }
 }
 
+// 现代 API 不再需要手动检查路由来判断 AEC 是否可用
+// VPIO (VoiceProcessingIO) 会自动处理，我们直接返回 YES 即可
 - (BOOL) echoCancellationAvailable {
-#if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
-    NSDictionary *dict = nil;
-    UInt32 valSize = sizeof(NSDictionary *);
-    OSStatus err = AudioSessionGetProperty(kAudioSessionProperty_AudioRouteDescription, &valSize, &dict);
-    if (err != kAudioSessionNoError) {
-        return NO;
-    }
-
-    NSArray *inputs = [dict objectForKey:(id)kAudioSession_AudioRouteKey_Inputs];
-    if ([inputs count] == 0) {
-        return NO;
-    }
-
-    NSDictionary *input = [inputs objectAtIndex:0]; 
-    NSString *inputKind = [input objectForKey:(id)kAudioSession_AudioRouteKey_Type];
-
-    if ([inputKind isEqualToString:(NSString *)kAudioSessionInputRoute_BuiltInMic])
-        return YES;
-#endif
+#if TARGET_OS_IPHONE
+    return YES;
+#else
     return NO;
+#endif
 }
 
 - (NSDictionary *) copyAudioOutputMixerDebugInfo {

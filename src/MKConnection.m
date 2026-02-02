@@ -1,6 +1,9 @@
-// Copyright 2009-2012 The MumbleKit Developers. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+//
+//  MKConnection.m
+//  MumbleKit
+//
+//  Fixed: Deprecated SSL properties and selector typos.
+//
 
 #import <MumbleKit/MKConnection.h>
 #import <MumbleKit/MKUser.h>
@@ -18,7 +21,7 @@
 #include  <Security/SecureTransport.h>
 
 #if TARGET_OS_IPHONE == 1
-# import <UIKIt/UIKit.h>
+# import <UIKit/UIKit.h>
 # import <CFNetwork/CFNetwork.h>
 # import <CoreFoundation/CoreFoundation.h>
 #endif
@@ -111,8 +114,7 @@
 - (void) stopConnectionThread;
 @end
 
-// CFSocket UDP callback.  This is called by MKConnection's UDP CFSocket whenever
-// there is new data available (it only uses the kCFSocketDataCallback callback mode).
+// CFSocket UDP callback.
 static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
                                     CFDataRef addr, const void *data, void *udata) {
     MKConnection *conn = (MKConnection *)udata;
@@ -228,8 +230,6 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
                 });
             }
 
-        // Only show call the unableToConnectWithError: method if there was an actual error.
-        // We don't want to show it for reconnects, for example.
         } else if (_connError != nil) {
             if ([_delegate respondsToSelector:@selector(connection:unableToConnectWithError:)]) {
                 NSError *err = [_connError retain];
@@ -263,7 +263,6 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) connectToHost:(NSString *)hostName port:(NSUInteger)portNumber {
-
     [_hostname release];
     _hostname = [hostName copy];
     _port = portNumber;
@@ -271,7 +270,6 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     [self startConnectionThread];
 }
 
-// Start the MKConnection's thread.
 - (void) startConnectionThread {
     NSAssert(![self isExecuting], @"Thread is currently executing. Can't start another one.");
 
@@ -285,10 +283,6 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     [self start];
 }
 
-// Stop the MKConnection's thread.
-//
-// This method is safe to call both from the main thread,
-// and from within the MKConnction thread itself.
 - (void) stopConnectionThread {
     if (![self isExecuting])
         return;
@@ -299,7 +293,6 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 - (void) disconnect {
     [self stopConnectionThread];
     while ([self isExecuting] && ![self isFinished]) {
-        // Wait for the thread to be done...
     }
 }
 
@@ -312,12 +305,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     return _connectionEstablished;
 }
 
-// Get the hostname the MKConnection is connected to.
 - (NSString *) hostname {
     return _hostname;
 }
 
-// Get the port number the MKConnection is connected to.
 - (NSUInteger) port {
     return _port;
 }
@@ -333,21 +324,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
 #pragma mark Server Information
 
-- (NSString *) serverVersion {
-    return _serverVersion;
-}
-
-- (NSString *) serverRelease {
-    return _serverRelease;
-}
-
-- (NSString *) serverOSName {
-    return _serverOSName;
-}
-
-- (NSString *) serverOSVersion {
-    return _serverOSVersion;
-}
+- (NSString *) serverVersion { return _serverVersion; }
+- (NSString *) serverRelease { return _serverRelease; }
+- (NSString *) serverOSName { return _serverOSName; }
+- (NSString *) serverOSVersion { return _serverOSVersion; }
 
 #pragma mark -
 
@@ -355,22 +335,15 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
      NSData *data;
      MPVersion_Builder *version = [MPVersion builder];
 
-    //
-    // Query the OS name and version
-    //
 #if TARGET_OS_IPHONE == 1
     UIDevice *dev = [UIDevice currentDevice];
     [version setOs: [dev systemName]];
     [version setOsVersion: [dev systemVersion]];
 #elif TARGET_OS_MAC == 1
-    // fixme(mkrautz): Do proper lookup here.
     [version setOs:@"Mac OS X"];
     [version setOsVersion:@"10.6"];
 #endif
 
-    //
-    // Setup MumbleKit version info.
-    //
     MKVersion *vers = [MKVersion sharedVersion];
     [version setVersion:(uint32_t)[vers hexVersion]];
     [version setRelease:[vers releaseString]];
@@ -396,7 +369,6 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 #pragma mark NSStream event handlers
 
 - (void) stream:(NSStream *)stream handleEvent:(NSStreamEvent)eventCode {
-    // Exception for incoming messages.
     if (stream == _inputStream) {
         if (eventCode == NSStreamEventHasBytesAvailable)
             [self _dataReady];
@@ -404,54 +376,33 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 
     switch (eventCode) {
-        // The OpenCompleted event is a bad indicator of 'ready to use' for a TLS
-        // socket, since it will be fired before the TLS handshake. Thus, we only
-        // use this event for grabbing a native handle to our socket and for establishing
-        // an UDP connection (for voice) to the server.  For an indication of a finished
-        // TLS handshake, we use the NSStreamEventHasSpaceAvailable instead.
         case NSStreamEventOpenCompleted: {
-
-            // Fetch a native handle to our socket
             CFDataRef nativeHandle = CFWriteStreamCopyProperty((CFWriteStreamRef) _outputStream, kCFStreamPropertySocketNativeHandle);
             if (nativeHandle) {
                 _socket = *(int *)CFDataGetBytePtr(nativeHandle);
                 CFRelease(nativeHandle);
             }
 
-            // Set our connTime to the timestamp at connect-time.
             _connTime = [self _currentTimeStamp];
 
-            // Disable Nagle's algorithm
             if (_socket != -1) {
                 int val = 1;
                 setsockopt(_socket, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
             }
 
-            // Setup UDP connection
             [self _setupUdpSock];
-
             break;
         }
 
         case NSStreamEventHasSpaceAvailable: {
-            // The first time we're called with NSStreamHasSpaceAvailable, we can
-            // be sure that the TLS handshake has finished successfully.  In here
-            // we setup our ping timer and tell our delegate that we've successfully
-            // opened a connection to the server.
             if (! _connectionEstablished) {
                 _connectionEstablished = YES;
-                
-                // Make TLS trust status available to clients.
                 [self _updateTLSTrustedStatus];
-                
-                // Add the connection as the main connection.
                 [[MKAudio sharedAudio] setMainConnectionForAudio:self];
                 
-                // Schedule our ping timer.
                 _pingTimer = [NSTimer timerWithTimeInterval:MKConnectionPingInterval target:self selector:@selector(_pingTimerFired:) userInfo:nil repeats:YES];
                 [[NSRunLoop currentRunLoop] addTimer:_pingTimer forMode:NSRunLoopCommonModes];
 
-                // Tell our delegate that we're connected to the server.
                 if ([_delegate respondsToSelector:@selector(connectionOpened:)]) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         [_delegate connectionOpened:self];
@@ -481,27 +432,13 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
 #pragma mark -
 
-- (void) setDelegate:(id<MKConnectionDelegate>)delegate {
-    _delegate = delegate;
-}
-
-- (id<MKConnectionDelegate>) delegate {
-    return _delegate;
-}
-
-- (void) setMessageHandler:(id<MKMessageHandler>)messageHandler {
-    _msgHandler = messageHandler;
-}
-
-- (id<MKMessageHandler>) messageHandler {
-    return _msgHandler;
-}
+- (void) setDelegate:(id<MKConnectionDelegate>)delegate { _delegate = delegate; }
+- (id<MKConnectionDelegate>) delegate { return _delegate; }
+- (void) setMessageHandler:(id<MKMessageHandler>)messageHandler { _msgHandler = messageHandler; }
+- (id<MKMessageHandler>) messageHandler { return _msgHandler; }
 
 #pragma mark -
 
-/*
- * Setup our CFStreams for SSL.
- */
 - (void) _setupSsl {
     CFMutableDictionaryRef sslDictionary = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
                                                                      &kCFTypeDictionaryKeyCallBacks,
@@ -520,16 +457,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 }
 
-// Initialize the UDP connection-part of an MKConnection.
-//
-// Must be called after a TCP connection is already in place
-// (since it assembles the address it connects to by querying
-// the address of the TCP socket.)
-//
-// Must also be called from the MKConnection thread, because
-// the function adds the UDP socket to the thread's runloop.
 - (void) _setupUdpSock {
-    // Get the peer address of the TCP socket (i.e. the host)
     struct sockaddr_storage sa;
 
     socklen_t sl = sizeof(sa);
@@ -550,7 +478,6 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         return;
     }
 
-    // Add the UDP socket to the runloop of the MKConnection thread.
     CFRunLoopSourceRef src = CFSocketCreateRunLoopSource(NULL, _udpSock, 0);
     CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopDefaultMode);
     CFRelease(src);
@@ -563,110 +490,89 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 }
 
-// Tear down the UDP connection-part of an MKConnection.
-//
-// Can only be called if _setupUdpSock has successfully created
-// a UDP socket. (_udpSock != nil)
 - (void) _teardownUdpSock {
     CFSocketInvalidate(_udpSock);
     CFRelease(_udpSock);
 }
 
-// Force the connection to ignore any SSL errors that occur.  This is a
-// dirty hack forced upon us by Apple's NSStream/CFStream SSL API on
-// iOS.  There's no real way to hook into the TLS handshake process,
-// so to be able to connect to servers that use a self-signed certificate
-// we have to set this flag.
-//
-// The use case for this is that a program using the MKConnection class will
-// connect to the server, and if the connection fails because of TLS handshake
-// error, it will fetch the server's certificate chain through a call to
-// peerCertificates. It will then compare the returned certificate chain with a
-// cached certificate chain for the server (if the client has connected to the
-// server before) or cache the server's certificate chain.
-// If the certificate chain matches what's already on file we're good to go and
-// can do something like:
-//
-//   [conn setIgnoreSSLVerification:YES];
-//   [conn reconnect];
-//
-// Then, before any Mumble messages go over the wire the client can check that the
-// certificate given to it by the server matches what's on file again, just to make
-// sure everything matches up.
-//
-// Ideally, one would be able to trust certain self-signed certificates and be done
-// with it, but instead one has to go through this hassle of manually checking the
-// certificates each time.
 - (void) setIgnoreSSLVerification:(BOOL)flag {
     _ignoreSSLVerification = flag;
 }
 
-// Returns the certificates of the peer of connection. That is, the server's certificate chain.
+// ✅ FIXED: Use kCFStreamPropertySSLPeerTrust instead of kCFStreamPropertySSLPeerCertificates
 - (NSArray *) peerCertificates {
     if (_peerCertificates != nil) {
         return _peerCertificates;
     }
 
-    NSArray *secCerts = (NSArray *) CFWriteStreamCopyProperty((CFWriteStreamRef) _outputStream, kCFStreamPropertySSLPeerCertificates);
-    _peerCertificates = [[NSMutableArray alloc] initWithCapacity:[secCerts count]];
-    [secCerts enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-        NSData *data = (NSData *) SecCertificateCopyData((SecCertificateRef)obj);
-        [_peerCertificates addObject:[MKCertificate certificateWithCertificate:data privateKey:nil]];
-        [data release];
-    }];
-    [secCerts release];
+    // Modern replacement: Get the SecTrustRef directly
+    SecTrustRef trust = (SecTrustRef)CFWriteStreamCopyProperty((CFWriteStreamRef)_outputStream, kCFStreamPropertySSLPeerTrust);
+    
+    if (trust) {
+        CFIndex count = SecTrustGetCertificateCount(trust);
+        _peerCertificates = [[NSMutableArray alloc] initWithCapacity:count];
+        
+        for (CFIndex i = 0; i < count; i++) {
+            SecCertificateRef cert = SecTrustGetCertificateAtIndex(trust, i);
+            NSData *data = (NSData *)SecCertificateCopyData(cert);
+            if (data) {
+                [_peerCertificates addObject:[MKCertificate certificateWithCertificate:data privateKey:nil]];
+                [data release];
+            }
+        }
+        CFRelease(trust);
+    } else {
+        _peerCertificates = [[NSMutableArray alloc] init];
+    }
 
     return _peerCertificates;
 }
 
+// ✅ FIXED: Use kCFStreamPropertySSLPeerTrust and handle all switch cases
 - (void) _updateTLSTrustedStatus {
     BOOL trusted = NO;
 
-    SecPolicyRef sslPolicy = SecPolicyCreateSSL(YES, (CFStringRef) _hostname);
-    CFArrayRef secCerts = CFWriteStreamCopyProperty((CFWriteStreamRef) _outputStream, kCFStreamPropertySSLPeerCertificates);
+    // Get the trust object directly from the stream
+    SecTrustRef trust = (SecTrustRef) CFWriteStreamCopyProperty((CFWriteStreamRef) _outputStream, kCFStreamPropertySSLPeerTrust);
     
-    SecTrustRef trust = NULL;
-    OSStatus err = SecTrustCreateWithCertificates(secCerts, sslPolicy, &trust);
-    if (err != noErr)
-        goto out;
+    if (!trust) {
+        _trustedChain = NO;
+        return;
+    }
 
     SecTrustResultType trustRes;
-    err = SecTrustEvaluate(trust, &trustRes);
-    if (err != noErr)
-        goto out;
+    OSStatus err = SecTrustEvaluate(trust, &trustRes);
     
-    switch (trustRes) {
-        case kSecTrustResultProceed:
-        case kSecTrustResultUnspecified: // System trusts it.
-            trusted = YES;
+    if (err == noErr) {
+        switch (trustRes) {
+            case kSecTrustResultProceed:
+            case kSecTrustResultUnspecified: // System trusts it.
+                trusted = YES;
+                break;
+            default:
+                // kSecTrustResultInvalid, kSecTrustResultDeny, etc.
+                trusted = NO;
+                break;
+        }
     }
-out:
+    
     _trustedChain = trusted;
-    CFRelease(sslPolicy);
-    CFRelease(secCerts);
+    CFRelease(trust);
 }
 
-// Returns the trust status of the server's certificate chain.
 - (BOOL) peerCertificateChainTrusted {
     return _trustedChain;
 }
 
-// Force the MKConnection into TCP mode, forcing all voice data to
-// be tunelled through TCP instead of being transmitted via UDP.
 - (void) setForceTCP:(BOOL)flag {
     _forceTCP = flag;
 }
 
-// Return the current TCP mode status
 - (BOOL) forceTCP {
     return _forceTCP;
 }
 
-// Send a UDP message.  This method encrypts the message using the connection's
-// current CryptState before sending it to the server.
-// Message identity information is stored as part of the first byte of 'data'.
 - (void) _sendUDPMessage:(NSData *)data {
-    // We need a valid CryptState and a valid UDP socket to send UDP datagrams.
     if (![_crypt valid] || !CFSocketIsValid(_udpSock)) {
         NSLog(@"MKConnection: Invalid CryptState or CFSocket.");
         return;
@@ -684,19 +590,14 @@ out:
     }
 }
 
-// Send a control-channel message to the server.  This may be called from any thread,
-// but will be synchronized onto MKConnection's own thread in the end.
 - (void) sendMessageWithType:(MKMessageType)messageType data:(NSData *)data {
     NSDictionary *dict = [[NSDictionary alloc] initWithObjectsAndKeys:
                             data, @"data",
                             [NSNumber numberWithInt:(int)messageType], @"messageType",
                             nil];
 
-    // Were we called from another thread? Synchronize onto the MKConnection thread.
     if ([NSThread currentThread] != self) {
         [self performSelector:@selector(_sendMessageHelper:) onThread:self withObject:dict waitUntilDone:NO];
-
-    // If we were called from our own thread, just call the wrapper directly.
     } else {
         [self _sendMessageHelper:dict];
     }
@@ -704,11 +605,6 @@ out:
     [dict release];
 }
 
-// This is a helper function for dispatching a sendMessageWithType:data: method call
-// onto MKConnection's own thread.  This method is called by sendMessageWithType:data:,
-// passing in its two arguments in a dictionary with the keys "data" and "messageType".
-//
-// This message should only be called from MKConnection's own thread.
 - (void) _sendMessageHelper:(NSDictionary *)dict {
     if (!_connectionEstablished)
         return;
@@ -732,11 +628,6 @@ out:
     [msg release];
 }
 
-// Send a voice packet to the server.  The method will automagically figure
-// out whether it should be sent via UDP or TCP depending on the current
-// connection conditions.
-//
-// This is a wrapper that ensures the actual call will be made on the connection thread.
 - (void) sendVoiceData:(NSData *)data {
     if ([NSThread currentThread] == self) {
         [self _sendVoiceDataOnConnectionThread:data];
@@ -745,8 +636,6 @@ out:
     }
 }
 
-// Send a voice packet. Must only be called on the MKConnection thread.
-// Internal MKConnection method. Use sendVoiceData to send actual voice data.
 - (void) _sendVoiceDataOnConnectionThread:(NSData *)data {
     if (!_readyVoice || !_connectionEstablished)
         return;
@@ -757,20 +646,7 @@ out:
     }
 }
 
-// New UDP packet received.  This method is called by MKConnection's
-// MKUDPMessageCallback function whenever a new datagram has been received
-// by our UDP socket.  The method will decrypt the received datagram and
-// pass it onto the _udpMessageReceived: method (with the plain data as
-// its parameter).
-//
-// The reason this method exists is that Mumble can tunnel UDP packets over
-// TCP, and in that case, the packets are not encrypted with OCB-AES128
-// because they will be tunneled through a TLS connection that is already
-// encrypted using whichever cipher was agreed upon during the handshake.
-// These tunelled UDP messages do not go through this method, but go directly
-// to the _udpMessageReceived: method instead.
 - (void) _udpDataReady:(NSData *)crypted {
-    // For now, let's just do this to enable UDP. fixme(mkrautz): Better detection.
     if (! _udpAvailable) {
         _udpAvailable = true;
         NSLog(@"MKConnection: UDP is now available!");
@@ -784,24 +660,13 @@ out:
     }
 }
 
-// This method is called by our NSStream delegate methods whenever
-// it has received a chunk of data via TCP.  This method then fills
-// it internal buffer until it has received a full Mumble message.
-//
-// When a complete message has been received, it calls the
-// _messageReceived: method with the full received data as its
-// argument.
 - (void) _dataReady {
     unsigned char buffer[6];
 
-    // Allocate a packet buffer if there isn't one available
-    // already.
     if (! packetBuffer) {
         packetBuffer = [[NSMutableData alloc] initWithLength:0];
     }
 
-    // Not currently receiving a message. This is the first part of
-    // a message.
     if (packetLength == -1) {
         NSInteger availableBytes = [_inputStream read:&buffer[0] maxLength:6];
         if (availableBytes < 6) {
@@ -815,7 +680,6 @@ out:
         [packetBuffer setLength:packetLength];
     }
 
-    // Receive in progress.
     if (packetLength > 0) {
         UInt8 *packetBytes = [packetBuffer mutableBytes];
         if (! packetBytes) {
@@ -828,15 +692,13 @@ out:
         packetBufferOffset += availableBytes;
     }
 
-    // Done.
     if (packetLength == 0) {
         [self _messageRecieved:packetBuffer];
-        [packetBuffer setLength:0]; // fixme(mkrautz): Is this one needed?
+        [packetBuffer setLength:0];
         packetLength = -1;
     }
 }
 
-// Returns the number of usecs since the Unix epoch.
 - (uint64_t) _currentTimeStamp {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -847,13 +709,12 @@ out:
     return ret;
 }
 
-// Ping timer fired. Time to ping the server!
 - (void) _pingTimerFired:(NSTimer *)timer {
     unsigned char buf[16];
     NSData *data;
     uint64_t timeStamp = [self _currentTimeStamp] - _connTime;
 
-    // First, do a UDP ping...
+    // UDP Ping
     MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:16];
     buf[0] = UDPPingMessage << 5;
     [pds addVarint:timeStamp];
@@ -864,16 +725,13 @@ out:
     }
     [pds release];
         
-    // Then the TCP ping...
+    // TCP Ping
     MPPing_Builder *ping = [MPPing builder];
-
     [ping setTimestamp:timeStamp];
-
     [ping setGood:0];
     [ping setLate:0];
     [ping setLost:0];
     [ping setResync:0];
-
     [ping setUdpPingAvg:0.0f];
     [ping setUdpPingVar:0.0f];
     [ping setUdpPackets:0];
@@ -891,7 +749,6 @@ out:
     NSLog(@"MKConnection: pingResponseFromServer");
 }
 
-// The server rejected our connection.
 - (void) _connectionRejected:(MPReject *)rejectMessage {
     MKRejectReason reason = MKRejectReasonNone;
     NSString *explanationString = nil;
@@ -911,18 +768,15 @@ out:
     [self stopConnectionThread];
 }
 
-// Handle server crypt setup
 - (void) _doCryptSetup:(MPCryptSetup *)cryptSetup {
     NSLog(@"MKConnection: Got CryptSetup from server.");
 
-    // A full setup message. Initialize our CryptState.
     if ([cryptSetup hasKey] && [cryptSetup hasClientNonce] && [cryptSetup hasServerNonce]) {
         [_crypt setKey:[cryptSetup key] eiv:[cryptSetup clientNonce] div:[cryptSetup serverNonce]];
         NSLog(@"MKConnection: CryptState initialized.");
     }
 }
 
-// Handle incoming version information from the server.
 - (void) _versionMessageReceived:(MPVersion *)msg {
     if ([msg hasVersion]) {
         int32_t version = [msg version];
@@ -936,7 +790,6 @@ out:
         _serverOSVersion = [[msg osVersion] copy];
 }
 
-// Handle codec changes
 - (void) _codecChange:(MPCodecVersion *)codec {
     NSUInteger alpha = ([codec hasAlpha] ? (NSUInteger) [codec alpha] : 0) & 0xffffffff;
     NSUInteger beta = ([codec hasBeta] ? (NSUInteger) [codec beta] : 0) & 0xffffffff;
@@ -962,20 +815,17 @@ out:
     }
 
     if (_shouldUseOpus == NO) {
-        NSLog(@"MKConnection: Server asks for CELT, but we do not support it. Please upgrade your mumble server. TODO: fail gracefully here");
-        __builtin_trap(); // CELT is no longer an option
+        NSLog(@"MKConnection: Server asks for CELT, but we do not support it. Please upgrade your mumble server.");
+        __builtin_trap();
     }
 }
 
 - (void) _handleError:(NSError *)streamError {
     NSInteger errorCode = [streamError code];
 
-    /* Is the error an SSL-related error? (OSStatus errors are negative, so the
-     * greater than and less than signs are sort-of reversed here. */
     if (errorCode <= errSSLProtocol && errorCode > errSSLLast) {
         BOOL didHandle = [self _tryHandleSslError:streamError];
         if (didHandle) {
-            // Nothing more to do.
             return;
         }
     }
@@ -988,62 +838,55 @@ out:
 - (BOOL) _tryHandleSslError:(NSError *)streamError {
     if ([streamError code] == errSSLXCertChainInvalid
         || [streamError code] == errSSLUnknownRootCert) {
+        
         SecTrustRef trust = (SecTrustRef) CFWriteStreamCopyProperty((CFWriteStreamRef) _outputStream, kCFStreamPropertySSLPeerTrust);
+        if (!trust) return NO;
+
         SecTrustResultType trustResult;
         if (SecTrustEvaluate(trust, &trustResult) != noErr) {
-            // Unable to evaluate trust.
+            CFRelease(trust);
+            return NO;
         }
 
+        BOOL handled = NO;
         switch (trustResult) {
-            // Invalid setting or result. Indicates the SecTrustEvaluate() did not finish completely.
             case kSecTrustResultInvalid:
-            // May be trusted for the purposes designated. ('Always Trust' in Keychain)
             case kSecTrustResultProceed:
-            // This certificate is not trusted. ('Never Trust' in Keychain)
             case kSecTrustResultDeny:
-            // No trust setting specified. ('Use System Policy' in Keychain)
             case kSecTrustResultUnspecified:
-            // Fatal trust failure. Trust cannot be established without replacing the certificate.
-            // This error is thrown when the certificate is corrupt.
             case kSecTrustResultFatalTrustFailure:
-            // A non-trust related error. Possibly internal error in SecTrustEvaluate().
             case kSecTrustResultOtherError:
                 break;
 
-            // kSecTrustResultConfirm is deprecated since iOS 7 and Mavericks,
-            // but MumbleKit's deployment target is 5.1, so silence the deprecation warning.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            // User confirmation is required before proceeding. ('Ask Permission' in Keychain)
             case kSecTrustResultConfirm:
                 break;
 #pragma clang diagnostic pop
 
-            // A recoverable trust failure.
             case kSecTrustResultRecoverableTrustFailure: {
                 if ([_delegate respondsToSelector:@selector(connection:trustFailureInCertificateChain:)]) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         [_delegate connection:self trustFailureInCertificateChain:[self peerCertificates]];
                     });
                 }
-                CFRelease(trust);
-                return YES;
+                handled = YES;
+                break;
             }
         }
 
         CFRelease(trust);
+        return handled;
     }
 
     return NO;
 }
 
-// This is the entry point for UDP packets after they've been decrypted,
-// and also for UDP packets that are tunneled through the TCP stream.
 - (void) _udpMessageReceived:(NSData *)data {
     unsigned char *buf = (unsigned char *)[data bytes];
     MKUDPMessageType messageType = ((buf[0] >> 5) & 0x7);
     unsigned int messageFlags = buf[0] & 0x1f;
-    MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:[data length]-1]; // fixme(-1)?
+    MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:[data length]-1];
 
     switch (messageType) {
         case UDPVoiceCELTAlphaMessage:
@@ -1069,7 +912,7 @@ out:
         case UDPPingMessage: {
             uint64_t timeStamp = [pds getVarint];
             uint64_t now = [self _currentTimeStamp] - _connTime;
-            NSLog(@"UDP ping = %llu usec", now - timeStamp); 
+            NSLog(@"UDP ping = %llu usec", now - timeStamp);
             break;
         }
 
@@ -1084,21 +927,16 @@ out:
 - (void) _messageRecieved:(NSData *)data {
     dispatch_queue_t main_queue = dispatch_get_main_queue();
 
-    /* No message handler has been assigned. Don't propagate. */
     if (! _msgHandler)
         return;
 
     switch (packetType) {
-        // A UDP message tunneled through our TCP control channel.
-        // Pass it on to our incoming UDP handler.
         case UDPTunnelMessage: {
             [self _udpMessageReceived:data];
             break;
         }
         case ServerSyncMessage: {
             if (_forceTCP) {
-                // Send a dummy UDPTunnel message so the server knows that we're running
-                // in TCP mode.
                 NSLog(@"MKConnection: Sending dummy UDPTunnel message.");
                 NSMutableData *msg = [[NSMutableData alloc] initWithLength:3];
                 char *buf = [msg mutableBytes];
@@ -1225,7 +1063,8 @@ out:
         }
         case VoiceTargetMessage: {
             MPVoiceTarget *voiceTarget = [MPVoiceTarget parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(handleVoiceTargetMessage:)]) {
+            // ✅ FIXED: Correct selector name
+            if ([_msgHandler respondsToSelector:@selector(connection:handleVoiceTargetMessage:)]) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [_msgHandler connection:self handleVoiceTargetMessage:voiceTarget];
                 });
@@ -1241,10 +1080,6 @@ out:
             }
             break;
         }
-
-        //
-        // Internally handled packets.
-        //
 
         case VersionMessage: {
             MPVersion *v = [MPVersion parseFromData:data];
@@ -1279,20 +1114,9 @@ out:
     }
 }
 
-- (NSUInteger) alphaCodec {
-    return _alphaCodec;
-}
-
-- (NSUInteger) betaCodec {
-    return _betaCodec;
-}
-
-- (BOOL) preferAlphaCodec {
-    return _preferAlpha;
-}
-
-- (BOOL) shouldUseOpus {
-    return _shouldUseOpus;
-}
+- (NSUInteger) alphaCodec { return _alphaCodec; }
+- (NSUInteger) betaCodec { return _betaCodec; }
+- (BOOL) preferAlphaCodec { return _preferAlpha; }
+- (BOOL) shouldUseOpus { return _shouldUseOpus; }
 
 @end

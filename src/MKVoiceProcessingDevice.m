@@ -40,7 +40,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     OSStatus err;
         
     if (! dev->_buflist.mBuffers->mData) {
-        NSLog(@"MKVoiceProcessingDevice: No buffer allocated.");
+        NSLog(@"MKVoiceProcessingDevice: No buffer allocated. Allocating for %d frames.", (int)nframes);
         dev->_buflist.mNumberBuffers = 1;
         AudioBuffer *b = dev->_buflist.mBuffers;
         b->mNumberChannels = dev->_numMicChannels;
@@ -49,7 +49,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     }
     
     if (dev->_buflist.mBuffers->mDataByteSize < (dev->_micSampleSize * nframes)) {
-        NSLog(@"MKVoiceProcessingDevice: Buffer too small. Allocating more space.");
+        NSLog(@"MKVoiceProcessingDevice: Buffer too small. Allocating more space for %d frames.", (int)nframes);
         AudioBuffer *b = dev->_buflist.mBuffers;
         free(b->mData);
         b->mDataByteSize = dev->_micSampleSize * nframes;
@@ -64,7 +64,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     UInt32 dataByteSize = dev->_buflist.mBuffers->mDataByteSize;
     err = AudioUnitRender(dev->_audioUnit, flags, ts, busnum, nframes, &dev->_buflist);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: AudioUnitRender failed. err = %li", (long int)err);
+        NSLog(@"MKVoiceProcessingDevice: AudioUnitRender failed. err = %d", (int)err);
         return err;
     }
     dev->_buflist.mBuffers->mDataByteSize = dataByteSize;
@@ -143,21 +143,21 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     err = AudioComponentInstanceNew(comp, (AudioComponentInstance *) &_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to instantiate new AudioUnit.");
+        NSLog(@"MKVoiceProcessingDevice: Unable to instantiate new AudioUnit. err=%d", (int)err);
         return NO;
     }
     
     val = 1;
     err = AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &val, sizeof(UInt32));
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to configure input scope on AudioUnit.");
+        NSLog(@"MKVoiceProcessingDevice: Unable to configure input scope. err=%d", (int)err);
         return NO;
     }
     
     val = 1;
     err = AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &val, sizeof(UInt32));
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to configure output scope on AudioUnit.");
+        NSLog(@"MKVoiceProcessingDevice: Unable to configure output scope. err=%d", (int)err);
         return NO;
     }
     
@@ -167,7 +167,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AURenderCallbackStruct);
     err = AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, &cb, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to setup callback.");
+        NSLog(@"MKVoiceProcessingDevice: Unable to setup input callback. err=%d", (int)err);
         return NO;
     }
     
@@ -176,14 +176,14 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AURenderCallbackStruct);
     err = AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Global, 0, &cb, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Could not set render callback.");
+        NSLog(@"MKVoiceProcessingDevice: Could not set render callback. err=%d", (int)err);
         return NO;
     }
     
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitGetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &fmt, &len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to query device for stream info.");
+        NSLog(@"MKVoiceProcessingDevice: Unable to query device for stream info. err=%d", (int)err);
         return NO;
     }
     
@@ -222,35 +222,32 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(UInt32);
     err = AudioUnitSetProperty(_audioUnit, kAUVoiceIOProperty_BypassVoiceProcessing, kAudioUnitScope_Global, 0, &val, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to disable VPIO voice processing.");
-        return NO;
+        NSLog(@"MKVoiceProcessingDevice: Unable to ENABLE voice processing (Bypass failed). err=%d", (int)err);
     }
         
-    val = 0;
+    val = 1;
     len = sizeof(UInt32);
     err = AudioUnitSetProperty(_audioUnit, kAUVoiceIOProperty_VoiceProcessingEnableAGC, kAudioUnitScope_Global, 0, &val, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to disable VPIO AGC.");
-        return NO;
+        NSLog(@"MKVoiceProcessingDevice: Unable to ENABLE VPIO AGC. err=%d", (int)err);
     }
     
     val = 0;
     len = sizeof(UInt32);
     err = AudioUnitSetProperty(_audioUnit, kAUVoiceIOProperty_MuteOutput, kAudioUnitScope_Global, 0, &val, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: unable to unmute output.");
-        return NO;
+        NSLog(@"MKVoiceProcessingDevice: unable to unmute output. err=%d", (int)err);
     }
     
     err = AudioUnitInitialize(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to initialize AudioUnit.");
+        NSLog(@"MKVoiceProcessingDevice: Unable to initialize AudioUnit. err=%d", (int)err);
         return NO;
     }
     
     err = AudioOutputUnitStart(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to start AudioUnit.");
+        NSLog(@"MKVoiceProcessingDevice: Unable to start AudioUnit. err=%d", (int)err);
         return NO;
     }
     
@@ -262,13 +259,13 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     err = AudioOutputUnitStop(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: unable to stop AudioUnit.");
+        NSLog(@"MKVoiceProcessingDevice: unable to stop AudioUnit. err=%d", (int)err);
         return NO;
     }
     
     err = AudioComponentInstanceDispose(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: unable to dispose of AudioUnit.");
+        NSLog(@"MKVoiceProcessingDevice: unable to dispose of AudioUnit. err=%d", (int)err);
         return NO;
     }
     

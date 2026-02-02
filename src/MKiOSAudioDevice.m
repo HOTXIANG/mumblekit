@@ -30,7 +30,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     OSStatus err;
     
     if (! dev->_buflist.mBuffers->mData) {
-        NSLog(@"MKiOSAudioDevice: No buffer allocated.");
+        NSLog(@"MKiOSAudioDevice: No buffer allocated. Allocating for %d frames.", (int)nframes);
         dev->_buflist.mNumberBuffers = 1;
         AudioBuffer *b = dev->_buflist.mBuffers;
         b->mNumberChannels = dev->_numMicChannels;
@@ -55,7 +55,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     err = AudioUnitRender(dev->_audioUnit, flags, ts, busnum, nframes, &dev->_buflist);
     if (err != noErr) {
 #ifndef TARGET_IPHONE_SIMULATOR
-        NSLog(@"MKiOSAudioDevice: AudioUnitRender failed. err = %ld", err);
+        NSLog(@"MKiOSAudioDevice: AudioUnitRender failed. err = %d", (int)err);
 #endif
         return err;
     }

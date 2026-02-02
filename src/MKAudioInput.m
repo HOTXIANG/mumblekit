@@ -291,12 +291,14 @@
 
     iArg = 1;
     speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_VAD, &iArg);
+    
+    iArg = 0;
     speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_AGC, &iArg);
     speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_DENOISE, &iArg);
     speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_DEREVERB, &iArg);
 
-    iArg = 30000;
-    speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_AGC_TARGET, &iArg);
+    /*iArg = 30000;
+    speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_AGC_TARGET, &iArg);*/
 
     //float v = 30000.0f / (float) 0.0f; // iMinLoudness
     //iArg = iroundf(floorf(20.0f * log10f(v)));
@@ -400,11 +402,23 @@
         isSpeech = speex_preprocess_run(_preprocessorState, frame);
     } else {
         int i;
+        float gain = 1.0f + _settings.micBoost; // 获取增益系数
+        
         for (i = 0; i < frameSize; i++) {
-            float val = (frame[i] / 32767.0f) * (1.0f + _settings.micBoost);
-            if (val > 1.0f)
-                val = 1.0f;
-            frame[i] = val * 32767.0f;
+            // 1. 转为浮点数计算，防止中间计算溢出
+            // 32767.0f 是 Short 的最大值
+            float val = frame[i] * gain;
+            
+            // 2. ✅ Hard Clipping (硬限幅) 防止溢出
+            // 如果超过 32767，就卡在 32767，绝不让它变成负数
+            if (val > 32767.0f) {
+                val = 32767.0f;
+            } else if (val < -32768.0f) {
+                val = -32768.0f;
+            }
+            
+            // 3. 转回 Short
+            frame[i] = (short)val;
         }
     }
     
