@@ -146,13 +146,18 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
         NSLog(@"MKAudio: Interruption BEGAN (Phone call etc.)");
         [self stop];
     } else if (type == AVAudioSessionInterruptionTypeEnded) {
-        AVAudioSessionInterruptionOptions options = [userInfo[AVAudioSessionInterruptionOptionKey] unsignedIntegerValue];
-        if (options & AVAudioSessionInterruptionOptionShouldResume) {
-            NSLog(@"MKAudio: Interruption ENDED, Resuming...");
-            if ([self _audioShouldBeRunning]) {
-                [self start];
+        NSLog(@"MKAudio: Interruption ENDED. Restarting audio engine...");
+        // 不再依赖 ShouldResume 标志位。电话挂断后该标志经常不被设置，
+        // 导致音频引擎永远无法恢复。只要中断结束且连接仍然活跃，就无条件重启。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self setupAudioSession];
+            NSError *error = nil;
+            [[AVAudioSession sharedInstance] setActive:YES withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&error];
+            if (error) {
+                NSLog(@"MKAudio: Failed to reactivate session after interruption: %@", error);
             }
-        }
+            [self restart];
+        });
     }
 }
 
@@ -169,8 +174,8 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
     switch (reason) {
         case AVAudioSessionRouteChangeReasonNewDeviceAvailable: // 插入耳机
         case AVAudioSessionRouteChangeReasonOldDeviceUnavailable: // 拔出耳机
-            // 需要重启音频引擎以适应新的采样率或设备
-            if ([self _audioShouldBeRunning]) {
+            // 只有音频引擎已经在运行时才重启，避免在未连接服务器时激活麦克风
+            if (_running) {
                 NSLog(@"MKAudio: Restarting audio due to device change.");
                 [self restart];
             }
