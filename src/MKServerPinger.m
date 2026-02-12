@@ -138,13 +138,29 @@
 }
 
 - (void) teardownPingerState {
-    dispatch_release(_reader4);
-    dispatch_release(_reader6);
-    dispatch_release(_timer);
-    if (_sock4 > 0)
+    if (_reader4) {
+        dispatch_source_cancel(_reader4);
+        dispatch_release(_reader4);
+        _reader4 = NULL;
+    }
+    if (_reader6) {
+        dispatch_source_cancel(_reader6);
+        dispatch_release(_reader6);
+        _reader6 = NULL;
+    }
+    if (_timer) {
+        dispatch_source_cancel(_timer);
+        dispatch_release(_timer);
+        _timer = NULL;
+    }
+    if (_sock4 > 0) {
         close(_sock4);
-    if (_sock6 > 0)
+        _sock4 = 0;
+    }
+    if (_sock6 > 0) {
         close(_sock6);
+        _sock6 = 0;
+    }
 }
 
 - (void) socketReader:(int)sock {
@@ -273,7 +289,17 @@
 - (id) initWithAddress:(NSData *)address {
     if ((self = [super init])) {
         _address = [address copy];
-        [[MKServerPingerController sharedController] addPinger:self];
+
+        // The pinger controller uses dispatch sources/timers on the main queue.
+        // When pingers are created off-main (e.g. async DNS resolution), ensure
+        // controller state is mutated on the main thread to avoid races.
+        if ([NSThread isMainThread]) {
+            [[MKServerPingerController sharedController] addPinger:self];
+        } else {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[MKServerPingerController sharedController] addPinger:self];
+            });
+        }
     }
     return self;
 }
