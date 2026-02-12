@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0245A131154F593200476144 /* Opus.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 285B426314E6E1200045E282 /* Opus.dylib */; };
+		0245A132154F593200476144 /* Opus.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 285B426314E6E1200045E282 /* Opus.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		28074E90158A6E5100E0A4D0 /* MKAudioOutputSidetone.h in Headers */ = {isa = PBXBuildFile; fileRef = 28074E8E158A6E5100E0A4D0 /* MKAudioOutputSidetone.h */; };
 		28074E91158A6E5100E0A4D0 /* MKAudioOutputSidetone.h in Headers */ = {isa = PBXBuildFile; fileRef = 28074E8E158A6E5100E0A4D0 /* MKAudioOutputSidetone.h */; };
 		28074E92158A6E5100E0A4D0 /* MKAudioOutputSidetone.m in Sources */ = {isa = PBXBuildFile; fileRef = 28074E8F158A6E5100E0A4D0 /* MKAudioOutputSidetone.m */; };
@@ -301,6 +302,7 @@
 				28CC3706132EDA5200241269 /* ProtocolBuffers.dylib in CopyFiles */,
 				28CC3707132EDA5200241269 /* Speex.dylib in CopyFiles */,
 				28CC3708132EDA5200241269 /* SpeexDSP.dylib in CopyFiles */,
+				0245A132154F593200476144 /* Opus.dylib in CopyFiles */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
