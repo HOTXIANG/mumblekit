@@ -815,8 +815,17 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 
     if (_shouldUseOpus == NO) {
-        NSLog(@"MKConnection: Server asks for CELT, but we do not support it. Please upgrade your mumble server.");
-        __builtin_trap();
+        NSLog(@"MKConnection: Server does not support Opus codec. CELT is not supported. Please upgrade your Mumble server.");
+        // Gracefully disconnect instead of crashing
+        NSDictionary *userInfo = @{
+            NSLocalizedDescriptionKey: @"Codec Unsupported",
+            NSLocalizedFailureReasonErrorKey: @"The server does not support the Opus codec. Please ask the server administrator to upgrade to a newer version of Mumble server."
+        };
+        NSError *codecError = [NSError errorWithDomain:@"MKConnection" code:-1 userInfo:userInfo];
+        [_connError release];
+        _connError = [codecError retain];
+        [self stopConnectionThread];
+        return;
     }
 }
 

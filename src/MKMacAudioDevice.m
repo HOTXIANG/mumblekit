@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#import <TargetConditionals.h>
+#if TARGET_OS_OSX
+
 #import <MumbleKit/MKAudio.h>
 #import "MKAudioDevice.h"
 
@@ -397,3 +400,5 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 }
 
 @end
+
+#endif // TARGET_OS_OSX

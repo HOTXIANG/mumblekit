@@ -64,6 +64,7 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
 - (instancetype)init {
     self = [super init];
     if (self) {
+#if TARGET_OS_IOS
         // 注册通知监听 (替代旧的 C 回调)
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(handleInterruption:)
@@ -79,6 +80,7 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
                                                  selector:@selector(handleMediaServicesReset:)
                                                      name:AVAudioSessionMediaServicesWereResetNotification
                                                    object:nil];
+#endif
     }
     return self;
 }
@@ -138,6 +140,7 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
 
 #pragma mark - Notification Handlers
 
+#if TARGET_OS_IOS
 - (void)handleInterruption:(NSNotification *)notification {
     NSDictionary *userInfo = notification.userInfo;
     AVAudioSessionInterruptionType type = [userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
@@ -194,6 +197,7 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
         [self start];
     }
 }
+#endif // TARGET_OS_IOS
 
 #pragma mark - Control Methods
 

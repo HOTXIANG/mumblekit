@@ -1327,9 +1327,10 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
-				MACOSX_DEPLOYMENT_TARGET = 11.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
 			};
 			name = Debug;
 		};
@@ -1338,9 +1339,10 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
-				MACOSX_DEPLOYMENT_TARGET = 11.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
 			};
 			name = Release;
 		};
@@ -1357,6 +1359,7 @@
 			buildSettings = {
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			};
 			name = BetaDist;
 		};
@@ -1365,9 +1368,10 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
-				MACOSX_DEPLOYMENT_TARGET = 11.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
 			};
 			name = BetaDist;
 		};
@@ -1384,6 +1388,7 @@
 			buildSettings = {
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			};
 			name = AppStore;
 		};
@@ -1392,9 +1397,10 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
-				MACOSX_DEPLOYMENT_TARGET = 11.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
 			};
 			name = AppStore;
 		};
@@ -1420,6 +1426,7 @@
 			buildSettings = {
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			};
 			name = Debug;
 		};
@@ -1428,6 +1435,7 @@
 			buildSettings = {
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			};
 			name = Release;
 		};
