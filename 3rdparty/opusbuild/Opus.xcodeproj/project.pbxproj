@@ -1018,9 +1018,10 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				SDKROOT = macosx;
-							SUPPORTED_PLATFORMS = macosx;
-};
+				SUPPORTED_PLATFORMS = macosx;
+			};
 			name = Debug;
 		};
 		2815CCD414E6DF9700AAE69C /* Release */ = {
@@ -1028,9 +1029,10 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				SDKROOT = macosx;
-							SUPPORTED_PLATFORMS = macosx;
-};
+				SUPPORTED_PLATFORMS = macosx;
+			};
 			name = Release;
 		};
 		285B423914E6E0F00045E282 /* AppStore */ = {
@@ -1052,9 +1054,10 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				SDKROOT = macosx;
-							SUPPORTED_PLATFORMS = macosx;
-};
+				SUPPORTED_PLATFORMS = macosx;
+			};
 			name = AppStore;
 		};
 		285B423D14E6E0F50045E282 /* BetaDist */ = {
@@ -1076,9 +1079,10 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				SDKROOT = macosx;
-							SUPPORTED_PLATFORMS = macosx;
-};
+				SUPPORTED_PLATFORMS = macosx;
+			};
 			name = BetaDist;
 		};
 		287D85B114E6D474002B5D79 /* Debug */ = {

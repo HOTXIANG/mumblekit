@@ -1329,6 +1329,7 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
@@ -1341,6 +1342,7 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
@@ -1370,6 +1372,7 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
@@ -1399,6 +1402,7 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;

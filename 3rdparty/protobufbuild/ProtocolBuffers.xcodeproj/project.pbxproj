@@ -338,16 +338,16 @@
 			buildSettings = {
 				ENABLE_TESTABILITY = YES;
 				ONLY_ACTIVE_ARCH = YES;
-							SUPPORTED_PLATFORMS = macosx;
-};
+				SUPPORTED_PLATFORMS = macosx;
+			};
 			name = Debug;
 		};
 		2845A6B0132D99550034D631 /* Release */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 28190CF2150D5D7300E07613 /* Base.xcconfig */;
 			buildSettings = {
-							SUPPORTED_PLATFORMS = macosx;
-};
+				SUPPORTED_PLATFORMS = macosx;
+			};
 			name = Release;
 		};
 		2845A6B2132D99550034D631 /* Debug */ = {
@@ -369,6 +369,7 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 			};
@@ -379,6 +380,7 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 			};
@@ -388,8 +390,8 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 28190CF2150D5D7300E07613 /* Base.xcconfig */;
 			buildSettings = {
-							SUPPORTED_PLATFORMS = macosx;
-};
+				SUPPORTED_PLATFORMS = macosx;
+			};
 			name = BetaDist;
 		};
 		28498F22138AB6C9000509DD /* BetaDist */ = {
@@ -404,6 +406,7 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 			};
@@ -413,8 +416,8 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 28190CF2150D5D7300E07613 /* Base.xcconfig */;
 			buildSettings = {
-							SUPPORTED_PLATFORMS = macosx;
-};
+				SUPPORTED_PLATFORMS = macosx;
+			};
 			name = AppStore;
 		};
 		28A2AECB1478AA1B00F3B83F /* AppStore */ = {
@@ -429,6 +432,7 @@
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 			};
