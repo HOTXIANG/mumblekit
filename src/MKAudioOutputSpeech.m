@@ -89,7 +89,10 @@
             speex_decoder_ctl(_speexDecoder, SPEEX_GET_SAMPLING_RATE, &_sampleRate);
             _audioBufferSize = _frameSize;
         } else {
-            __builtin_trap(); // CELT is no longer supported
+            _sampleRate = SAMPLE_RATE;
+            _frameSize = _sampleRate / 100;
+            _audioBufferSize = _frameSize;
+            NSLog(@"MKAudioOutputSpeech: Unsupported legacy voice codec type=%d, using silence fallback.", (int)type);
         }
 
         _outputSize = (int)(ceilf((float)_audioBufferSize * _freq) / (float)_sampleRate);
@@ -378,7 +381,8 @@
                         output[i] *= (1.0f / 32767.0f);
                     }
                 } else {
-                    __builtin_trap(); // CELT is no longer supported
+                    decodedSamples = (int)_frameSize;
+                    memset(output, 0, _frameSize * sizeof(float));
                 }
 
                 [_frames removeObjectAtIndex:0];
@@ -420,7 +424,8 @@
                     for (unsigned int i = 0; i < _frameSize; i++)
                         output[i] *= (1.0f / 32767.0f);
                 } else {
-                    __builtin_trap(); // CELT is no longer supported
+                    decodedSamples = (int)_frameSize;
+                    memset(output, 0, _frameSize * sizeof(float));
                 }
             }
 

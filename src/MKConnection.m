@@ -149,6 +149,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         return nil;
 
     _ignoreSSLVerification = NO;
+    _shouldUseOpus = [[MKVersion sharedVersion] isOpusEnabled];
 
     return self;
 }
@@ -900,6 +901,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     switch (messageType) {
         case UDPVoiceCELTAlphaMessage:
         case UDPVoiceCELTBetaMessage:
+            NSLog(@"MKConnection: Dropping unsupported CELT voice packet type=%d", (int)messageType);
+            break;
         case UDPVoiceSpeexMessage:
         case UDPVoiceOpusMessage: {
             if (messageType == UDPVoiceOpusMessage && ![[MKVersion sharedVersion] isOpusEnabled]) {

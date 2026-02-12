@@ -366,7 +366,10 @@
             encoded = 1;
         }
     } else if (!useOpus && (_settings.codec == MKCodecFormatCELT || _settings.codec == MKCodecFormatOpus)) {
-        __builtin_trap(); // CELT is no longer supported
+        // During reconnect/codec-negotiation window, server codec preference may not be finalized yet.
+        // Never crash on unsupported CELT path; just skip this frame and wait for Opus-ready state.
+        bitrate = 0;
+        return -1;
     } else if (_settings.codec == MKCodecFormatSpeex) {
         int vbr = 0;
         speex_encoder_ctl(_speexEncoder, SPEEX_GET_VBR_MAX_BITRATE, &vbr);
