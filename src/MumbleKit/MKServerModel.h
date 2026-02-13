@@ -113,12 +113,19 @@
 /// @name Text messages
 ///--------------------
 
-/// Called whenever a text message is receieved.
+/// Called whenever a channel text message is receieved.
 ///
 /// @param model  The MKServerModel in which this event originated.
 /// @param msg    The MKTextMessage object representing the received text message.
 /// @param user   The MKUser that sent the text message (nil if the message was sent by the server).
 - (void) serverModel:(MKServerModel *)model textMessageReceived:(MKTextMessage *)msg fromUser:(MKUser *)user;
+
+/// Called whenever a private (direct) message is received.
+///
+/// @param model  The MKServerModel in which this event originated.
+/// @param msg    The MKTextMessage object representing the received private message.
+/// @param user   The MKUser that sent the private message.
+- (void) serverModel:(MKServerModel *)model privateMessageReceived:(MKTextMessage *)msg fromUser:(MKUser *)user;
 
 ///--------------------------------
 /// @name Self-mute and self-deafen
@@ -602,5 +609,30 @@
 
 /// Registers the currently connected user with the server.
 - (void) registerConnectedUser;
+
+///-----------------------------
+/// @name Blob request operations
+///-----------------------------
+
+/// Request the full comment for a user from the server.
+/// When received, the serverModel:userCommentChanged: delegate method will be called.
+///
+/// @param user  The user whose comment to request.
+- (void) requestCommentForUser:(MKUser *)user;
+
+/// Request the full description for a channel from the server.
+/// When received, the serverModel:channelDescriptionChanged: delegate method will be called.
+///
+/// @param channel  The channel whose description to request.
+- (void) requestDescriptionForChannel:(MKChannel *)channel;
+
+///-----------------------------
+/// @name Self comment operations
+///-----------------------------
+
+/// Set the comment for the currently connected user.
+///
+/// @param comment  The new comment text (can contain HTML).
+- (void) setSelfComment:(NSString *)comment;
 
 @end

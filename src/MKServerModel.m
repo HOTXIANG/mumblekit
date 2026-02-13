@@ -452,7 +452,15 @@
         sender = [self userWithSession:[msg actor]];
     }
     MKTextMessage *txtMsg = [MKTextMessage messageWithString:[msg message]];
-    [_delegate serverModel:self textMessageReceived:txtMsg fromUser:sender];
+    
+    // 判断是否是私聊：有 session 目标但没有 channel/tree 目标
+    BOOL isPrivate = ([msg.session count] > 0) && ([msg.channelId count] == 0) && ([msg.treeId count] == 0);
+    
+    if (isPrivate) {
+        [_delegate serverModel:self privateMessageReceived:txtMsg fromUser:sender];
+    } else {
+        [_delegate serverModel:self textMessageReceived:txtMsg fromUser:sender];
+    }
 }
 
 - (void) connection:(MKConnection *)conn handleACLMessage: (MPACL *)msg {    
@@ -1075,6 +1083,37 @@
     MPUserState_Builder *mpus = [MPUserState builder];
     [mpus setSession:(uint32_t)[_connectedUser session]];
     [mpus setUserId:0];
+    
+    NSData *data = [[mpus build] data];
+    [_connection sendMessageWithType:UserStateMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Blob request operations
+
+- (void) requestCommentForUser:(MKUser *)user {
+    MPRequestBlob_Builder *req = [MPRequestBlob builder];
+    [req addSessionComment:(uint32_t)[user session]];
+    
+    NSData *data = [[req build] data];
+    [_connection sendMessageWithType:RequestBlobMessage data:data];
+}
+
+- (void) requestDescriptionForChannel:(MKChannel *)channel {
+    MPRequestBlob_Builder *req = [MPRequestBlob builder];
+    [req addChannelDescription:(uint32_t)[channel channelId]];
+    
+    NSData *data = [[req build] data];
+    [_connection sendMessageWithType:RequestBlobMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Self comment operations
+
+- (void) setSelfComment:(NSString *)comment {
+    MPUserState_Builder *mpus = [MPUserState builder];
+    [mpus setSession:(uint32_t)[_connectedUser session]];
+    [mpus setComment:comment];
     
     NSData *data = [[mpus build] data];
     [_connection sendMessageWithType:UserStateMessage data:data];
