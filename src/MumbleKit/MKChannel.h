@@ -64,4 +64,7 @@
 /// Returns the channel's description.
 - (NSString *) channelDescription;
 
+/// Returns the channel's maximum user count (0 = unlimited).
+- (NSUInteger) maxUsers;
+
 @end

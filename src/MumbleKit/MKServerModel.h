@@ -527,6 +527,20 @@
 /// @param temp          Specify if the channel is temporary or not.
 - (void) createChannelWithName:(NSString *)channelName parent:(MKChannel *)parent temporary:(BOOL)temp;
 
+/// Remove a channel from the server.
+///
+/// @param channel  The channel to remove.
+- (void) removeChannel:(MKChannel *)channel;
+
+/// Edit a channel's properties. Only non-nil parameters will be updated.
+///
+/// @param channel      The channel to edit.
+/// @param name         The new name for the channel (or nil to leave unchanged).
+/// @param description  The new description for the channel (or nil to leave unchanged).
+/// @param position     The new position for the channel (or nil to leave unchanged).
+/// @param maxUsers     The new max users for the channel (or nil to leave unchanged, 0 = unlimited).
+- (void) editChannel:(MKChannel *)channel name:(NSString *)name description:(NSString *)description position:(NSNumber *)position maxUsers:(NSNumber *)maxUsers;
+
 /// Ask the underlying connection to receive the access control for the given channel.
 ///
 /// @param channel  The channel for which you are requesting the access control.

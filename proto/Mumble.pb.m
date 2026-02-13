@@ -2929,6 +2929,7 @@ static MPChannelRemove* defaultMPChannelRemoveInstance = nil;
 @property (retain) PBAppendableArray * linksRemoveArray;
 @property BOOL temporary;
 @property int32_t position;
+@property uint32_t maxUsers;
 @property (retain) NSData* descriptionHash;
 @end
 
@@ -2987,6 +2988,13 @@ static MPChannelRemove* defaultMPChannelRemoveInstance = nil;
   hasPosition_ = !!value;
 }
 @synthesize position;
+- (BOOL) hasMaxUsers {
+  return !!hasMaxUsers_;
+}
+- (void) setHasMaxUsers:(BOOL) value {
+  hasMaxUsers_ = !!value;
+}
+@synthesize maxUsers;
 - (BOOL) hasDescriptionHash {
   return !!hasDescriptionHash_;
 }
@@ -3011,6 +3019,7 @@ static MPChannelRemove* defaultMPChannelRemoveInstance = nil;
     self.description = @"";
     self.temporary = NO;
     self.position = 0;
+    self.maxUsers = 0;
     self.descriptionHash = [NSData data];
   }
   return self;
@@ -3091,6 +3100,9 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
   if (self.hasDescriptionHash) {
     [output writeData:10 value:self.descriptionHash];
   }
+  if (self.hasMaxUsers) {
+    [output writeUInt32:11 value:self.maxUsers];
+  }
   [self.unknownFields writeToCodedOutputStream:output];
 }
 - (int32_t) serializedSize {
@@ -3150,6 +3162,9 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
   }
   if (self.hasDescriptionHash) {
     size += computeDataSize(10, self.descriptionHash);
+  }
+  if (self.hasMaxUsers) {
+    size += computeUInt32Size(11, self.maxUsers);
   }
   size += self.unknownFields.serializedSize;
   memoizedSerializedSize = size;
@@ -3213,6 +3228,9 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
   if (self.hasPosition) {
     [output appendFormat:@"%@%@: %@\n", indent, @"position", [NSNumber numberWithInt:self.position]];
   }
+  if (self.hasMaxUsers) {
+    [output appendFormat:@"%@%@: %@\n", indent, @"maxUsers", [NSNumber numberWithUnsignedInt:self.maxUsers]];
+  }
   if (self.hasDescriptionHash) {
     [output appendFormat:@"%@%@: %@\n", indent, @"descriptionHash", self.descriptionHash];
   }
@@ -3242,6 +3260,8 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
       (!self.hasTemporary || self.temporary == otherMessage.temporary) &&
       self.hasPosition == otherMessage.hasPosition &&
       (!self.hasPosition || self.position == otherMessage.position) &&
+      self.hasMaxUsers == otherMessage.hasMaxUsers &&
+      (!self.hasMaxUsers || self.maxUsers == otherMessage.maxUsers) &&
       self.hasDescriptionHash == otherMessage.hasDescriptionHash &&
       (!self.hasDescriptionHash || [self.descriptionHash isEqual:otherMessage.descriptionHash]) &&
       (self.unknownFields == otherMessage.unknownFields || (self.unknownFields != nil && [self.unknownFields isEqual:otherMessage.unknownFields]));
@@ -3274,6 +3294,9 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
   }
   if (self.hasPosition) {
     hashCode = hashCode * 31 + [[NSNumber numberWithInt:self.position] hash];
+  }
+  if (self.hasMaxUsers) {
+    hashCode = hashCode * 31 + [[NSNumber numberWithUnsignedInt:self.maxUsers] hash];
   }
   if (self.hasDescriptionHash) {
     hashCode = hashCode * 31 + [self.descriptionHash hash];
@@ -3364,6 +3387,9 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
   if (other.hasPosition) {
     [self setPosition:other.position];
   }
+  if (other.hasMaxUsers) {
+    [self setMaxUsers:other.maxUsers];
+  }
   if (other.hasDescriptionHash) {
     [self setDescriptionHash:other.descriptionHash];
   }
@@ -3426,6 +3452,10 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
       }
       case 82: {
         [self setDescriptionHash:[input readData]];
+        break;
+      }
+      case 88: {
+        [self setMaxUsers:[input readUInt32]];
         break;
       }
     }
@@ -3600,6 +3630,22 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
 - (MPChannelState_Builder*) clearPosition {
   result.hasPosition = NO;
   result.position = 0;
+  return self;
+}
+- (BOOL) hasMaxUsers {
+  return result.hasMaxUsers;
+}
+- (uint32_t) maxUsers {
+  return result.maxUsers;
+}
+- (MPChannelState_Builder*) setMaxUsers:(uint32_t) value {
+  result.hasMaxUsers = YES;
+  result.maxUsers = value;
+  return self;
+}
+- (MPChannelState_Builder*) clearMaxUsers {
+  result.hasMaxUsers = NO;
+  result.maxUsers = 0;
   return self;
 }
 - (BOOL) hasDescriptionHash {

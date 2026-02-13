@@ -24,5 +24,6 @@
 
 - (void) setChannelDescriptionHash:(NSData *)hash;
 - (void) setChannelDescription:(NSString *)desc;
+- (void) setMaxUsers:(NSUInteger)maxUsers;
 @end
 

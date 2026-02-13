@@ -795,6 +795,7 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
 @private
   BOOL hasTemporary_:1;
   BOOL hasPosition_:1;
+  BOOL hasMaxUsers_:1;
   BOOL hasName_:1;
   BOOL hasDescription_:1;
   BOOL hasDescriptionHash_:1;
@@ -802,6 +803,7 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
   BOOL hasParent_:1;
   BOOL temporary_:1;
   int32_t position;
+  uint32_t maxUsers;
   NSString* name;
   NSString* description;
   NSData* descriptionHash;
@@ -817,6 +819,7 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
 - (BOOL) hasDescription;
 - (BOOL) hasTemporary;
 - (BOOL) hasPosition;
+- (BOOL) hasMaxUsers;
 - (BOOL) hasDescriptionHash;
 @property (readonly) uint32_t channelId;
 @property (readonly) uint32_t parent;
@@ -827,6 +830,7 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
 @property (readonly, retain) PBArray * linksRemove;
 - (BOOL) temporary;
 @property (readonly) int32_t position;
+@property (readonly) uint32_t maxUsers;
 @property (readonly, retain) NSData* descriptionHash;
 - (uint32_t)linksAtIndex:(NSUInteger)index;
 - (uint32_t)linksAddAtIndex:(NSUInteger)index;
@@ -922,6 +926,11 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
 - (NSData*) descriptionHash;
 - (MPChannelState_Builder*) setDescriptionHash:(NSData*) value;
 - (MPChannelState_Builder*) clearDescriptionHash;
+
+- (BOOL) hasMaxUsers;
+- (uint32_t) maxUsers;
+- (MPChannelState_Builder*) setMaxUsers:(uint32_t) value;
+- (MPChannelState_Builder*) clearMaxUsers;
 @end
 
 @interface MPUserRemove : PBGeneratedMessage {

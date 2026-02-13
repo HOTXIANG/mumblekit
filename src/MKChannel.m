@@ -14,6 +14,7 @@
     NSString         *_channelName;
     BOOL             _temporary;
     NSInteger        _position;
+    NSUInteger       _maxUsers;
     NSMutableArray   *_channels;
     NSMutableArray   *_users;
     NSMutableArray   *_linked;
@@ -178,6 +179,14 @@
 
 - (NSString *) channelDescription {
     return _channelDescription;
+}
+
+- (void) setMaxUsers:(NSUInteger)maxUsers {
+    _maxUsers = maxUsers;
+}
+
+- (NSUInteger) maxUsers {
+    return _maxUsers;
 }
 
 @end

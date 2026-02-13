@@ -82,6 +82,7 @@ message ChannelState {
 	optional bool temporary = 8 [default = false];
 	optional int32 position = 9 [default = 0];
 	optional bytes description_hash = 10;
+	optional uint32 max_users = 11;
 }
 
 message UserRemove {

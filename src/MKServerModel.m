@@ -325,6 +325,10 @@
         [self internalRepositionChannel:chan to:[msg position]];
     }
 
+    if ([msg hasMaxUsers]) {
+        [chan setMaxUsers:[msg maxUsers]];
+    }
+
     if ([[msg links] count] > 0) {
         [self internalSetLinks:[msg links] forChannel:chan];
     }
@@ -507,14 +511,19 @@
         channelGroup.excludedMembers = [NSMutableArray array];
         channelGroup.inheritedMembers = [NSMutableArray array];
         
-        for (NSNumber *value in chanGroup.add) {
-            [channelGroup.members addObject:value];
+        // PBArray stores uint32 primitives, not NSNumber objects.
+        // Must use index-based access instead of fast enumeration.
+        PBArray *addArray = chanGroup.add;
+        for (NSUInteger i = 0; i < [addArray count]; i++) {
+            [channelGroup.members addObject:[NSNumber numberWithUnsignedInt:[addArray uint32AtIndex:i]]];
         }
-        for (NSNumber *value in chanGroup.remove) {
-            [channelGroup.excludedMembers addObject:value];
+        PBArray *removeArray = chanGroup.remove;
+        for (NSUInteger i = 0; i < [removeArray count]; i++) {
+            [channelGroup.excludedMembers addObject:[NSNumber numberWithUnsignedInt:[removeArray uint32AtIndex:i]]];
         }
-        for (NSNumber *value in chanGroup.inheritedMembers) {
-            [channelGroup.inheritedMembers addObject:value];
+        PBArray *inheritedArray = chanGroup.inheritedMembers;
+        for (NSUInteger i = 0; i < [inheritedArray count]; i++) {
+            [channelGroup.inheritedMembers addObject:[NSNumber numberWithUnsignedInt:[inheritedArray uint32AtIndex:i]]];
         }
         
         [acl.groups addObject:channelGroup];
@@ -938,6 +947,37 @@
     channelState.name = channelName;
     channelState.parent = (uint32_t)parent.channelId;
     channelState.temporary = temp;
+    
+    NSData *data = [[channelState build] data];
+    [_connection sendMessageWithType:ChannelStateMessage data:data];
+}
+
+// Remove a channel
+- (void) removeChannel:(MKChannel *)channel {
+    MPChannelRemove_Builder *channelRemove = [MPChannelRemove builder];
+    channelRemove.channelId = (uint32_t)channel.channelId;
+    
+    NSData *data = [[channelRemove build] data];
+    [_connection sendMessageWithType:ChannelRemoveMessage data:data];
+}
+
+// Edit a channel's properties
+- (void) editChannel:(MKChannel *)channel name:(NSString *)name description:(NSString *)description position:(NSNumber *)position maxUsers:(NSNumber *)maxUsers {
+    MPChannelState_Builder *channelState = [MPChannelState builder];
+    channelState.channelId = (uint32_t)channel.channelId;
+    
+    if (name != nil) {
+        channelState.name = name;
+    }
+    if (description != nil) {
+        channelState.description = description;
+    }
+    if (position != nil) {
+        channelState.position = [position intValue];
+    }
+    if (maxUsers != nil) {
+        channelState.maxUsers = [maxUsers unsignedIntValue];
+    }
     
     NSData *data = [[channelState build] data];
     [_connection sendMessageWithType:ChannelStateMessage data:data];
