@@ -146,6 +146,7 @@
 		BCD11E0C158F40FA00321E06 /* MKChannelACL.m in Sources */ = {isa = PBXBuildFile; fileRef = BCD11E07158F40FA00321E06 /* MKChannelACL.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		BCD11E0D158F40FA00321E06 /* MKChannelGroup.m in Sources */ = {isa = PBXBuildFile; fileRef = BCD11E08158F40FA00321E06 /* MKChannelGroup.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		BCD11E0E158F40FA00321E06 /* MKChannelGroup.m in Sources */ = {isa = PBXBuildFile; fileRef = BCD11E08158F40FA00321E06 /* MKChannelGroup.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
+		F24EB7C12F3E4AB500904644 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F24EB7C02F3E4AB500904644 /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -400,6 +401,7 @@
 		BCD11E06158F40FA00321E06 /* MKAccessControl.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKAccessControl.m; path = src/MKAccessControl.m; sourceTree = SOURCE_ROOT; };
 		BCD11E07158F40FA00321E06 /* MKChannelACL.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKChannelACL.m; path = src/MKChannelACL.m; sourceTree = SOURCE_ROOT; };
 		BCD11E08158F40FA00321E06 /* MKChannelGroup.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKChannelGroup.m; path = src/MKChannelGroup.m; sourceTree = SOURCE_ROOT; };
+		F24EB7C02F3E4AB500904644 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; name = PrivacyInfo.xcprivacy; path = 3rdparty/opensslbuild/PrivacyInfo.xcprivacy; sourceTree = SOURCE_ROOT; };
 		F2C0EE3F2E0E1F0800B80B44 /* MUCertificateCreationProgressView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUCertificateCreationProgressView.h; sourceTree = "<group>"; };
 		F2C0EE402E0E1F0800B80B44 /* MUCertificateCreationProgressView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUCertificateCreationProgressView.m; sourceTree = "<group>"; };
 		F2C0EE412E0E1F0800B80B44 /* MUCertificateCreationProgressView.xib */ = {isa = PBXFileReference; lastKnownFileType = file.xib; path = MUCertificateCreationProgressView.xib; sourceTree = "<group>"; };
@@ -600,6 +602,7 @@
 				28492360132ED67E00B4EAAC /* ProtocolBuffers.dylib */,
 				28492361132ED67E00B4EAAC /* Speex.dylib */,
 				28492362132ED67E00B4EAAC /* SpeexDSP.dylib */,
+				F24EB7C02F3E4AB500904644 /* PrivacyInfo.xcprivacy */,
 			);
 			name = "Mac Frameworks";
 			sourceTree = "<group>";
@@ -1192,6 +1195,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F24EB7C12F3E4AB500904644 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

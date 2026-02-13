@@ -88,16 +88,15 @@
         sa6.sin6_family = AF_INET6;
         sa6.sin6_port = 0;
         sa6.sin6_addr = in6addr_any;
-        if (bind(_sock6, (struct sockaddr *) &sa6, sa6.sin6_len) != -1) {
-            _reader6 = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, _sock6, 0, dispatch_get_main_queue());
-            if (_reader6 != NULL) {
-                dispatch_source_set_event_handler(_reader6, ^{
-                    [self socketReader:_sock6];
-                });
-                dispatch_resume(_reader6);
-            }
-        } else {
+        if (bind(_sock6, (struct sockaddr *)&sa6, sizeof(struct sockaddr_in6)) == -1) {
             NSLog(@"MKServerPinger: unable to bind _sock6: %s", strerror(errno));
+        }
+        _reader6 = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, _sock6, 0, dispatch_get_main_queue());
+        if (_reader6 != NULL) {
+            dispatch_source_set_event_handler(_reader6, ^{
+                [self socketReader:_sock6];
+            });
+            dispatch_resume(_reader6);
         }
     }
 
@@ -110,22 +109,21 @@
         if (flags != -1) {
             fcntl(_sock4, F_SETFL, flags | O_NONBLOCK);
         }
-        struct sockaddr_in sa;
-        memset(&sa, 0, sizeof(struct sockaddr_in));
-        sa.sin_len = sizeof(struct sockaddr_in);
-        sa.sin_family = AF_INET;
-        sa.sin_port = 0;
-        sa.sin_addr.s_addr = htonl(INADDR_ANY);
-        if (bind(_sock4, (struct sockaddr *) &sa, sa.sin_len) != -1) {
-            _reader4 = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, _sock4, 0, dispatch_get_main_queue());
-            if (_reader4 != NULL) {
-                dispatch_source_set_event_handler(_reader4, ^{
-                    [self socketReader:_sock4];
-                });
-                dispatch_resume(_reader4);
-            }
-        } else {
+        struct sockaddr_in sa4;
+        memset(&sa4, 0, sizeof(struct sockaddr_in));
+        sa4.sin_len = sizeof(struct sockaddr_in);
+        sa4.sin_family = AF_INET;
+        sa4.sin_port = 0;
+        sa4.sin_addr.s_addr = INADDR_ANY;
+        if (bind(_sock4, (struct sockaddr *)&sa4, sizeof(struct sockaddr_in)) == -1) {
             NSLog(@"MKServerPinger: unable to bind _sock4: %s", strerror(errno));
+        }
+        _reader4 = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, _sock4, 0, dispatch_get_main_queue());
+        if (_reader4 != NULL) {
+            dispatch_source_set_event_handler(_reader4, ^{
+                [self socketReader:_sock4];
+            });
+            dispatch_resume(_reader4);
         }
     }
     
@@ -213,10 +211,13 @@
         ping[2] = rand & 0xffffffff;
 
         struct sockaddr *sa = (struct sockaddr *) [addr bytes];
-        if (sa->sa_family == AF_INET)
-            sendto(_sock4, buf, 12, 0, [addr bytes], (socklen_t)[addr length]);
-        else if (sa->sa_family == AF_INET6)
-            sendto(_sock6, buf, 12, 0, [addr bytes], (socklen_t)[addr length]);
+        if (sa->sa_family == AF_INET) {
+            if (sendto(_sock4, buf, 12, 0, [addr bytes], (socklen_t)[addr length]) == -1)
+                NSLog(@"MKServerPinger: sendto (IPv4) failed: %s", strerror(errno));
+        } else if (sa->sa_family == AF_INET6) {
+            if (sendto(_sock6, buf, 12, 0, [addr bytes], (socklen_t)[addr length]) == -1)
+                NSLog(@"MKServerPinger: sendto (IPv6) failed: %s", strerror(errno));
+        }
     }
 }
 
@@ -279,6 +280,7 @@
                 addrData = [NSData dataWithBytes:iter->ai_addr length:iter->ai_addrlen];
                 break;
             }
+            iter = iter->ai_next;
         }
         freeaddrinfo(ai);
         return [self initWithAddress:addrData];
