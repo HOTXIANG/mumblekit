@@ -20,6 +20,8 @@
     NSMutableArray   *_linked;
     NSData           *_channelDescriptionHash;
     NSString         *_channelDescription;
+    BOOL             _isEnterRestricted;
+    BOOL             _canEnter;
 }
 @end
 
@@ -187,6 +189,22 @@
 
 - (NSUInteger) maxUsers {
     return _maxUsers;
+}
+
+- (void) setEnterRestricted:(BOOL)flag {
+    _isEnterRestricted = flag;
+}
+
+- (BOOL) isEnterRestricted {
+    return _isEnterRestricted;
+}
+
+- (void) setCanEnter:(BOOL)flag {
+    _canEnter = flag;
+}
+
+- (BOOL) canEnter {
+    return _canEnter;
 }
 
 @end

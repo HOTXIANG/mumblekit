@@ -801,7 +801,11 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
   BOOL hasDescriptionHash_:1;
   BOOL hasChannelId_:1;
   BOOL hasParent_:1;
+  BOOL hasIsEnterRestricted_:1;
+  BOOL hasCanEnter_:1;
   BOOL temporary_:1;
+  BOOL isEnterRestricted_:1;
+  BOOL canEnter_:1;
   int32_t position;
   uint32_t maxUsers;
   NSString* name;
@@ -821,6 +825,8 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
 - (BOOL) hasPosition;
 - (BOOL) hasMaxUsers;
 - (BOOL) hasDescriptionHash;
+- (BOOL) hasIsEnterRestricted;
+- (BOOL) hasCanEnter;
 @property (readonly) uint32_t channelId;
 @property (readonly) uint32_t parent;
 @property (readonly, retain) NSString* name;
@@ -829,6 +835,8 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
 @property (readonly, retain) PBArray * linksAdd;
 @property (readonly, retain) PBArray * linksRemove;
 - (BOOL) temporary;
+- (BOOL) isEnterRestricted;
+- (BOOL) canEnter;
 @property (readonly) int32_t position;
 @property (readonly) uint32_t maxUsers;
 @property (readonly, retain) NSData* descriptionHash;
@@ -931,6 +939,16 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
 - (uint32_t) maxUsers;
 - (MPChannelState_Builder*) setMaxUsers:(uint32_t) value;
 - (MPChannelState_Builder*) clearMaxUsers;
+
+- (BOOL) hasIsEnterRestricted;
+- (BOOL) isEnterRestricted;
+- (MPChannelState_Builder*) setIsEnterRestricted:(BOOL) value;
+- (MPChannelState_Builder*) clearIsEnterRestricted;
+
+- (BOOL) hasCanEnter;
+- (BOOL) canEnter;
+- (MPChannelState_Builder*) setCanEnter:(BOOL) value;
+- (MPChannelState_Builder*) clearCanEnter;
 @end
 
 @interface MPUserRemove : PBGeneratedMessage {
@@ -1049,6 +1067,8 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
   uint32_t userId;
   uint32_t actor;
   uint32_t session;
+  PBAppendableArray * listeningChannelAddArray;
+  PBAppendableArray * listeningChannelRemoveArray;
 }
 - (BOOL) hasSession;
 - (BOOL) hasActor;
@@ -1088,6 +1108,8 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
 @property (readonly, retain) NSData* textureHash;
 - (BOOL) prioritySpeaker;
 - (BOOL) recording;
+@property (readonly, retain) PBArray * listeningChannelAdd;
+@property (readonly, retain) PBArray * listeningChannelRemove;
 
 + (MPUserState*) defaultInstance;
 - (MPUserState*) defaultInstance;
@@ -1218,6 +1240,18 @@ BOOL MPContextActionModify_OperationIsValidValue(MPContextActionModify_Operation
 - (BOOL) recording;
 - (MPUserState_Builder*) setRecording:(BOOL) value;
 - (MPUserState_Builder*) clearRecording;
+
+- (PBAppendableArray *)listeningChannelAdd;
+- (uint32_t)listeningChannelAddAtIndex:(NSUInteger)index;
+- (MPUserState_Builder *)addListeningChannelAdd:(uint32_t)value;
+- (MPUserState_Builder *)setListeningChannelAddArray:(NSArray *)array;
+- (MPUserState_Builder *)clearListeningChannelAdd;
+
+- (PBAppendableArray *)listeningChannelRemove;
+- (uint32_t)listeningChannelRemoveAtIndex:(NSUInteger)index;
+- (MPUserState_Builder *)addListeningChannelRemove:(uint32_t)value;
+- (MPUserState_Builder *)setListeningChannelRemoveArray:(NSArray *)array;
+- (MPUserState_Builder *)clearListeningChannelRemove;
 @end
 
 @interface MPBanList : PBGeneratedMessage {

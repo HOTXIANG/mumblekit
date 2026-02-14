@@ -434,6 +434,13 @@
 /// @param  channel          The channel to which access control refers.
 - (void) serverModel:(MKServerModel *)model didReceiveAccessControl:(MKAccessControl *)accessControl forChannel:(MKChannel *)channel;
 
+/// Called when a permission query result is received for a channel.
+///
+/// @param  model       The server model object.
+/// @param  permissions The effective permissions the user has in the channel.
+/// @param  channel     The channel for which permissions were queried.
+- (void) serverModel:(MKServerModel *)model permissionQueryResult:(UInt32)permissions forChannel:(MKChannel *)channel;
+
 @end
 
 /// @class MKServerModel MKServerModel.h MumbleKit/MKServerModel.h
@@ -518,6 +525,12 @@
 ///
 /// @param channel  The channel to join.
 - (void) joinChannel:(MKChannel *)channel;
+
+/// Move a user to another channel.
+///
+/// @param user     The user to move.
+/// @param channel  The target channel.
+- (void) moveUser:(MKUser *)user toChannel:(MKChannel *)channel;
 
 /// Create a new channel in the server the underlying MKConnection is currently
 /// connected to.
@@ -648,5 +661,46 @@
 ///
 /// @param comment  The new comment text (can contain HTML).
 - (void) setSelfComment:(NSString *)comment;
+
+///-----------------------------
+/// @name Permission query operations
+///-----------------------------
+
+/// Request permissions for a specific channel. All users can use this.
+/// When received, the serverModel:permissionQueryResult:forChannel: delegate method will be called.
+///
+/// @param channel  The channel to query permissions for.
+- (void) requestPermissionForChannel:(MKChannel *)channel;
+
+///-----------------------------
+/// @name Channel Listening operations
+///-----------------------------
+
+/// Start listening to a channel (receive audio from it without joining).
+/// Requires Mumble 1.4+ server support.
+///
+/// @param channel  The channel to start listening to.
+- (void) addListeningChannel:(MKChannel *)channel;
+
+/// Stop listening to a channel.
+///
+/// @param channel  The channel to stop listening to.
+- (void) removeListeningChannel:(MKChannel *)channel;
+
+///-----------------------------
+/// @name Server-side mute operations
+///-----------------------------
+
+/// Server-mute a user (admin operation, prevents the user from speaking on the server).
+///
+/// @param muted  YES to mute, NO to unmute.
+/// @param user   The user to mute/unmute.
+- (void) setServerMuted:(BOOL)muted forUser:(MKUser *)user;
+
+/// Server-deafen a user (admin operation).
+///
+/// @param deafened  YES to deafen, NO to undeafen.
+/// @param user      The user to deafen/undeafen.
+- (void) setServerDeafened:(BOOL)deafened forUser:(MKUser *)user;
 
 @end

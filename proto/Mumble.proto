@@ -83,6 +83,8 @@ message ChannelState {
 	optional int32 position = 9 [default = 0];
 	optional bytes description_hash = 10;
 	optional uint32 max_users = 11;
+	optional bool is_enter_restricted = 12;
+	optional bool can_enter = 13;
 }
 
 message UserRemove {
@@ -112,6 +114,8 @@ message UserState {
 	optional bytes texture_hash = 17;
 	optional bool priority_speaker = 18;
 	optional bool recording = 19;
+	repeated uint32 listening_channel_add = 22;
+	repeated uint32 listening_channel_remove = 23;
 }
 
 message BanList {

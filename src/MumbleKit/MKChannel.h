@@ -67,4 +67,12 @@
 /// Returns the channel's maximum user count (0 = unlimited).
 - (NSUInteger) maxUsers;
 
+/// Returns whether this channel has restricted entry (password-protected or ACL-restricted).
+/// Only available on servers that support this field (Mumble 1.4+).
+- (BOOL) isEnterRestricted;
+
+/// Returns whether the current user can enter this channel.
+/// Only available on servers that support this field (Mumble 1.4+).
+- (BOOL) canEnter;
+
 @end

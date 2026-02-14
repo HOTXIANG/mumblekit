@@ -274,6 +274,32 @@
     if ([msg hasCommentHash]) {
         [self internalSetCommentHashForUser:user to:[msg commentHash]];
     }
+
+    // 处理监听频道变更（Mumble 1.4+）
+    if ([msg listeningChannelAdd] && [[msg listeningChannelAdd] count] > 0) {
+        PBArray *addArr = [msg listeningChannelAdd];
+        NSMutableArray *addChannels = [NSMutableArray arrayWithCapacity:addArr.count];
+        for (NSUInteger i = 0; i < addArr.count; i++) {
+            [addChannels addObject:@([msg listeningChannelAddAtIndex:i])];
+        }
+        NSDictionary *info = @{
+            @"user": user,
+            @"addChannels": [addChannels copy],
+        };
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"MKListeningChannelAddNotification" object:nil userInfo:info];
+    }
+    if ([msg listeningChannelRemove] && [[msg listeningChannelRemove] count] > 0) {
+        PBArray *removeArr = [msg listeningChannelRemove];
+        NSMutableArray *removeChannels = [NSMutableArray arrayWithCapacity:removeArr.count];
+        for (NSUInteger i = 0; i < removeArr.count; i++) {
+            [removeChannels addObject:@([msg listeningChannelRemoveAtIndex:i])];
+        }
+        NSDictionary *info = @{
+            @"user": user,
+            @"removeChannels": [removeChannels copy],
+        };
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"MKListeningChannelRemoveNotification" object:nil userInfo:info];
+    }
 }
 
 - (void) connection:(MKConnection *)conn handleUserRemoveMessage:(MPUserRemove *)msg {
@@ -296,6 +322,7 @@
 
     if (!chan) {
         if ([msg hasParent] && [msg hasName]) {
+            newChannel = YES;
             chan = [self internalAddChannelWithId:[msg channelId] name:[msg name] parent:parent];
             if ([msg hasTemporary]) {
                 [chan setTemporary:[msg temporary]];
@@ -327,6 +354,14 @@
 
     if ([msg hasMaxUsers]) {
         [chan setMaxUsers:[msg maxUsers]];
+    }
+
+    if ([msg hasIsEnterRestricted]) {
+        [chan setEnterRestricted:[msg isEnterRestricted]];
+    }
+
+    if ([msg hasCanEnter]) {
+        [chan setCanEnter:[msg canEnter]];
     }
 
     if ([[msg links] count] > 0) {
@@ -479,7 +514,10 @@
     acl.acls = [NSMutableArray array];
     acl.groups = [NSMutableArray array];
     
-    for (MPACL_ChanACL *chanACL in msg.acls) {
+    // Copy arrays before enumeration to avoid "mutated while being enumerated" crash
+    // when multiple ACL responses arrive concurrently
+    NSArray *aclsCopy = [msg.acls copy];
+    for (MPACL_ChanACL *chanACL in aclsCopy) {
         MKChannelACL *channelACL = [[MKChannelACL alloc] init];
         if (chanACL.hasUserId) {
             channelACL.userID = chanACL.userId;
@@ -498,9 +536,11 @@
         [acl.acls addObject:channelACL];
         [channelACL release];
     }
+    [aclsCopy release];
     
     
-    for (MPACL_ChanGroup *chanGroup in msg.groups) {
+    NSArray *groupsCopy = [msg.groups copy];
+    for (MPACL_ChanGroup *chanGroup in groupsCopy) {
         MKChannelGroup *channelGroup = [[MKChannelGroup alloc] init];
         channelGroup.name = chanGroup.name;
         channelGroup.inheritable = chanGroup.inheritable;
@@ -529,6 +569,7 @@
         [acl.groups addObject:channelGroup];
         [channelGroup release];
     }
+    [groupsCopy release];
     
     [_delegate serverModel:self didReceiveAccessControl:[acl autorelease] forChannel:chan];   
 }
@@ -546,9 +587,6 @@
 }
 
 - (void) connection:(MKConnection *)conn handleVoiceTargetMessage: (MPVoiceTarget *)msg {
-}
-
-- (void) connection:(MKConnection *)conn handlePermissionQueryMessage: (MPPermissionQuery *)msg {
 }
 
 #pragma mark -
@@ -941,6 +979,16 @@
     [_connection sendMessageWithType:UserStateMessage data:data];
 }
 
+// Move a user to another channel
+- (void) moveUser:(MKUser *)user toChannel:(MKChannel *)channel {
+    MPUserState_Builder *userState = [MPUserState builder];
+    [userState setSession:(uint32_t)[user session]];
+    [userState setChannelId:(uint32_t)[channel channelId]];
+    
+    NSData *data = [[userState build] data];
+    [_connection sendMessageWithType:UserStateMessage data:data];
+}
+
 // Create a channel
 - (void) createChannelWithName:(NSString *)channelName parent:(MKChannel *)parent temporary:(BOOL)temp {
     MPChannelState_Builder *channelState = [MPChannelState builder];
@@ -997,7 +1045,7 @@
 - (void) setAccessControl:(MKAccessControl *)accessControl forChannel:(MKChannel *)channel {
     MPACL_Builder *mpacl = [MPACL builder];
     mpacl.channelId = (uint32_t)channel.channelId;
-    mpacl.query = YES;
+    mpacl.query = NO;
     mpacl.inheritAcls = accessControl.inheritACLs;
     
     NSMutableArray *aclsArray = [NSMutableArray array];
@@ -1154,6 +1202,83 @@
     MPUserState_Builder *mpus = [MPUserState builder];
     [mpus setSession:(uint32_t)[_connectedUser session]];
     [mpus setComment:comment];
+    
+    NSData *data = [[mpus build] data];
+    [_connection sendMessageWithType:UserStateMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Permission query operations
+
+- (void) requestPermissionForChannel:(MKChannel *)channel {
+    MPPermissionQuery_Builder *pq = [MPPermissionQuery builder];
+    [pq setChannelId:(uint32_t)[channel channelId]];
+
+    NSData *data = [[pq build] data];
+    [_connection sendMessageWithType:PermissionQueryMessage data:data];
+}
+
+- (void) connection:(MKConnection *)conn handlePermissionQueryMessage: (MPPermissionQuery *)msg {
+    if (![msg hasChannelId] || ![msg hasPermissions]) {
+        return;
+    }
+    
+    MKChannel *chan = [self channelWithId:[msg channelId]];
+    if (!chan) return;
+    
+    uint32_t permissions = [msg permissions];
+    BOOL canEnter = (permissions & MKPermissionEnter) != 0;
+    
+    // 更新频道的进入限制状态
+    // 如果用户没有 Enter 权限，标记为受限
+    if (!canEnter) {
+        [chan setEnterRestricted:YES];
+        [chan setCanEnter:NO];
+    } else {
+        // 只有明确查询到有 Enter 权限才清除限制（不覆盖 ChannelState 中已设置的值）
+        [chan setCanEnter:YES];
+    }
+    
+    [_delegate serverModel:self permissionQueryResult:permissions forChannel:chan];
+}
+
+#pragma mark -
+#pragma mark Channel Listening operations
+
+- (void) addListeningChannel:(MKChannel *)channel {
+    // Mumble 1.4+: 使用 UserState.listening_channel_add（单向监听，仅影响本用户）
+    MPUserState_Builder *mpus = [MPUserState builder];
+    [mpus addListeningChannelAdd:(uint32_t)[channel channelId]];
+    
+    NSData *data = [[mpus build] data];
+    [_connection sendMessageWithType:UserStateMessage data:data];
+}
+
+- (void) removeListeningChannel:(MKChannel *)channel {
+    // Mumble 1.4+: 使用 UserState.listening_channel_remove
+    MPUserState_Builder *mpus = [MPUserState builder];
+    [mpus addListeningChannelRemove:(uint32_t)[channel channelId]];
+    
+    NSData *data = [[mpus build] data];
+    [_connection sendMessageWithType:UserStateMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Server-side mute operations
+
+- (void) setServerMuted:(BOOL)muted forUser:(MKUser *)user {
+    MPUserState_Builder *mpus = [MPUserState builder];
+    [mpus setSession:(uint32_t)[user session]];
+    [mpus setMute:muted];
+    
+    NSData *data = [[mpus build] data];
+    [_connection sendMessageWithType:UserStateMessage data:data];
+}
+
+- (void) setServerDeafened:(BOOL)deafened forUser:(MKUser *)user {
+    MPUserState_Builder *mpus = [MPUserState builder];
+    [mpus setSession:(uint32_t)[user session]];
+    [mpus setDeaf:deafened];
     
     NSData *data = [[mpus build] data];
     [_connection sendMessageWithType:UserStateMessage data:data];

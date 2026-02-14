@@ -3002,6 +3002,30 @@ static MPChannelRemove* defaultMPChannelRemoveInstance = nil;
   hasDescriptionHash_ = !!value;
 }
 @synthesize descriptionHash;
+- (BOOL) hasIsEnterRestricted {
+  return !!hasIsEnterRestricted_;
+}
+- (void) setHasIsEnterRestricted:(BOOL) value {
+  hasIsEnterRestricted_ = !!value;
+}
+- (BOOL) isEnterRestricted {
+  return !!isEnterRestricted_;
+}
+- (void) setIsEnterRestricted:(BOOL) value {
+  isEnterRestricted_ = !!value;
+}
+- (BOOL) hasCanEnter {
+  return !!hasCanEnter_;
+}
+- (void) setHasCanEnter:(BOOL) value {
+  hasCanEnter_ = !!value;
+}
+- (BOOL) canEnter {
+  return !!canEnter_;
+}
+- (void) setCanEnter:(BOOL) value {
+  canEnter_ = !!value;
+}
 - (void) dealloc {
   self.name = nil;
   self.linksArray = nil;
@@ -3021,6 +3045,8 @@ static MPChannelRemove* defaultMPChannelRemoveInstance = nil;
     self.position = 0;
     self.maxUsers = 0;
     self.descriptionHash = [NSData data];
+    self.isEnterRestricted = NO;
+    self.canEnter = YES;
   }
   return self;
 }
@@ -3103,6 +3129,12 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
   if (self.hasMaxUsers) {
     [output writeUInt32:11 value:self.maxUsers];
   }
+  if (self.hasIsEnterRestricted) {
+    [output writeBool:12 value:self.isEnterRestricted];
+  }
+  if (self.hasCanEnter) {
+    [output writeBool:13 value:self.canEnter];
+  }
   [self.unknownFields writeToCodedOutputStream:output];
 }
 - (int32_t) serializedSize {
@@ -3165,6 +3197,12 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
   }
   if (self.hasMaxUsers) {
     size += computeUInt32Size(11, self.maxUsers);
+  }
+  if (self.hasIsEnterRestricted) {
+    size += computeBoolSize(12, self.isEnterRestricted);
+  }
+  if (self.hasCanEnter) {
+    size += computeBoolSize(13, self.canEnter);
   }
   size += self.unknownFields.serializedSize;
   memoizedSerializedSize = size;
@@ -3393,6 +3431,12 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
   if (other.hasDescriptionHash) {
     [self setDescriptionHash:other.descriptionHash];
   }
+  if (other.hasIsEnterRestricted) {
+    [self setIsEnterRestricted:other.isEnterRestricted];
+  }
+  if (other.hasCanEnter) {
+    [self setCanEnter:other.canEnter];
+  }
   [self mergeUnknownFields:other.unknownFields];
   return self;
 }
@@ -3456,6 +3500,14 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
       }
       case 88: {
         [self setMaxUsers:[input readUInt32]];
+        break;
+      }
+      case 96: {
+        [self setIsEnterRestricted:[input readBool]];
+        break;
+      }
+      case 104: {
+        [self setCanEnter:[input readBool]];
         break;
       }
     }
@@ -3662,6 +3714,38 @@ static MPChannelState* defaultMPChannelStateInstance = nil;
 - (MPChannelState_Builder*) clearDescriptionHash {
   result.hasDescriptionHash = NO;
   result.descriptionHash = [NSData data];
+  return self;
+}
+- (BOOL) hasIsEnterRestricted {
+  return result.hasIsEnterRestricted;
+}
+- (BOOL) isEnterRestricted {
+  return result.isEnterRestricted;
+}
+- (MPChannelState_Builder*) setIsEnterRestricted:(BOOL) value {
+  result.hasIsEnterRestricted = YES;
+  result.isEnterRestricted = value;
+  return self;
+}
+- (MPChannelState_Builder*) clearIsEnterRestricted {
+  result.hasIsEnterRestricted = NO;
+  result.isEnterRestricted = NO;
+  return self;
+}
+- (BOOL) hasCanEnter {
+  return result.hasCanEnter;
+}
+- (BOOL) canEnter {
+  return result.canEnter;
+}
+- (MPChannelState_Builder*) setCanEnter:(BOOL) value {
+  result.hasCanEnter = YES;
+  result.canEnter = value;
+  return self;
+}
+- (MPChannelState_Builder*) clearCanEnter {
+  result.hasCanEnter = NO;
+  result.canEnter = YES;
   return self;
 }
 @end
@@ -4040,6 +4124,8 @@ static MPUserRemove* defaultMPUserRemoveInstance = nil;
 @property (retain) NSData* textureHash;
 @property BOOL prioritySpeaker;
 @property BOOL recording;
+@property (retain) PBAppendableArray * listeningChannelAddArray;
+@property (retain) PBAppendableArray * listeningChannelRemoveArray;
 @end
 
 @implementation MPUserState
@@ -4212,6 +4298,22 @@ static MPUserRemove* defaultMPUserRemoveInstance = nil;
 - (void) setRecording:(BOOL) value {
   recording_ = !!value;
 }
+@synthesize listeningChannelAddArray;
+@dynamic listeningChannelAdd;
+@synthesize listeningChannelRemoveArray;
+@dynamic listeningChannelRemove;
+- (PBArray *)listeningChannelAdd {
+  return listeningChannelAddArray;
+}
+- (uint32_t)listeningChannelAddAtIndex:(NSUInteger)index {
+  return [listeningChannelAddArray uint32AtIndex:index];
+}
+- (PBArray *)listeningChannelRemove {
+  return listeningChannelRemoveArray;
+}
+- (uint32_t)listeningChannelRemoveAtIndex:(NSUInteger)index {
+  return [listeningChannelRemoveArray uint32AtIndex:index];
+}
 - (void) dealloc {
   self.name = nil;
   self.texture = nil;
@@ -4221,6 +4323,8 @@ static MPUserRemove* defaultMPUserRemoveInstance = nil;
   self.certHash = nil;
   self.commentHash = nil;
   self.textureHash = nil;
+  self.listeningChannelAddArray = nil;
+  self.listeningChannelRemoveArray = nil;
   [super dealloc];
 }
 - (id) init {
@@ -4320,6 +4424,12 @@ static MPUserState* defaultMPUserStateInstance = nil;
   if (self.hasRecording) {
     [output writeBool:19 value:self.recording];
   }
+  for (int i = 0; i < self.listeningChannelAdd.count; i++) {
+    [output writeUInt32:22 value:[self listeningChannelAddAtIndex:i]];
+  }
+  for (int i = 0; i < self.listeningChannelRemove.count; i++) {
+    [output writeUInt32:23 value:[self listeningChannelRemoveAtIndex:i]];
+  }
   [self.unknownFields writeToCodedOutputStream:output];
 }
 - (int32_t) serializedSize {
@@ -4385,6 +4495,22 @@ static MPUserState* defaultMPUserStateInstance = nil;
   }
   if (self.hasRecording) {
     size += computeBoolSize(19, self.recording);
+  }
+  {
+    int32_t dataSize = 0;
+    for (int i = 0; i < self.listeningChannelAdd.count; i++) {
+      dataSize += computeUInt32SizeNoTag([self listeningChannelAddAtIndex:i]);
+    }
+    size += dataSize;
+    size += 2 * (int32_t)self.listeningChannelAdd.count;
+  }
+  {
+    int32_t dataSize = 0;
+    for (int i = 0; i < self.listeningChannelRemove.count; i++) {
+      dataSize += computeUInt32SizeNoTag([self listeningChannelRemoveAtIndex:i]);
+    }
+    size += dataSize;
+    size += 2 * (int32_t)self.listeningChannelRemove.count;
   }
   size += self.unknownFields.serializedSize;
   memoizedSerializedSize = size;
@@ -4692,6 +4818,20 @@ static MPUserState* defaultMPUserStateInstance = nil;
   if (other.hasRecording) {
     [self setRecording:other.recording];
   }
+  if (other.listeningChannelAddArray.count > 0) {
+    if (result.listeningChannelAddArray == nil) {
+      result.listeningChannelAddArray = [[other.listeningChannelAddArray copyWithZone:[other.listeningChannelAddArray zone]] autorelease];
+    } else {
+      [result.listeningChannelAddArray appendArray:other.listeningChannelAddArray];
+    }
+  }
+  if (other.listeningChannelRemoveArray.count > 0) {
+    if (result.listeningChannelRemoveArray == nil) {
+      result.listeningChannelRemoveArray = [[other.listeningChannelRemoveArray copyWithZone:[other.listeningChannelRemoveArray zone]] autorelease];
+    } else {
+      [result.listeningChannelRemoveArray appendArray:other.listeningChannelRemoveArray];
+    }
+  }
   [self mergeUnknownFields:other.unknownFields];
   return self;
 }
@@ -4787,6 +4927,14 @@ static MPUserState* defaultMPUserStateInstance = nil;
       }
       case 152: {
         [self setRecording:[input readBool]];
+        break;
+      }
+      case 176: {
+        [self addListeningChannelAdd:[input readUInt32]];
+        break;
+      }
+      case 184: {
+        [self addListeningChannelRemove:[input readUInt32]];
         break;
       }
     }
@@ -5094,6 +5242,48 @@ static MPUserState* defaultMPUserStateInstance = nil;
 - (MPUserState_Builder*) clearRecording {
   result.hasRecording = NO;
   result.recording = NO;
+  return self;
+}
+- (PBAppendableArray *)listeningChannelAdd {
+  return result.listeningChannelAddArray;
+}
+- (uint32_t)listeningChannelAddAtIndex:(NSUInteger)index {
+  return [result.listeningChannelAddArray uint32AtIndex:index];
+}
+- (MPUserState_Builder *)addListeningChannelAdd:(uint32_t)value {
+  if (result.listeningChannelAddArray == nil) {
+    result.listeningChannelAddArray = [PBAppendableArray arrayWithValueType:PBArrayValueTypeUInt32];
+  }
+  [result.listeningChannelAddArray addUint32:value];
+  return self;
+}
+- (MPUserState_Builder *)setListeningChannelAddArray:(NSArray *)array {
+  result.listeningChannelAddArray = [PBAppendableArray arrayWithArray:array valueType:PBArrayValueTypeUInt32];
+  return self;
+}
+- (MPUserState_Builder *)clearListeningChannelAdd {
+  result.listeningChannelAddArray = nil;
+  return self;
+}
+- (PBAppendableArray *)listeningChannelRemove {
+  return result.listeningChannelRemoveArray;
+}
+- (uint32_t)listeningChannelRemoveAtIndex:(NSUInteger)index {
+  return [result.listeningChannelRemoveArray uint32AtIndex:index];
+}
+- (MPUserState_Builder *)addListeningChannelRemove:(uint32_t)value {
+  if (result.listeningChannelRemoveArray == nil) {
+    result.listeningChannelRemoveArray = [PBAppendableArray arrayWithValueType:PBArrayValueTypeUInt32];
+  }
+  [result.listeningChannelRemoveArray addUint32:value];
+  return self;
+}
+- (MPUserState_Builder *)setListeningChannelRemoveArray:(NSArray *)array {
+  result.listeningChannelRemoveArray = [PBAppendableArray arrayWithArray:array valueType:PBArrayValueTypeUInt32];
+  return self;
+}
+- (MPUserState_Builder *)clearListeningChannelRemove {
+  result.listeningChannelRemoveArray = nil;
   return self;
 }
 @end
