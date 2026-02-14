@@ -197,8 +197,21 @@
     if ([mix count] > 0) {
         for (MKAudioOutputUser *ou in mix) {
             
+            // Sidetone 没有 userSession，直接混音即可（不需要 session 级别的静音/音量控制）
+            if ([ou isKindOfClass:[MKAudioOutputSidetone class]]) {
+                const float * restrict userBuffer = [ou buffer];
+                for (s = 0; s < nchan; ++s) {
+                    const float str = _speakerVolume[s];
+                    float * restrict o = (float *)mixBuffer + s;
+                    for (i = 0; i < nsamp; ++i) {
+                        o[i*nchan] += userBuffer[i] * str;
+                    }
+                }
+                continue;
+            }
+            
             // 1. 获取 Session ID (确保类型匹配)
-            NSUInteger sessionID = [ou userSession];
+            NSUInteger sessionID = [(MKAudioOutputSpeech *)ou userSession];
             NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:sessionID];
             
             // 2. 检查屏蔽 (Local Mute)

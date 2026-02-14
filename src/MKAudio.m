@@ -42,6 +42,11 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
     MKConnection             *_connection;
     MKAudioSettings          _audioSettings;
     BOOL                     _running;
+    
+    // 保存闭麦/不听状态，在 audio restart 后恢复
+    BOOL                     _cachedSelfMuted;
+    BOOL                     _cachedSuppressed;
+    BOOL                     _cachedMuted;
 }
 @end
 
@@ -285,6 +290,11 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
         _audioInput = [[MKAudioInput alloc] initWithDevice:_audioDevice andSettings:&_audioSettings];
         [_audioInput setMainConnectionForAudio:_connection];
         
+        // 恢复 audio restart 前的闭麦/不听状态
+        [_audioInput setSelfMuted:_cachedSelfMuted];
+        [_audioInput setSuppressed:_cachedSuppressed];
+        [_audioInput setMuted:_cachedMuted];
+        
         _audioOutput = [[MKAudioOutput alloc] initWithDevice:_audioDevice andSettings:&_audioSettings];
         
         if (_audioSettings.enableSideTone) {
@@ -388,18 +398,21 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
 
 - (void) setSelfMuted:(BOOL)selfMuted {
     @synchronized(self) {
+        _cachedSelfMuted = selfMuted;
         [_audioInput setSelfMuted:selfMuted];
     }
 }
 
 - (void) setSuppressed:(BOOL)suppressed {
     @synchronized(self) {
+        _cachedSuppressed = suppressed;
         [_audioInput setSuppressed:suppressed];
     }
 }
 
 - (void) setMuted:(BOOL)muted {
     @synchronized(self) {
+        _cachedMuted = muted;
         [_audioInput setMuted:muted];
     }
 }
