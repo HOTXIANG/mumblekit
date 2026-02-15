@@ -405,7 +405,10 @@
         isSpeech = speex_preprocess_run(_preprocessorState, frame);
     } else {
         int i;
-        float gain = 1.0f + _settings.micBoost; // 获取增益系数
+        float gain = _settings.micBoost; // 1.0 = 100%, 3.0 = 300%
+        if (gain < 0.0f) {
+            gain = 0.0f;
+        }
         
         for (i = 0; i < frameSize; i++) {
             // 1. 转为浮点数计算，防止中间计算溢出

@@ -34,6 +34,91 @@
 }
 @end
 
+static BOOL MUAudioDeviceHasInputStreams(AudioDeviceID devId) {
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = kAudioDevicePropertyStreams;
+    addr.mScope = kAudioDevicePropertyScopeInput;
+    addr.mElement = kAudioObjectPropertyElementMaster;
+    
+    UInt32 size = 0;
+    OSStatus err = AudioObjectGetPropertyDataSize(devId, &addr, 0, NULL, &size);
+    return (err == noErr && size > 0);
+}
+
+static NSString *MUCopyAudioDeviceUID(AudioDeviceID devId) {
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = kAudioDevicePropertyDeviceUID;
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    addr.mElement = kAudioObjectPropertyElementMaster;
+    
+    CFStringRef uidRef = NULL;
+    UInt32 size = sizeof(CFStringRef);
+    OSStatus err = AudioObjectGetPropertyData(devId, &addr, 0, NULL, &size, &uidRef);
+    if (err != noErr || uidRef == NULL) {
+        return nil;
+    }
+    NSString *uid = [(__bridge NSString *)uidRef copy];
+    CFRelease(uidRef);
+    return [uid autorelease];
+}
+
+static NSString *MUCopyAudioDeviceName(AudioDeviceID devId) {
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = kAudioObjectPropertyName;
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    addr.mElement = kAudioObjectPropertyElementMaster;
+    
+    CFStringRef nameRef = NULL;
+    UInt32 size = sizeof(CFStringRef);
+    OSStatus err = AudioObjectGetPropertyData(devId, &addr, 0, NULL, &size, &nameRef);
+    if (err != noErr || nameRef == NULL) {
+        return nil;
+    }
+    NSString *name = [(__bridge NSString *)nameRef copy];
+    CFRelease(nameRef);
+    return [name autorelease];
+}
+
+static BOOL MUFindInputDeviceByUID(NSString *uid, AudioDeviceID *outDevId) {
+    if (uid == nil || [uid length] == 0 || outDevId == NULL) return NO;
+    
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = kAudioHardwarePropertyDevices;
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    addr.mElement = kAudioObjectPropertyElementMaster;
+    
+    UInt32 size = 0;
+    OSStatus err = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &addr, 0, NULL, &size);
+    if (err != noErr || size < sizeof(AudioDeviceID)) {
+        return NO;
+    }
+    
+    UInt32 count = size / sizeof(AudioDeviceID);
+    AudioDeviceID *devIds = (AudioDeviceID *)calloc(count, sizeof(AudioDeviceID));
+    if (devIds == NULL) return NO;
+    
+    err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, devIds);
+    if (err != noErr) {
+        free(devIds);
+        return NO;
+    }
+    
+    BOOL found = NO;
+    for (UInt32 i = 0; i < count; i++) {
+        AudioDeviceID candidate = devIds[i];
+        if (!MUAudioDeviceHasInputStreams(candidate)) continue;
+        NSString *candidateUID = MUCopyAudioDeviceUID(candidate);
+        if (candidateUID && [candidateUID isEqualToString:uid]) {
+            *outDevId = candidate;
+            found = YES;
+            break;
+        }
+    }
+    
+    free(devIds);
+    return found;
+}
+
 static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts,
                               UInt32 busnum, UInt32 nframes, AudioBufferList *buflist) {
     MKMacAudioDevice *dev = (MKMacAudioDevice *)udata;
@@ -131,13 +216,41 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     AudioStreamBasicDescription fmt;
     AudioDeviceID devId;
     
-    // Get default device
+    // 先取系统默认输入设备
     len = sizeof(AudioDeviceID);
     err = AudioHardwareGetProperty(kAudioHardwarePropertyDefaultInputDevice, &len, &devId);
     if (err != noErr) {
         NSLog(@"MKMacAudioDevice: Unable to query for default device.");
         return NO;
     }
+    
+    // 根据用户设置决定是否跟随系统，或固定到指定麦克风 UID
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL followSystem = YES;
+    if ([defaults objectForKey:@"AudioFollowSystemInputDevice"] != nil) {
+        followSystem = [defaults boolForKey:@"AudioFollowSystemInputDevice"];
+    }
+    if (!followSystem) {
+        NSString *preferredUID = [[defaults stringForKey:@"AudioPreferredInputDeviceUID"]
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (preferredUID && [preferredUID length] > 0) {
+            AudioDeviceID preferredDevId = 0;
+            if (MUFindInputDeviceByUID(preferredUID, &preferredDevId)) {
+                devId = preferredDevId;
+            } else {
+                NSLog(@"MKMacAudioDevice: Preferred input device UID not found. Falling back to system default.");
+                [defaults setBool:YES forKey:@"AudioFollowSystemInputDevice"];
+                [defaults setObject:@"" forKey:@"AudioPreferredInputDeviceUID"];
+            }
+        } else {
+            [defaults setBool:YES forKey:@"AudioFollowSystemInputDevice"];
+            [defaults setObject:@"" forKey:@"AudioPreferredInputDeviceUID"];
+        }
+    }
+    
+    NSString *selectedName = MUCopyAudioDeviceName(devId);
+    NSString *selectedUID = MUCopyAudioDeviceUID(devId);
+    NSLog(@"MKMacAudioDevice: Using input device: %@ (%@)", selectedName ?: @"Unknown", selectedUID ?: @"No UID");
     
     desc.componentType = kAudioUnitType_Output;
     desc.componentSubType = kAudioUnitSubType_HALOutput;
@@ -177,11 +290,11 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         return NO;
     }
     
-    // Set default device
+    // Set selected input device
     len = sizeof(AudioDeviceID);
     err = AudioUnitSetProperty(_recordAudioUnit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &devId, len);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to set default device.");
+        NSLog(@"MKMacAudioDevice: Unable to set selected input device.");
         return NO;
     }
     

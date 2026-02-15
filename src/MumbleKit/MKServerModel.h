@@ -441,6 +441,12 @@
 /// @param  channel     The channel for which permissions were queried.
 - (void) serverModel:(MKServerModel *)model permissionQueryResult:(UInt32)permissions forChannel:(MKChannel *)channel;
 
+/// Called when user-id to user-name resolution result is received.
+///
+/// @param model          The server model object.
+/// @param userNamesById  NSDictionary<NSNumber(userId), NSString(userName)> mapping.
+- (void) serverModel:(MKServerModel *)model didResolveUserNames:(NSDictionary *)userNamesById;
+
 @end
 
 /// @class MKServerModel MKServerModel.h MumbleKit/MKServerModel.h
@@ -671,6 +677,12 @@
 ///
 /// @param channel  The channel to query permissions for.
 - (void) requestPermissionForChannel:(MKChannel *)channel;
+
+/// Query registered usernames by user IDs.
+/// When received, the serverModel:didResolveUserNames: delegate method may be called.
+///
+/// @param userIds  NSArray<NSNumber *> of registered user IDs.
+- (void) queryUserNamesForIds:(NSArray *)userIds;
 
 ///-----------------------------
 /// @name Channel Listening operations

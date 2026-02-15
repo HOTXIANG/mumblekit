@@ -18,7 +18,7 @@
 #if TARGET_OS_IPHONE == 1
 # import "MKVoiceProcessingDevice.h"
 # import "MKiOSAudioDevice.h"
-#elif TARGET_OS_MAC == 1
+#elif TARGET_OS_OSX == 1
 # import "MKVoiceProcessingDevice.h"
 # import "MKMacAudioDevice.h"
 #endif
@@ -26,12 +26,18 @@
 #import <AudioUnit/AudioUnit.h>
 #import <AudioUnit/AUComponent.h>
 #import <AudioToolbox/AudioToolbox.h>
+#if TARGET_OS_OSX == 1
+#import <CoreAudio/CoreAudio.h>
+#endif
 
 #if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
 #import <UIKit/UIKit.h>
 #endif
 
 NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
+#if TARGET_OS_OSX == 1
+static NSString *const MUMacAudioInputDevicesChangedNotification = @"MUMacAudioInputDevicesChanged";
+#endif
 
 @interface MKAudio () {
     id<MKAudioDelegate>      _delegate;
@@ -47,8 +53,96 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
     BOOL                     _cachedSelfMuted;
     BOOL                     _cachedSuppressed;
     BOOL                     _cachedMuted;
+#if TARGET_OS_OSX == 1
+    BOOL                     _isObservingDefaultInputDevice;
+    CFAbsoluteTime           _lastDefaultInputSwitchTime;
+#endif
 }
+#if TARGET_OS_OSX == 1
+- (void)startObservingDefaultInputDeviceChanges;
+- (void)stopObservingDefaultInputDeviceChanges;
+- (void)handleDefaultInputDeviceChanged;
+#endif
 @end
+
+#if TARGET_OS_OSX == 1
+static OSStatus MKAudioDefaultInputDeviceChangedCallback(AudioObjectID inObjectID,
+                                                          UInt32 inNumberAddresses,
+                                                          const AudioObjectPropertyAddress inAddresses[],
+                                                          void *inClientData) {
+    MKAudio *audio = (MKAudio *)inClientData;
+    if (!audio) return noErr;
+    [audio handleDefaultInputDeviceChanged];
+    return noErr;
+}
+
+static BOOL MKAudioDeviceHasInputStreams(AudioDeviceID devId) {
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = kAudioDevicePropertyStreams;
+    addr.mScope = kAudioDevicePropertyScopeInput;
+    addr.mElement = kAudioObjectPropertyElementMaster;
+    
+    UInt32 size = 0;
+    OSStatus err = AudioObjectGetPropertyDataSize(devId, &addr, 0, NULL, &size);
+    return (err == noErr && size > 0);
+}
+
+static NSString *MKAudioCopyDeviceUID(AudioDeviceID devId) {
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = kAudioDevicePropertyDeviceUID;
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    addr.mElement = kAudioObjectPropertyElementMaster;
+    
+    CFStringRef uidRef = NULL;
+    UInt32 size = sizeof(CFStringRef);
+    OSStatus err = AudioObjectGetPropertyData(devId, &addr, 0, NULL, &size, &uidRef);
+    if (err != noErr || uidRef == NULL) {
+        return nil;
+    }
+    NSString *uid = [(__bridge NSString *)uidRef copy];
+    CFRelease(uidRef);
+    return [uid autorelease];
+}
+
+static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
+    if (uid == nil || [uid length] == 0) return NO;
+    
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = kAudioHardwarePropertyDevices;
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    addr.mElement = kAudioObjectPropertyElementMaster;
+    
+    UInt32 size = 0;
+    OSStatus err = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &addr, 0, NULL, &size);
+    if (err != noErr || size < sizeof(AudioDeviceID)) {
+        return NO;
+    }
+    
+    UInt32 count = size / sizeof(AudioDeviceID);
+    AudioDeviceID *devIds = (AudioDeviceID *)calloc(count, sizeof(AudioDeviceID));
+    if (devIds == NULL) return NO;
+    
+    err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, devIds);
+    if (err != noErr) {
+        free(devIds);
+        return NO;
+    }
+    
+    BOOL found = NO;
+    for (UInt32 i = 0; i < count; i++) {
+        AudioDeviceID candidate = devIds[i];
+        if (!MKAudioDeviceHasInputStreams(candidate)) continue;
+        NSString *candidateUID = MKAudioCopyDeviceUID(candidate);
+        if (candidateUID && [candidateUID isEqualToString:uid]) {
+            found = YES;
+            break;
+        }
+    }
+    
+    free(devIds);
+    return found;
+}
+#endif
 
 @implementation MKAudio
 
@@ -85,12 +179,18 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
                                                  selector:@selector(handleMediaServicesReset:)
                                                      name:AVAudioSessionMediaServicesWereResetNotification
                                                    object:nil];
+#elif TARGET_OS_OSX == 1
+        _lastDefaultInputSwitchTime = 0;
+        [self startObservingDefaultInputDeviceChanges];
 #endif
     }
     return self;
 }
 
 - (void)dealloc {
+#if TARGET_OS_OSX == 1
+    [self stopObservingDefaultInputDeviceChanges];
+#endif
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [super dealloc];
 }
@@ -204,6 +304,118 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
 }
 #endif // TARGET_OS_IOS
 
+#if TARGET_OS_OSX == 1
+- (void)startObservingDefaultInputDeviceChanges {
+    if (_isObservingDefaultInputDevice) return;
+    
+    AudioObjectPropertyAddress defaultInputAddr;
+    defaultInputAddr.mSelector = kAudioHardwarePropertyDefaultInputDevice;
+    defaultInputAddr.mScope = kAudioObjectPropertyScopeGlobal;
+    defaultInputAddr.mElement = kAudioObjectPropertyElementMaster;
+    
+    OSStatus err = AudioObjectAddPropertyListener(kAudioObjectSystemObject,
+                                                  &defaultInputAddr,
+                                                  MKAudioDefaultInputDeviceChangedCallback,
+                                                  self);
+    if (err != noErr) {
+        NSLog(@"MKAudio: Failed to observe default input device changes (%d).", (int)err);
+        return;
+    }
+    
+    AudioObjectPropertyAddress devicesAddr;
+    devicesAddr.mSelector = kAudioHardwarePropertyDevices;
+    devicesAddr.mScope = kAudioObjectPropertyScopeGlobal;
+    devicesAddr.mElement = kAudioObjectPropertyElementMaster;
+    
+    OSStatus devicesErr = AudioObjectAddPropertyListener(kAudioObjectSystemObject,
+                                                         &devicesAddr,
+                                                         MKAudioDefaultInputDeviceChangedCallback,
+                                                         self);
+    if (devicesErr != noErr) {
+        AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
+                                          &defaultInputAddr,
+                                          MKAudioDefaultInputDeviceChangedCallback,
+                                          self);
+        NSLog(@"MKAudio: Failed to observe device list changes (%d).", (int)devicesErr);
+        return;
+    }
+    
+    _isObservingDefaultInputDevice = YES;
+    NSLog(@"MKAudio: Observing default input and device list changes.");
+}
+
+- (void)stopObservingDefaultInputDeviceChanges {
+    if (!_isObservingDefaultInputDevice) return;
+    
+    AudioObjectPropertyAddress defaultInputAddr;
+    defaultInputAddr.mSelector = kAudioHardwarePropertyDefaultInputDevice;
+    defaultInputAddr.mScope = kAudioObjectPropertyScopeGlobal;
+    defaultInputAddr.mElement = kAudioObjectPropertyElementMaster;
+    
+    OSStatus err = AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
+                                                     &defaultInputAddr,
+                                                     MKAudioDefaultInputDeviceChangedCallback,
+                                                     self);
+    if (err != noErr) {
+        NSLog(@"MKAudio: Failed to remove default input device observer (%d).", (int)err);
+    }
+    
+    AudioObjectPropertyAddress devicesAddr;
+    devicesAddr.mSelector = kAudioHardwarePropertyDevices;
+    devicesAddr.mScope = kAudioObjectPropertyScopeGlobal;
+    devicesAddr.mElement = kAudioObjectPropertyElementMaster;
+    
+    OSStatus devicesErr = AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
+                                                            &devicesAddr,
+                                                            MKAudioDefaultInputDeviceChangedCallback,
+                                                            self);
+    if (devicesErr != noErr) {
+        NSLog(@"MKAudio: Failed to remove device list observer (%d).", (int)devicesErr);
+    }
+    
+    _isObservingDefaultInputDevice = NO;
+}
+
+- (void)handleDefaultInputDeviceChanged {
+    // 节流：避免系统在切换过程中短时间多次回调导致重复 restart
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - _lastDefaultInputSwitchTime < 0.35) {
+        return;
+    }
+    _lastDefaultInputSwitchTime = now;
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioInputDevicesChangedNotification object:nil];
+        
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        BOOL followSystemInput = YES;
+        if ([defaults objectForKey:@"AudioFollowSystemInputDevice"] != nil) {
+            followSystemInput = [defaults boolForKey:@"AudioFollowSystemInputDevice"];
+        }
+        
+        if (!followSystemInput) {
+            NSString *preferredUID = [[defaults stringForKey:@"AudioPreferredInputDeviceUID"]
+                stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if ([preferredUID length] > 0 && MKAudioInputDeviceExistsForUID(preferredUID)) {
+                // 固定设备仍存在时，忽略系统默认设备变化
+                return;
+            }
+            
+            // 固定设备已经不存在，自动回退到“跟随系统”
+            [defaults setBool:YES forKey:@"AudioFollowSystemInputDevice"];
+            [defaults setObject:@"" forKey:@"AudioPreferredInputDeviceUID"];
+            NSLog(@"MKAudio: Preferred input device missing. Auto-fallback to follow system default.");
+        }
+        
+        if (!self->_running) {
+            return;
+        }
+        NSLog(@"MKAudio: Default input device changed. Restarting audio to apply new microphone.");
+        [self restart];
+    });
+}
+#endif // TARGET_OS_OSX
+
 #pragma mark - Control Methods
 
 // Should audio be running?
@@ -273,7 +485,7 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
 #if TARGET_OS_IPHONE == 1
         // ✅ 强制使用 MKVoiceProcessingDevice (支持回声消除/AGC)
         _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&_audioSettings];
-#elif TARGET_OS_MAC == 1
+#elif TARGET_OS_OSX == 1
         _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&_audioSettings];
 #else
 # error Missing MKAudioDevice
@@ -342,6 +554,9 @@ NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
 - (void) updateAudioSettings:(MKAudioSettings *)settings {
     @synchronized(self) {
         memcpy(&_audioSettings, settings, sizeof(MKAudioSettings));
+        if (_audioOutput != nil) {
+            [_audioOutput setMasterVolume:settings->volume];
+        }
     }
     // 如果设置改变（如切换扬声器），可能需要刷新 Session 配置
     // 注意：这里没有自动 restart，调用者通常会在更新设置后手动 restart

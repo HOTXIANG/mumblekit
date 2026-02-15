@@ -36,6 +36,7 @@
     MKUser                    *_connectedUser;
     NSMutableDictionary       *_userMap;
     NSMutableDictionary       *_channelMap;
+    NSArray                   *_pendingQueryUserIds;
     id<MKServerModelDelegate> _delegate;    
 }
 
@@ -108,6 +109,7 @@
     [_connection setMessageHandler:nil];
 
     [(MulticastDelegate *) _delegate release];
+    [_pendingQueryUserIds release];
 
     [self removeAllModelItems];
     
@@ -575,6 +577,37 @@
 }
 
 - (void) connection:(MKConnection *)conn handleQueryUsersMessage: (MPQueryUsers *)msg {
+    NSMutableDictionary *resolved = [NSMutableDictionary dictionary];
+    PBArray *ids = [msg ids];
+    PBArray *names = [msg names];
+    NSUInteger idsCount = ids ? [ids count] : 0;
+    NSUInteger namesCount = names ? [names count] : 0;
+
+    if (idsCount > 0 && namesCount > 0) {
+        NSUInteger n = MIN(idsCount, namesCount);
+        for (NSUInteger i = 0; i < n; i++) {
+            uint32_t userId = [msg idsAtIndex:i];
+            NSString *name = [msg namesAtIndex:i];
+            if (name != nil) {
+                [resolved setObject:name forKey:[NSNumber numberWithUnsignedInt:userId]];
+            }
+        }
+    } else if (namesCount > 0 && [_pendingQueryUserIds count] == namesCount) {
+        for (NSUInteger i = 0; i < namesCount; i++) {
+            NSNumber *userIdNum = [_pendingQueryUserIds objectAtIndex:i];
+            NSString *name = [msg namesAtIndex:i];
+            if (userIdNum != nil && name != nil) {
+                [resolved setObject:name forKey:userIdNum];
+            }
+        }
+    }
+
+    [_pendingQueryUserIds release];
+    _pendingQueryUserIds = nil;
+
+    if ([resolved count] > 0) {
+        [_delegate serverModel:self didResolveUserNames:resolved];
+    }
 }
 
 - (void) connection:(MKConnection *)conn handleContextActionMessage: (MPContextAction *)msg {
@@ -1216,6 +1249,32 @@
 
     NSData *data = [[pq build] data];
     [_connection sendMessageWithType:PermissionQueryMessage data:data];
+}
+
+- (void) queryUserNamesForIds:(NSArray *)userIds {
+    if (userIds == nil || [userIds count] == 0) {
+        return;
+    }
+
+    MPQueryUsers_Builder *query = [MPQueryUsers builder];
+    NSMutableArray *sanitized = [NSMutableArray arrayWithCapacity:[userIds count]];
+    for (id obj in userIds) {
+        if ([obj respondsToSelector:@selector(unsignedIntValue)]) {
+            uint32_t uid = (uint32_t)[obj unsignedIntValue];
+            [query addIds:uid];
+            [sanitized addObject:[NSNumber numberWithUnsignedInt:uid]];
+        }
+    }
+
+    if ([sanitized count] == 0) {
+        return;
+    }
+
+    [_pendingQueryUserIds release];
+    _pendingQueryUserIds = [sanitized copy];
+
+    NSData *data = [[query build] data];
+    [_connection sendMessageWithType:QueryUsersMessage data:data];
 }
 
 - (void) connection:(MKConnection *)conn handlePermissionQueryMessage: (MPPermissionQuery *)msg {

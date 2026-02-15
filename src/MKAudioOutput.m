@@ -145,6 +145,10 @@
 - (BOOL) mixFrames:(void *)frames amount:(unsigned int)nsamp {
     unsigned int i, s;
     BOOL retVal = NO;
+    float globalVolume = _settings.volume;
+    if (globalVolume < 0.0f) {
+        globalVolume = 0.0f;
+    }
 
     NSMutableArray *mix = [[NSMutableArray alloc] init];
     NSMutableArray *del = [[NSMutableArray alloc] init];
@@ -201,7 +205,7 @@
             if ([ou isKindOfClass:[MKAudioOutputSidetone class]]) {
                 const float * restrict userBuffer = [ou buffer];
                 for (s = 0; s < nchan; ++s) {
-                    const float str = _speakerVolume[s];
+                    const float str = _speakerVolume[s] * globalVolume;
                     float * restrict o = (float *)mixBuffer + s;
                     for (i = 0; i < nsamp; ++i) {
                         o[i*nchan] += userBuffer[i] * str;
@@ -229,7 +233,7 @@
             const float * restrict userBuffer = [ou buffer];
             for (s = 0; s < nchan; ++s) {
                 // 4. 应用音量乘数
-                const float str = _speakerVolume[s] * volMultiplier;
+                const float str = _speakerVolume[s] * volMultiplier * globalVolume;
                 
                 float * restrict o = (float *)mixBuffer + s;
                 for (i = 0; i < nsamp; ++i) {
@@ -270,6 +274,7 @@
             
             _cngRegister1 ^= _cngRegister2;
             runningvalue = (float)_cngRegister2 * _cngAmpliScaler;
+            runningvalue *= globalVolume;
             runningvalue += _cngLastSample; //one pole smoother
             runningvalue *= 0.5;            //one pole smoother
             _cngLastSample = runningvalue;
@@ -327,6 +332,12 @@
     mixerInfoCopy = [_mixerInfo copy];
     [_mixerInfoLock unlock];
     return mixerInfoCopy;
+}
+
+- (void) setMasterVolume:(float)volume {
+    [_outputLock lock];
+    _settings.volume = volume;
+    [_outputLock unlock];
 }
 
 - (void) setVolume:(float)volume forSession:(NSUInteger)session {
