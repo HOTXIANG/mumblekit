@@ -44,7 +44,6 @@
 		0E217BA12DA2CEBB00028D7F /* e_aes_cbc_hmac_sha256.c in Sources */ = {isa = PBXBuildFile; fileRef = 0E217BA02DA2CEBB00028D7F /* e_aes_cbc_hmac_sha256.c */; };
 		0E217BA22DA2CEBB00028D7F /* e_aes_cbc_hmac_sha256.c in Sources */ = {isa = PBXBuildFile; fileRef = 0E217BA02DA2CEBB00028D7F /* e_aes_cbc_hmac_sha256.c */; };
 		0E217BA42DA2CEE800028D7F /* dh_pmeth.c in Sources */ = {isa = PBXBuildFile; fileRef = 0E217BA32DA2CEE800028D7F /* dh_pmeth.c */; };
-		0E217BA52DA2CEE800028D7F /* dh_pmeth.c in Sources */ = {isa = PBXBuildFile; fileRef = 0E217BA32DA2CEE800028D7F /* dh_pmeth.c */; };
 		0E217BA72DA2CF2800028D7F /* dh_rfc5114.c in Sources */ = {isa = PBXBuildFile; fileRef = 0E217BA62DA2CF2800028D7F /* dh_rfc5114.c */; };
 		0E217BA82DA2CF2800028D7F /* dh_rfc5114.c in Sources */ = {isa = PBXBuildFile; fileRef = 0E217BA62DA2CF2800028D7F /* dh_rfc5114.c */; };
 		0E217BAA2DA2CF3B00028D7F /* dh_kdf.c in Sources */ = {isa = PBXBuildFile; fileRef = 0E217BA92DA2CF3B00028D7F /* dh_kdf.c */; };
@@ -3261,7 +3260,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 1620;
+				LastUpgradeCheck = 2620;
 			};
 			buildConfigurationList = 28F58C40132AF1070053C348 /* Build configuration list for PBXProject "OpenSSL" */;
 			compatibilityVersion = "Xcode 3.2";
@@ -4133,7 +4132,6 @@
 				2852D69A132AF3870078051B /* cmll_misc.c in Sources */,
 				2852D69C132AF3870078051B /* cmll_ofb.c in Sources */,
 				2852D6A4132AF3AA0078051B /* c_cfb64.c in Sources */,
-				0E217BA52DA2CEE800028D7F /* dh_pmeth.c in Sources */,
 				2852D6A6132AF3AA0078051B /* c_ecb.c in Sources */,
 				2852D6A8132AF3AA0078051B /* c_enc.c in Sources */,
 				2852D6AA132AF3AA0078051B /* c_ofb64.c in Sources */,

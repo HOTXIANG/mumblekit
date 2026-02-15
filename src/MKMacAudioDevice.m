@@ -38,7 +38,7 @@ static BOOL MUAudioDeviceHasInputStreams(AudioDeviceID devId) {
     AudioObjectPropertyAddress addr;
     addr.mSelector = kAudioDevicePropertyStreams;
     addr.mScope = kAudioDevicePropertyScopeInput;
-    addr.mElement = kAudioObjectPropertyElementMaster;
+    addr.mElement = kAudioObjectPropertyElementMain;
     
     UInt32 size = 0;
     OSStatus err = AudioObjectGetPropertyDataSize(devId, &addr, 0, NULL, &size);
@@ -49,7 +49,7 @@ static NSString *MUCopyAudioDeviceUID(AudioDeviceID devId) {
     AudioObjectPropertyAddress addr;
     addr.mSelector = kAudioDevicePropertyDeviceUID;
     addr.mScope = kAudioObjectPropertyScopeGlobal;
-    addr.mElement = kAudioObjectPropertyElementMaster;
+    addr.mElement = kAudioObjectPropertyElementMain;
     
     CFStringRef uidRef = NULL;
     UInt32 size = sizeof(CFStringRef);
@@ -66,7 +66,7 @@ static NSString *MUCopyAudioDeviceName(AudioDeviceID devId) {
     AudioObjectPropertyAddress addr;
     addr.mSelector = kAudioObjectPropertyName;
     addr.mScope = kAudioObjectPropertyScopeGlobal;
-    addr.mElement = kAudioObjectPropertyElementMaster;
+    addr.mElement = kAudioObjectPropertyElementMain;
     
     CFStringRef nameRef = NULL;
     UInt32 size = sizeof(CFStringRef);
@@ -85,7 +85,7 @@ static BOOL MUFindInputDeviceByUID(NSString *uid, AudioDeviceID *outDevId) {
     AudioObjectPropertyAddress addr;
     addr.mSelector = kAudioHardwarePropertyDevices;
     addr.mScope = kAudioObjectPropertyScopeGlobal;
-    addr.mElement = kAudioObjectPropertyElementMaster;
+    addr.mElement = kAudioObjectPropertyElementMain;
     
     UInt32 size = 0;
     OSStatus err = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &addr, 0, NULL, &size);
@@ -216,9 +216,13 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     AudioStreamBasicDescription fmt;
     AudioDeviceID devId;
     
-    // 先取系统默认输入设备
+    // 先取系统默认输入设备（使用 AudioObject API，避免已废弃的 AudioHardwareGetProperty）
+    AudioObjectPropertyAddress defaultInputAddr;
+    defaultInputAddr.mSelector = kAudioHardwarePropertyDefaultInputDevice;
+    defaultInputAddr.mScope = kAudioObjectPropertyScopeGlobal;
+    defaultInputAddr.mElement = kAudioObjectPropertyElementMain;
     len = sizeof(AudioDeviceID);
-    err = AudioHardwareGetProperty(kAudioHardwarePropertyDefaultInputDevice, &len, &devId);
+    err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &defaultInputAddr, 0, NULL, &len, &devId);
     if (err != noErr) {
         NSLog(@"MKMacAudioDevice: Unable to query for default device.");
         return NO;

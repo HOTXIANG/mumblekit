@@ -80,7 +80,7 @@ static BOOL MKAudioDeviceHasInputStreams(AudioDeviceID devId) {
     AudioObjectPropertyAddress addr;
     addr.mSelector = kAudioDevicePropertyStreams;
     addr.mScope = kAudioDevicePropertyScopeInput;
-    addr.mElement = kAudioObjectPropertyElementMaster;
+    addr.mElement = kAudioObjectPropertyElementMain;
     
     UInt32 size = 0;
     OSStatus err = AudioObjectGetPropertyDataSize(devId, &addr, 0, NULL, &size);
@@ -91,7 +91,7 @@ static NSString *MKAudioCopyDeviceUID(AudioDeviceID devId) {
     AudioObjectPropertyAddress addr;
     addr.mSelector = kAudioDevicePropertyDeviceUID;
     addr.mScope = kAudioObjectPropertyScopeGlobal;
-    addr.mElement = kAudioObjectPropertyElementMaster;
+    addr.mElement = kAudioObjectPropertyElementMain;
     
     CFStringRef uidRef = NULL;
     UInt32 size = sizeof(CFStringRef);
@@ -110,7 +110,7 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
     AudioObjectPropertyAddress addr;
     addr.mSelector = kAudioHardwarePropertyDevices;
     addr.mScope = kAudioObjectPropertyScopeGlobal;
-    addr.mElement = kAudioObjectPropertyElementMaster;
+    addr.mElement = kAudioObjectPropertyElementMain;
     
     UInt32 size = 0;
     OSStatus err = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &addr, 0, NULL, &size);
@@ -311,7 +311,7 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
     AudioObjectPropertyAddress defaultInputAddr;
     defaultInputAddr.mSelector = kAudioHardwarePropertyDefaultInputDevice;
     defaultInputAddr.mScope = kAudioObjectPropertyScopeGlobal;
-    defaultInputAddr.mElement = kAudioObjectPropertyElementMaster;
+    defaultInputAddr.mElement = kAudioObjectPropertyElementMain;
     
     OSStatus err = AudioObjectAddPropertyListener(kAudioObjectSystemObject,
                                                   &defaultInputAddr,
@@ -325,7 +325,7 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
     AudioObjectPropertyAddress devicesAddr;
     devicesAddr.mSelector = kAudioHardwarePropertyDevices;
     devicesAddr.mScope = kAudioObjectPropertyScopeGlobal;
-    devicesAddr.mElement = kAudioObjectPropertyElementMaster;
+    devicesAddr.mElement = kAudioObjectPropertyElementMain;
     
     OSStatus devicesErr = AudioObjectAddPropertyListener(kAudioObjectSystemObject,
                                                          &devicesAddr,
@@ -350,7 +350,7 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
     AudioObjectPropertyAddress defaultInputAddr;
     defaultInputAddr.mSelector = kAudioHardwarePropertyDefaultInputDevice;
     defaultInputAddr.mScope = kAudioObjectPropertyScopeGlobal;
-    defaultInputAddr.mElement = kAudioObjectPropertyElementMaster;
+    defaultInputAddr.mElement = kAudioObjectPropertyElementMain;
     
     OSStatus err = AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
                                                      &defaultInputAddr,
@@ -363,7 +363,7 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
     AudioObjectPropertyAddress devicesAddr;
     devicesAddr.mSelector = kAudioHardwarePropertyDevices;
     devicesAddr.mScope = kAudioObjectPropertyScopeGlobal;
-    devicesAddr.mElement = kAudioObjectPropertyElementMaster;
+    devicesAddr.mElement = kAudioObjectPropertyElementMain;
     
     OSStatus devicesErr = AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
                                                             &devicesAddr,

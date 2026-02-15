@@ -282,7 +282,7 @@
         PBArray *addArr = [msg listeningChannelAdd];
         NSMutableArray *addChannels = [NSMutableArray arrayWithCapacity:addArr.count];
         for (NSUInteger i = 0; i < addArr.count; i++) {
-            [addChannels addObject:@([msg listeningChannelAddAtIndex:i])];
+            [addChannels addObject:@([addArr uint32AtIndex:i])];
         }
         NSDictionary *info = @{
             @"user": user,
@@ -294,7 +294,7 @@
         PBArray *removeArr = [msg listeningChannelRemove];
         NSMutableArray *removeChannels = [NSMutableArray arrayWithCapacity:removeArr.count];
         for (NSUInteger i = 0; i < removeArr.count; i++) {
-            [removeChannels addObject:@([msg listeningChannelRemoveAtIndex:i])];
+            [removeChannels addObject:@([removeArr uint32AtIndex:i])];
         }
         NSDictionary *info = @{
             @"user": user,

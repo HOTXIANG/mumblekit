@@ -313,7 +313,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 1620;
+				LastUpgradeCheck = 2620;
 			};
 			buildConfigurationList = 28D1DAE2132AEB1400456ED6 /* Build configuration list for PBXProject "Speex" */;
 			compatibilityVersion = "Xcode 3.2";

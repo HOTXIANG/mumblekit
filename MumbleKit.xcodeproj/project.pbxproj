@@ -379,13 +379,13 @@
 		288211C5161CECD000E72F91 /* MKiOSAudioDevice.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = MKiOSAudioDevice.h; path = src/MKiOSAudioDevice.h; sourceTree = SOURCE_ROOT; };
 		288211C6161CECD000E72F91 /* MKiOSAudioDevice.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKiOSAudioDevice.m; path = src/MKiOSAudioDevice.m; sourceTree = SOURCE_ROOT; };
 		28BCF2C1132AE3B40003AEC1 /* libMumbleKit.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libMumbleKit.a; sourceTree = BUILT_PRODUCTS_DIR; };
-		28CC36EA132ED87000241269 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = SDKs/MacOSX10.6.sdk/System/Library/Frameworks/Security.framework; sourceTree = DEVELOPER_DIR; };
-		28CC36EC132ED88200241269 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = SDKs/MacOSX10.6.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
-		28CC36EE132ED88A00241269 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = SDKs/MacOSX10.6.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
-		28CC36F0132ED89A00241269 /* CoreServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreServices.framework; path = SDKs/MacOSX10.6.sdk/System/Library/Frameworks/CoreServices.framework; sourceTree = DEVELOPER_DIR; };
-		28CC36F2132ED8B300241269 /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = SDKs/MacOSX10.6.sdk/System/Library/Frameworks/AudioToolbox.framework; sourceTree = DEVELOPER_DIR; };
-		28CC36F4132ED8BA00241269 /* AudioUnit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioUnit.framework; path = SDKs/MacOSX10.6.sdk/System/Library/Frameworks/AudioUnit.framework; sourceTree = DEVELOPER_DIR; };
-		28CC36F6132ED8C300241269 /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = SDKs/MacOSX10.6.sdk/System/Library/Frameworks/CoreAudio.framework; sourceTree = DEVELOPER_DIR; };
+		28CC36EA132ED87000241269 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		28CC36EC132ED88200241269 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
+		28CC36EE132ED88A00241269 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
+		28CC36F0132ED89A00241269 /* CoreServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreServices.framework; path = System/Library/Frameworks/CoreServices.framework; sourceTree = SDKROOT; };
+		28CC36F2132ED8B300241269 /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
+		28CC36F4132ED8BA00241269 /* AudioUnit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioUnit.framework; path = System/Library/Frameworks/AudioUnit.framework; sourceTree = SDKROOT; };
+		28CC36F6132ED8C300241269 /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = System/Library/Frameworks/CoreAudio.framework; sourceTree = SDKROOT; };
 		28CC36F8132ED92500241269 /* Mumble.pb.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = Mumble.pb.m; path = proto/Mumble.pb.m; sourceTree = SOURCE_ROOT; };
 		28CC36F9132ED92500241269 /* ObjectivecDescriptor.pb.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = ObjectivecDescriptor.pb.m; path = proto/ObjectivecDescriptor.pb.m; sourceTree = SOURCE_ROOT; };
 		28CC370E132EDC7300241269 /* libCELT-0.7.0.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; path = "libCELT-0.7.0.a"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -405,39 +405,16 @@
 		F2C0EE3F2E0E1F0800B80B44 /* MUCertificateCreationProgressView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUCertificateCreationProgressView.h; sourceTree = "<group>"; };
 		F2C0EE402E0E1F0800B80B44 /* MUCertificateCreationProgressView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUCertificateCreationProgressView.m; sourceTree = "<group>"; };
 		F2C0EE412E0E1F0800B80B44 /* MUCertificateCreationProgressView.xib */ = {isa = PBXFileReference; lastKnownFileType = file.xib; path = MUCertificateCreationProgressView.xib; sourceTree = "<group>"; };
-		F2C0EE422E0E1F0800B80B44 /* MUCertificateCell.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUCertificateCell.h; sourceTree = "<group>"; };
-		F2C0EE432E0E1F0800B80B44 /* MUCertificateCell.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUCertificateCell.m; sourceTree = "<group>"; };
-		F2C0EE442E0E1F0800B80B44 /* MUCertificateCell.xib */ = {isa = PBXFileReference; lastKnownFileType = file.xib; path = MUCertificateCell.xib; sourceTree = "<group>"; };
-		F2C0EE452E0E1F0800B80B44 /* MUCertificateViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUCertificateViewController.h; sourceTree = "<group>"; };
-		F2C0EE462E0E1F0800B80B44 /* MUCertificateViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUCertificateViewController.m; sourceTree = "<group>"; };
 		F2C0EE472E0E1F0800B80B44 /* MUCertificateCreationView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUCertificateCreationView.h; sourceTree = "<group>"; };
 		F2C0EE482E0E1F0800B80B44 /* MUCertificateCreationView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUCertificateCreationView.m; sourceTree = "<group>"; };
 		F2C0EE492E0E1F0800B80B44 /* MUCertificateController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUCertificateController.h; sourceTree = "<group>"; };
 		F2C0EE4A2E0E1F0800B80B44 /* MUCertificateController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUCertificateController.m; sourceTree = "<group>"; };
 		F2C0EE4B2E0E1F0800B80B44 /* MUCertificateChainBuilder.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUCertificateChainBuilder.h; sourceTree = "<group>"; };
 		F2C0EE4C2E0E1F0800B80B44 /* MUCertificateChainBuilder.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUCertificateChainBuilder.m; sourceTree = "<group>"; };
-		F2C0EE4D2E0E1F0800B80B44 /* MUCertificateDiskImportViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUCertificateDiskImportViewController.h; sourceTree = "<group>"; };
-		F2C0EE4E2E0E1F0800B80B44 /* MUCertificateDiskImportViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUCertificateDiskImportViewController.m; sourceTree = "<group>"; };
 		F2C0EE502E0E1F0800B80B44 /* MUDatabase.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUDatabase.h; sourceTree = "<group>"; };
 		F2C0EE512E0E1F0800B80B44 /* MUDatabase.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUDatabase.m; sourceTree = "<group>"; };
 		F2C0EE522E0E1F0800B80B44 /* MUFavouriteServer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUFavouriteServer.h; sourceTree = "<group>"; };
 		F2C0EE532E0E1F0800B80B44 /* MUFavouriteServer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUFavouriteServer.m; sourceTree = "<group>"; };
-		F2C0EE552E0E1F0800B80B44 /* MUPreferencesViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUPreferencesViewController.h; sourceTree = "<group>"; };
-		F2C0EE562E0E1F0800B80B44 /* MUPreferencesViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUPreferencesViewController.m; sourceTree = "<group>"; };
-		F2C0EE572E0E1F0800B80B44 /* MUCertificatePreferencesViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUCertificatePreferencesViewController.h; sourceTree = "<group>"; };
-		F2C0EE582E0E1F0800B80B44 /* MUCertificatePreferencesViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUCertificatePreferencesViewController.m; sourceTree = "<group>"; };
-		F2C0EE592E0E1F0800B80B44 /* MUAudioTransmissionPreferencesViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUAudioTransmissionPreferencesViewController.h; sourceTree = "<group>"; };
-		F2C0EE5A2E0E1F0800B80B44 /* MUAudioTransmissionPreferencesViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUAudioTransmissionPreferencesViewController.m; sourceTree = "<group>"; };
-		F2C0EE5B2E0E1F0800B80B44 /* MUVoiceActivitySetupViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUVoiceActivitySetupViewController.h; sourceTree = "<group>"; };
-		F2C0EE5C2E0E1F0800B80B44 /* MUVoiceActivitySetupViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUVoiceActivitySetupViewController.m; sourceTree = "<group>"; };
-		F2C0EE5D2E0E1F0800B80B44 /* MUAdvancedAudioPreferencesViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUAdvancedAudioPreferencesViewController.h; sourceTree = "<group>"; };
-		F2C0EE5E2E0E1F0800B80B44 /* MUAdvancedAudioPreferencesViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUAdvancedAudioPreferencesViewController.m; sourceTree = "<group>"; };
-		F2C0EE5F2E0E1F0800B80B44 /* MUAudioQualityPreferencesViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUAudioQualityPreferencesViewController.h; sourceTree = "<group>"; };
-		F2C0EE602E0E1F0800B80B44 /* MUAudioQualityPreferencesViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUAudioQualityPreferencesViewController.m; sourceTree = "<group>"; };
-		F2C0EE612E0E1F0800B80B44 /* MUAudioSidetonePreferencesViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUAudioSidetonePreferencesViewController.h; sourceTree = "<group>"; };
-		F2C0EE622E0E1F0800B80B44 /* MUAudioSidetonePreferencesViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUAudioSidetonePreferencesViewController.m; sourceTree = "<group>"; };
-		F2C0EE632E0E1F0800B80B44 /* MURemoteControlPreferencesViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MURemoteControlPreferencesViewController.h; sourceTree = "<group>"; };
-		F2C0EE642E0E1F0800B80B44 /* MURemoteControlPreferencesViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MURemoteControlPreferencesViewController.m; sourceTree = "<group>"; };
 		F2C0EE662E0E1F0800B80B44 /* MainWindow.xib */ = {isa = PBXFileReference; lastKnownFileType = file.xib; name = MainWindow.xib; path = ../MainWindow.xib; sourceTree = "<group>"; };
 		F2C0EE672E0E1F0800B80B44 /* MainWindow~iPad.xib */ = {isa = PBXFileReference; lastKnownFileType = file.xib; path = "MainWindow~iPad.xib"; sourceTree = "<group>"; };
 		F2C0EE682E0E1F0800B80B44 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
@@ -453,43 +430,20 @@
 		F2C0EE722E0E1F0800B80B44 /* MUWelcomeScreenPhone.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUWelcomeScreenPhone.m; sourceTree = "<group>"; };
 		F2C0EE732E0E1F0800B80B44 /* MUWelcomeScreenPad.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUWelcomeScreenPad.h; sourceTree = "<group>"; };
 		F2C0EE742E0E1F0800B80B44 /* MUWelcomeScreenPad.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUWelcomeScreenPad.m; sourceTree = "<group>"; };
-		F2C0EE752E0E1F0800B80B44 /* MUFavouriteServerListController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUFavouriteServerListController.h; sourceTree = "<group>"; };
-		F2C0EE762E0E1F0800B80B44 /* MUFavouriteServerListController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUFavouriteServerListController.m; sourceTree = "<group>"; };
-		F2C0EE772E0E1F0800B80B44 /* MUFavouriteServerEditViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUFavouriteServerEditViewController.h; sourceTree = "<group>"; };
-		F2C0EE782E0E1F0800B80B44 /* MUFavouriteServerEditViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUFavouriteServerEditViewController.m; sourceTree = "<group>"; };
 		F2C0EE792E0E1F0800B80B44 /* MULanServerListController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MULanServerListController.h; sourceTree = "<group>"; };
 		F2C0EE7A2E0E1F0800B80B44 /* MULanServerListController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MULanServerListController.m; sourceTree = "<group>"; };
 		F2C0EE7B2E0E1F0800B80B44 /* MUVersionChecker.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUVersionChecker.h; sourceTree = "<group>"; };
 		F2C0EE7C2E0E1F0800B80B44 /* MUVersionChecker.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUVersionChecker.m; sourceTree = "<group>"; };
-		F2C0EE7D2E0E1F0800B80B44 /* MUServerCertificateTrustViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUServerCertificateTrustViewController.h; sourceTree = "<group>"; };
-		F2C0EE7E2E0E1F0800B80B44 /* MUServerCertificateTrustViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUServerCertificateTrustViewController.m; sourceTree = "<group>"; };
-		F2C0EE7F2E0E1F0800B80B44 /* MUServerCell.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUServerCell.h; sourceTree = "<group>"; };
-		F2C0EE802E0E1F0800B80B44 /* MUServerCell.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUServerCell.m; sourceTree = "<group>"; };
-		F2C0EE812E0E1F0800B80B44 /* MUServerButton.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUServerButton.h; sourceTree = "<group>"; };
-		F2C0EE822E0E1F0800B80B44 /* MUServerButton.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUServerButton.m; sourceTree = "<group>"; };
-		F2C0EE832E0E1F0800B80B44 /* MUServerRootViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUServerRootViewController.h; sourceTree = "<group>"; };
-		F2C0EE842E0E1F0800B80B44 /* MUServerRootViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUServerRootViewController.m; sourceTree = "<group>"; };
-		F2C0EE852E0E1F0800B80B44 /* MUServerViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUServerViewController.h; sourceTree = "<group>"; };
-		F2C0EE862E0E1F0800B80B44 /* MUServerViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUServerViewController.m; sourceTree = "<group>"; };
-		F2C0EE872E0E1F0800B80B44 /* MUServerTableViewCell.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUServerTableViewCell.h; sourceTree = "<group>"; };
-		F2C0EE882E0E1F0800B80B44 /* MUServerTableViewCell.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUServerTableViewCell.m; sourceTree = "<group>"; };
 		F2C0EE892E0E1F0800B80B44 /* MUColor.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUColor.h; sourceTree = "<group>"; };
 		F2C0EE8A2E0E1F0800B80B44 /* MUColor.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUColor.m; sourceTree = "<group>"; };
 		F2C0EE8B2E0E1F0800B80B44 /* MUUserStateAcessoryView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUUserStateAcessoryView.h; sourceTree = "<group>"; };
 		F2C0EE8C2E0E1F0800B80B44 /* MUUserStateAcessoryView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUUserStateAcessoryView.m; sourceTree = "<group>"; };
-		F2C0EE8D2E0E1F0800B80B44 /* MUAccessTokenViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUAccessTokenViewController.h; sourceTree = "<group>"; };
-		F2C0EE8E2E0E1F0800B80B44 /* MUAccessTokenViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUAccessTokenViewController.m; sourceTree = "<group>"; };
 		F2C0EE8F2E0E1F0800B80B44 /* MUTableViewHeaderLabel.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUTableViewHeaderLabel.h; sourceTree = "<group>"; };
 		F2C0EE902E0E1F0800B80B44 /* MUTableViewHeaderLabel.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUTableViewHeaderLabel.m; sourceTree = "<group>"; };
 		F2C0EE912E0E1F0800B80B44 /* MUNotificationController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUNotificationController.h; sourceTree = "<group>"; };
 		F2C0EE922E0E1F0800B80B44 /* MUNotificationController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUNotificationController.m; sourceTree = "<group>"; };
-		F2C0EE932E0E1F0800B80B44 /* MULegalViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MULegalViewController.h; sourceTree = "<group>"; };
-		F2C0EE942E0E1F0800B80B44 /* MULegalViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MULegalViewController.m; sourceTree = "<group>"; };
-		F2C0EE952E0E1F0800B80B44 /* MULegalViewController.xib */ = {isa = PBXFileReference; lastKnownFileType = file.xib; path = MULegalViewController.xib; sourceTree = "<group>"; };
 		F2C0EE962E0E1F0800B80B44 /* MUAudioBarView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUAudioBarView.h; sourceTree = "<group>"; };
 		F2C0EE972E0E1F0800B80B44 /* MUAudioBarView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUAudioBarView.m; sourceTree = "<group>"; };
-		F2C0EE982E0E1F0800B80B44 /* MUAudioBarViewCell.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUAudioBarViewCell.h; sourceTree = "<group>"; };
-		F2C0EE992E0E1F0800B80B44 /* MUAudioBarViewCell.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUAudioBarViewCell.m; sourceTree = "<group>"; };
 		F2C0EE9A2E0E1F0800B80B44 /* MUConnectionController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUConnectionController.h; sourceTree = "<group>"; };
 		F2C0EE9B2E0E1F0800B80B44 /* MUConnectionController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUConnectionController.m; sourceTree = "<group>"; };
 		F2C0EE9C2E0E1F0800B80B44 /* MUMessagesViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUMessagesViewController.h; sourceTree = "<group>"; };
@@ -504,8 +458,6 @@
 		F2C0EEA52E0E1F0800B80B44 /* MUDataURL.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUDataURL.m; sourceTree = "<group>"; };
 		F2C0EEA62E0E1F0800B80B44 /* MUImage.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUImage.h; sourceTree = "<group>"; };
 		F2C0EEA72E0E1F0800B80B44 /* MUImage.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUImage.m; sourceTree = "<group>"; };
-		F2C0EEA82E0E1F0800B80B44 /* MUImageViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUImageViewController.h; sourceTree = "<group>"; };
-		F2C0EEA92E0E1F0800B80B44 /* MUImageViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUImageViewController.m; sourceTree = "<group>"; };
 		F2C0EEAA2E0E1F0800B80B44 /* MUTextMessage.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUTextMessage.h; sourceTree = "<group>"; };
 		F2C0EEAB2E0E1F0800B80B44 /* MUTextMessage.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUTextMessage.m; sourceTree = "<group>"; };
 		F2C0EEAC2E0E1F0800B80B44 /* MUMessagesDatabase.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUMessagesDatabase.h; sourceTree = "<group>"; };
@@ -516,8 +468,6 @@
 		F2C0EEB12E0E1F0800B80B44 /* MURemoteControlServer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MURemoteControlServer.m; sourceTree = "<group>"; };
 		F2C0EEB22E0E1F0800B80B44 /* MUTextMessageProcessor.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUTextMessageProcessor.h; sourceTree = "<group>"; };
 		F2C0EEB32E0E1F0800B80B44 /* MUTextMessageProcessor.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUTextMessageProcessor.m; sourceTree = "<group>"; };
-		F2C0EEB42E0E1F0800B80B44 /* MUAudioMixerDebugViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUAudioMixerDebugViewController.h; sourceTree = "<group>"; };
-		F2C0EEB52E0E1F0800B80B44 /* MUAudioMixerDebugViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUAudioMixerDebugViewController.m; sourceTree = "<group>"; };
 		F2C0EEB62E0E1F0800B80B44 /* MUBackgroundView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUBackgroundView.h; sourceTree = "<group>"; };
 		F2C0EEB72E0E1F0800B80B44 /* MUBackgroundView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUBackgroundView.m; sourceTree = "<group>"; };
 		F2C0EEB82E0E1F0800B80B44 /* MUHorizontalFlipTransitionDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUHorizontalFlipTransitionDelegate.h; sourceTree = "<group>"; };
@@ -793,19 +743,12 @@
 				F2C0EE3F2E0E1F0800B80B44 /* MUCertificateCreationProgressView.h */,
 				F2C0EE402E0E1F0800B80B44 /* MUCertificateCreationProgressView.m */,
 				F2C0EE412E0E1F0800B80B44 /* MUCertificateCreationProgressView.xib */,
-				F2C0EE422E0E1F0800B80B44 /* MUCertificateCell.h */,
-				F2C0EE432E0E1F0800B80B44 /* MUCertificateCell.m */,
-				F2C0EE442E0E1F0800B80B44 /* MUCertificateCell.xib */,
-				F2C0EE452E0E1F0800B80B44 /* MUCertificateViewController.h */,
-				F2C0EE462E0E1F0800B80B44 /* MUCertificateViewController.m */,
 				F2C0EE472E0E1F0800B80B44 /* MUCertificateCreationView.h */,
 				F2C0EE482E0E1F0800B80B44 /* MUCertificateCreationView.m */,
 				F2C0EE492E0E1F0800B80B44 /* MUCertificateController.h */,
 				F2C0EE4A2E0E1F0800B80B44 /* MUCertificateController.m */,
 				F2C0EE4B2E0E1F0800B80B44 /* MUCertificateChainBuilder.h */,
 				F2C0EE4C2E0E1F0800B80B44 /* MUCertificateChainBuilder.m */,
-				F2C0EE4D2E0E1F0800B80B44 /* MUCertificateDiskImportViewController.h */,
-				F2C0EE4E2E0E1F0800B80B44 /* MUCertificateDiskImportViewController.m */,
 			);
 			name = Certificates;
 			sourceTree = "<group>";
@@ -824,22 +767,6 @@
 		F2C0EE652E0E1F0800B80B44 /* Preferences */ = {
 			isa = PBXGroup;
 			children = (
-				F2C0EE552E0E1F0800B80B44 /* MUPreferencesViewController.h */,
-				F2C0EE562E0E1F0800B80B44 /* MUPreferencesViewController.m */,
-				F2C0EE572E0E1F0800B80B44 /* MUCertificatePreferencesViewController.h */,
-				F2C0EE582E0E1F0800B80B44 /* MUCertificatePreferencesViewController.m */,
-				F2C0EE592E0E1F0800B80B44 /* MUAudioTransmissionPreferencesViewController.h */,
-				F2C0EE5A2E0E1F0800B80B44 /* MUAudioTransmissionPreferencesViewController.m */,
-				F2C0EE5B2E0E1F0800B80B44 /* MUVoiceActivitySetupViewController.h */,
-				F2C0EE5C2E0E1F0800B80B44 /* MUVoiceActivitySetupViewController.m */,
-				F2C0EE5D2E0E1F0800B80B44 /* MUAdvancedAudioPreferencesViewController.h */,
-				F2C0EE5E2E0E1F0800B80B44 /* MUAdvancedAudioPreferencesViewController.m */,
-				F2C0EE5F2E0E1F0800B80B44 /* MUAudioQualityPreferencesViewController.h */,
-				F2C0EE602E0E1F0800B80B44 /* MUAudioQualityPreferencesViewController.m */,
-				F2C0EE612E0E1F0800B80B44 /* MUAudioSidetonePreferencesViewController.h */,
-				F2C0EE622E0E1F0800B80B44 /* MUAudioSidetonePreferencesViewController.m */,
-				F2C0EE632E0E1F0800B80B44 /* MURemoteControlPreferencesViewController.h */,
-				F2C0EE642E0E1F0800B80B44 /* MURemoteControlPreferencesViewController.m */,
 			);
 			name = Preferences;
 			sourceTree = "<group>";
@@ -866,43 +793,20 @@
 				F2C0EE722E0E1F0800B80B44 /* MUWelcomeScreenPhone.m */,
 				F2C0EE732E0E1F0800B80B44 /* MUWelcomeScreenPad.h */,
 				F2C0EE742E0E1F0800B80B44 /* MUWelcomeScreenPad.m */,
-				F2C0EE752E0E1F0800B80B44 /* MUFavouriteServerListController.h */,
-				F2C0EE762E0E1F0800B80B44 /* MUFavouriteServerListController.m */,
-				F2C0EE772E0E1F0800B80B44 /* MUFavouriteServerEditViewController.h */,
-				F2C0EE782E0E1F0800B80B44 /* MUFavouriteServerEditViewController.m */,
 				F2C0EE792E0E1F0800B80B44 /* MULanServerListController.h */,
 				F2C0EE7A2E0E1F0800B80B44 /* MULanServerListController.m */,
 				F2C0EE7B2E0E1F0800B80B44 /* MUVersionChecker.h */,
 				F2C0EE7C2E0E1F0800B80B44 /* MUVersionChecker.m */,
-				F2C0EE7D2E0E1F0800B80B44 /* MUServerCertificateTrustViewController.h */,
-				F2C0EE7E2E0E1F0800B80B44 /* MUServerCertificateTrustViewController.m */,
-				F2C0EE7F2E0E1F0800B80B44 /* MUServerCell.h */,
-				F2C0EE802E0E1F0800B80B44 /* MUServerCell.m */,
-				F2C0EE812E0E1F0800B80B44 /* MUServerButton.h */,
-				F2C0EE822E0E1F0800B80B44 /* MUServerButton.m */,
-				F2C0EE832E0E1F0800B80B44 /* MUServerRootViewController.h */,
-				F2C0EE842E0E1F0800B80B44 /* MUServerRootViewController.m */,
-				F2C0EE852E0E1F0800B80B44 /* MUServerViewController.h */,
-				F2C0EE862E0E1F0800B80B44 /* MUServerViewController.m */,
-				F2C0EE872E0E1F0800B80B44 /* MUServerTableViewCell.h */,
-				F2C0EE882E0E1F0800B80B44 /* MUServerTableViewCell.m */,
 				F2C0EE892E0E1F0800B80B44 /* MUColor.h */,
 				F2C0EE8A2E0E1F0800B80B44 /* MUColor.m */,
 				F2C0EE8B2E0E1F0800B80B44 /* MUUserStateAcessoryView.h */,
 				F2C0EE8C2E0E1F0800B80B44 /* MUUserStateAcessoryView.m */,
-				F2C0EE8D2E0E1F0800B80B44 /* MUAccessTokenViewController.h */,
-				F2C0EE8E2E0E1F0800B80B44 /* MUAccessTokenViewController.m */,
 				F2C0EE8F2E0E1F0800B80B44 /* MUTableViewHeaderLabel.h */,
 				F2C0EE902E0E1F0800B80B44 /* MUTableViewHeaderLabel.m */,
 				F2C0EE912E0E1F0800B80B44 /* MUNotificationController.h */,
 				F2C0EE922E0E1F0800B80B44 /* MUNotificationController.m */,
-				F2C0EE932E0E1F0800B80B44 /* MULegalViewController.h */,
-				F2C0EE942E0E1F0800B80B44 /* MULegalViewController.m */,
-				F2C0EE952E0E1F0800B80B44 /* MULegalViewController.xib */,
 				F2C0EE962E0E1F0800B80B44 /* MUAudioBarView.h */,
 				F2C0EE972E0E1F0800B80B44 /* MUAudioBarView.m */,
-				F2C0EE982E0E1F0800B80B44 /* MUAudioBarViewCell.h */,
-				F2C0EE992E0E1F0800B80B44 /* MUAudioBarViewCell.m */,
 				F2C0EE9A2E0E1F0800B80B44 /* MUConnectionController.h */,
 				F2C0EE9B2E0E1F0800B80B44 /* MUConnectionController.m */,
 				F2C0EE9C2E0E1F0800B80B44 /* MUMessagesViewController.h */,
@@ -917,8 +821,6 @@
 				F2C0EEA52E0E1F0800B80B44 /* MUDataURL.m */,
 				F2C0EEA62E0E1F0800B80B44 /* MUImage.h */,
 				F2C0EEA72E0E1F0800B80B44 /* MUImage.m */,
-				F2C0EEA82E0E1F0800B80B44 /* MUImageViewController.h */,
-				F2C0EEA92E0E1F0800B80B44 /* MUImageViewController.m */,
 				F2C0EEAA2E0E1F0800B80B44 /* MUTextMessage.h */,
 				F2C0EEAB2E0E1F0800B80B44 /* MUTextMessage.m */,
 				F2C0EEAC2E0E1F0800B80B44 /* MUMessagesDatabase.h */,
@@ -929,8 +831,6 @@
 				F2C0EEB12E0E1F0800B80B44 /* MURemoteControlServer.m */,
 				F2C0EEB22E0E1F0800B80B44 /* MUTextMessageProcessor.h */,
 				F2C0EEB32E0E1F0800B80B44 /* MUTextMessageProcessor.m */,
-				F2C0EEB42E0E1F0800B80B44 /* MUAudioMixerDebugViewController.h */,
-				F2C0EEB52E0E1F0800B80B44 /* MUAudioMixerDebugViewController.m */,
 				F2C0EEB62E0E1F0800B80B44 /* MUBackgroundView.h */,
 				F2C0EEB72E0E1F0800B80B44 /* MUBackgroundView.m */,
 				F2C0EEB82E0E1F0800B80B44 /* MUHorizontalFlipTransitionDelegate.h */,
@@ -1074,7 +974,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 2600;
+				LastUpgradeCheck = 2620;
 			};
 			buildConfigurationList = 28BCF2BB132AE3B40003AEC1 /* Build configuration list for PBXProject "MumbleKit" */;
 			compatibilityVersion = "Xcode 3.2";
@@ -1332,6 +1232,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
+				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
@@ -1345,6 +1246,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
+				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
@@ -1375,6 +1277,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
+				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
@@ -1405,6 +1308,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
+				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;

@@ -706,7 +706,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 1620;
+				LastUpgradeCheck = 2620;
 			};
 			buildConfigurationList = 287D85A014E6D474002B5D79 /* Build configuration list for PBXProject "Opus" */;
 			compatibilityVersion = "Xcode 3.2";
