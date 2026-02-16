@@ -514,7 +514,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         _peerCertificates = [[NSMutableArray alloc] initWithCapacity:count];
         
         for (CFIndex i = 0; i < count; i++) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
             SecCertificateRef cert = SecTrustGetCertificateAtIndex(trust, i);
+#pragma clang diagnostic pop
             NSData *data = (NSData *)SecCertificateCopyData(cert);
             if (data) {
                 [_peerCertificates addObject:[MKCertificate certificateWithCertificate:data privateKey:nil]];
@@ -542,7 +545,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 
     SecTrustResultType trustRes;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     OSStatus err = SecTrustEvaluate(trust, &trustRes);
+#pragma clang diagnostic pop
     
     if (err == noErr) {
         switch (trustRes) {
@@ -853,7 +859,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         if (!trust) return NO;
 
         SecTrustResultType trustResult;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if (SecTrustEvaluate(trust, &trustResult) != noErr) {
+#pragma clang diagnostic pop
             CFRelease(trust);
             return NO;
         }

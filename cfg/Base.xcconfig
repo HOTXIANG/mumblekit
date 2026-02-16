@@ -12,6 +12,7 @@ SUPPORTS_MACCATALYST = YES
 SUPPORTED_PLATFORMS = iphoneos iphonesimulator macosx
 
 SKIP_INSTALL = YES
+UNIQUE_OBJECT_FILE_NAMES = YES
 
 HEADER_SEARCH_PATHS = "$(SRCROOT)/src" "$(SRCROOT)/proto" "$(SRCROOT)/3rdparty/speex/include" "$(SRCROOT)/3rdparty/opus/include" "$(SRCROOT)/3rdparty/openssl/include" "$(SRCROOT)/3rdparty/protobuf/src/runtime/Classes"
 LIBRARY_SEARCH_PATHS = "$(inherited)" "$(SRCROOT)"

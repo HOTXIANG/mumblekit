@@ -56,6 +56,7 @@ static NSString *const MUMacAudioInputDevicesChangedNotification = @"MUMacAudioI
 #if TARGET_OS_OSX == 1
     BOOL                     _isObservingDefaultInputDevice;
     CFAbsoluteTime           _lastDefaultInputSwitchTime;
+    BOOL                     _isRestartingForDeviceChange;
 #endif
 }
 #if TARGET_OS_OSX == 1
@@ -379,7 +380,7 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
 - (void)handleDefaultInputDeviceChanged {
     // 节流：避免系统在切换过程中短时间多次回调导致重复 restart
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - _lastDefaultInputSwitchTime < 0.35) {
+    if (now - _lastDefaultInputSwitchTime < 0.8) {
         return;
     }
     _lastDefaultInputSwitchTime = now;
@@ -410,8 +411,15 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
         if (!self->_running) {
             return;
         }
+        if (self->_isRestartingForDeviceChange) {
+            return;
+        }
+        self->_isRestartingForDeviceChange = YES;
         NSLog(@"MKAudio: Default input device changed. Restarting audio to apply new microphone.");
         [self restart];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            self->_isRestartingForDeviceChange = NO;
+        });
     });
 }
 #endif // TARGET_OS_OSX

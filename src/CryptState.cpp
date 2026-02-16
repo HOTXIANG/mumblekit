@@ -168,7 +168,7 @@ bool CryptState::decrypt(const unsigned char* source, unsigned char* dst, unsign
 typedef uint64_t subblock;
 
 #ifdef __x86_64__
-static inline uint64_t SWAP64(register uint64_t __in) { register uint64_t __out; __asm__("bswap %q0" : "=r"(__out) : "0"(__in)); return __out; }
+static inline uint64_t SWAP64(uint64_t __in) { uint64_t __out; __asm__("bswap %q0" : "=r"(__out) : "0"(__in)); return __out; }
 #else
 #define SWAP64(x) ((static_cast<uint64_t>(x) << 56) | \
 					((static_cast<uint64_t>(x) << 40) & 0xff000000000000ULL) | \

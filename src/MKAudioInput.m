@@ -144,7 +144,10 @@
     }
 
     doResetPreprocessor = YES;
+    _doTransmit = NO;
+    _forceTransmit = NO;
     _lastTransmit = NO;
+    [self postLocalTalkState:MKTalkStatePassive];
 
     numMicChannels = 0;
     bitrate = 0;
@@ -169,6 +172,15 @@
     }];
 
     return self;
+}
+
+- (void)postLocalTalkState:(MKTalkState)talkState {
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    NSDictionary *talkStateDict = [NSDictionary dictionaryWithObjectsAndKeys:
+                                   [NSNumber numberWithUnsignedInteger:talkState], @"talkState",
+                                   nil];
+    NSNotification *notification = [NSNotification notificationWithName:@"MKAudioUserTalkStateChanged" object:talkStateDict];
+    [center performSelectorOnMainThread:@selector(postNotification:) withObject:notification waitUntilDone:NO];
 }
 
 - (void) dealloc {
@@ -497,13 +509,7 @@
     
     if (_lastTransmit != _doTransmit) {
         // fixme(mkrautz): Handle more talkstates
-        MKTalkState talkState = _doTransmit ? MKTalkStateTalking : MKTalkStatePassive;
-        NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
-        NSDictionary *talkStateDict = [NSDictionary dictionaryWithObjectsAndKeys:
-                                       [NSNumber numberWithUnsignedInteger:talkState], @"talkState",
-                                       nil];
-        NSNotification *notification = [NSNotification notificationWithName:@"MKAudioUserTalkStateChanged" object:talkStateDict];
-        [center performSelectorOnMainThread:@selector(postNotification:) withObject:notification waitUntilDone:NO];
+        [self postLocalTalkState:(_doTransmit ? MKTalkStateTalking : MKTalkStatePassive)];
     }
      
      if (!_lastTransmit && !_doTransmit) {
