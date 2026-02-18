@@ -204,11 +204,17 @@
             // Sidetone 没有 userSession，直接混音即可（不需要 session 级别的静音/音量控制）
             if ([ou isKindOfClass:[MKAudioOutputSidetone class]]) {
                 const float * restrict userBuffer = [ou buffer];
+                NSUInteger sourceChannels = MAX((NSUInteger)1, [ou outputChannels]);
                 for (s = 0; s < nchan; ++s) {
                     const float str = _speakerVolume[s] * globalVolume;
+                    NSUInteger sourceChannelIndex = sourceChannels > 1 ? MIN((NSUInteger)s, sourceChannels - 1) : 0;
                     float * restrict o = (float *)mixBuffer + s;
                     for (i = 0; i < nsamp; ++i) {
-                        o[i*nchan] += userBuffer[i] * str;
+                        float sample = userBuffer[i * sourceChannels + sourceChannelIndex];
+                        if (nchan == 1 && sourceChannels > 1) {
+                            sample = 0.5f * (userBuffer[i * sourceChannels] + userBuffer[i * sourceChannels + 1]);
+                        }
+                        o[i*nchan] += sample * str;
                     }
                 }
                 continue;
@@ -231,13 +237,19 @@
             }
             
             const float * restrict userBuffer = [ou buffer];
+            NSUInteger sourceChannels = MAX((NSUInteger)1, [ou outputChannels]);
             for (s = 0; s < nchan; ++s) {
                 // 4. 应用音量乘数
                 const float str = _speakerVolume[s] * volMultiplier * globalVolume;
+                NSUInteger sourceChannelIndex = sourceChannels > 1 ? MIN((NSUInteger)s, sourceChannels - 1) : 0;
                 
                 float * restrict o = (float *)mixBuffer + s;
                 for (i = 0; i < nsamp; ++i) {
-                    o[i*nchan] += userBuffer[i] * str;
+                    float sample = userBuffer[i * sourceChannels + sourceChannelIndex];
+                    if (nchan == 1 && sourceChannels > 1) {
+                        sample = 0.5f * (userBuffer[i * sourceChannels] + userBuffer[i * sourceChannels + 1]);
+                    }
+                    o[i*nchan] += sample * str;
                 }
             }
                 }
@@ -316,7 +328,8 @@
             [self removeBuffer:outputUser];
             [outputUser release];
         }
-        outputUser = [[MKAudioOutputSpeech alloc] initWithSession:session sampleRate:_mixerFrequency messageType:msgType];
+        BOOL useStereoOutput = _settings.enableStereoOutput && _numChannels > 1;
+        outputUser = [[MKAudioOutputSpeech alloc] initWithSession:session sampleRate:_mixerFrequency messageType:msgType useStereo:useStereoOutput];
         [_outputLock lock];
         [_outputs setObject:outputUser forKey:[NSNumber numberWithUnsignedInteger:session]];
         [_outputLock unlock];

@@ -46,6 +46,8 @@ typedef struct _MKAudioSettings {
     int             outputDelay;
     float           micBoost;
     BOOL            enablePreprocessor;
+    BOOL            enableStereoInput;
+    BOOL            enableStereoOutput;
     BOOL            enableEchoCancellation;
     BOOL            enableSideTone;
     float           sidetoneVolume;

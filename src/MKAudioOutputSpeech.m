@@ -61,13 +61,12 @@
 
 @implementation MKAudioOutputSpeech
 
-- (id) initWithSession:(NSUInteger)session sampleRate:(NSUInteger)freq messageType:(MKUDPMessageType)type {
+- (id) initWithSession:(NSUInteger)session sampleRate:(NSUInteger)freq messageType:(MKUDPMessageType)type useStereo:(BOOL)useStereo {
     if ((self = [super init])) {
         _jitter = NULL;
         _speexDecoder = NULL;
         _resampler = NULL;
-
-        _useStereo = NO;
+        _useStereo = useStereo && type == UDPVoiceOpusMessage;
     
         _userSession = session;
         _talkState = MKTalkStatePassive;
@@ -77,7 +76,7 @@
         if (_msgType == UDPVoiceOpusMessage) {
             _sampleRate = SAMPLE_RATE;
             _frameSize = _sampleRate / 100;
-            _audioBufferSize = 12 * _frameSize;
+            _audioBufferSize = 12 * _frameSize * (_useStereo ? 2 : 1);
             _opusDecoder = opus_decoder_create((opus_int32)_sampleRate, _useStereo ? 2 : 1, NULL);
         } else if (type == UDPVoiceSpeexMessage) {
             _sampleRate = 32000;
@@ -94,12 +93,9 @@
             _audioBufferSize = _frameSize;
             NSLog(@"MKAudioOutputSpeech: Unsupported legacy voice codec type=%d, using silence fallback.", (int)type);
         }
-
-        _outputSize = (int)(ceilf((float)_audioBufferSize * _freq) / (float)_sampleRate);
-        if (_useStereo) {
-            _audioBufferSize *= 2;
-            _outputSize *= 2;
-        }
+        int outputChannels = _useStereo ? 2 : 1;
+        NSUInteger perChannelInputCapacity = (NSUInteger)_audioBufferSize / (NSUInteger)outputChannels;
+        _outputSize = (NSUInteger)(ceilf((float)perChannelInputCapacity * _freq / (float)_sampleRate) * outputChannels);
 
         if (_freq != _sampleRate) {
             int err;
@@ -173,6 +169,10 @@
     return _msgType;
 }
 
+- (NSUInteger) outputChannels {
+    return _useStereo ? 2 : 1;
+}
+
 - (void) addFrame:(NSData *)data forSequence:(NSUInteger)seq {
     [_jitterLock lock];
 
@@ -235,22 +235,24 @@
 
 - (BOOL) needSamples:(NSUInteger)nsamples {
     NSUInteger i;
+    NSUInteger channels = [self outputChannels];
+    NSUInteger requestedSamples = nsamples * channels;
     
     for (i = _lastConsume; i < _bufferFilled; ++i) {
         _buffer[i-_lastConsume] = _buffer[i];
     }
     _bufferFilled -= _lastConsume;
 
-    _lastConsume = nsamples;
+    _lastConsume = requestedSamples;
 
-    if (_bufferFilled >= nsamples) {
+    if (_bufferFilled >= requestedSamples) {
         return _lastAlive;
     }
 
     float *output = NULL;
     BOOL nextAlive = _lastAlive;
     
-    while (_bufferFilled < nsamples) {
+    while (_bufferFilled < requestedSamples) {
         int decodedSamples = (int)_frameSize;
         [self resizeBuffer:(_bufferFilled + _outputSize)];
 
@@ -261,7 +263,7 @@
         }   
 
         if (!_lastAlive) {
-            memset(output, 0, _frameSize * sizeof(float));
+            memset(output, 0, _frameSize * channels * sizeof(float));
         } else {
             int avail = 0;
             
@@ -361,14 +363,15 @@
 
                 if (_msgType == UDPVoiceOpusMessage) {
                     if ([frameData length] <= INT_MAX) {
-                        decodedSamples = opus_decode_float(_opusDecoder, [frameData bytes], (int)[frameData length], output, (int)_audioBufferSize, 0);
+                        int maxFrameSizePerChannel = (int)_audioBufferSize / (_useStereo ? 2 : 1);
+                        decodedSamples = opus_decode_float(_opusDecoder, [frameData bytes], (int)[frameData length], output, maxFrameSizePerChannel, 0);
                         if (decodedSamples < 0) {
                             decodedSamples = (int)_frameSize;
-                            memset(output, 0, _frameSize * sizeof(float));
+                            memset(output, 0, _frameSize * channels * sizeof(float));
                         }
                     } else {
                         decodedSamples = (int)_frameSize;
-                        memset(output, 0, _frameSize * sizeof(float));
+                        memset(output, 0, _frameSize * channels * sizeof(float));
                     }
                 } else if (_msgType == UDPVoiceSpeexMessage) {
                     if ([frameData length] > 0 && [frameData length] <= INT_MAX) {
@@ -390,10 +393,11 @@
                 BOOL update = YES;
 
                 float pow = 0.0f;
-                for (i = 0; i < decodedSamples; ++i) {
+                NSUInteger decodedSampleCount = (NSUInteger)decodedSamples * channels;
+                for (i = 0; i < decodedSampleCount; ++i) {
                     pow += output[i] * output[i];
                 }
-                pow = sqrtf(pow / decodedSamples);
+                pow = sqrtf(pow / (float)MAX((NSUInteger)1, decodedSampleCount));
                 if (pow > _powerMax) {
                     _powerMax = pow;
                 } else {
@@ -431,11 +435,15 @@
 
             if (! nextAlive) {
                 for (i = 0; i < _frameSize; i++) {
-                    output[i] *= _fadeOut[i];
+                    for (NSUInteger c = 0; c < channels; ++c) {
+                        output[i * channels + c] *= _fadeOut[i];
+                    }
                 }
             } else if (ts == 0) {
                 for (i = 0; i < _frameSize; i++) {
-                    output[i] *= _fadeIn[i];
+                    for (NSUInteger c = 0; c < channels; ++c) {
+                        output[i * channels + c] *= _fadeIn[i];
+                    }
                 }
             }
 
@@ -480,10 +488,18 @@ nextframe:
             spx_uint32_t inlen = decodedSamples;
             spx_uint32_t outlen = (spx_uint32_t) (ceilf((float)(decodedSamples * _freq) / (float)_sampleRate));
             
-            if (_resampler && _lastAlive) {
-                speex_resampler_process_float(_resampler, 0, _resamplerBuffer, &inlen, _buffer + _bufferFilled, &outlen);
+            if (_resampler) {
+                if (_lastAlive) {
+                    if (_useStereo) {
+                        speex_resampler_process_interleaved_float(_resampler, _resamplerBuffer, &inlen, _buffer + _bufferFilled, &outlen);
+                    } else {
+                        speex_resampler_process_float(_resampler, 0, _resamplerBuffer, &inlen, _buffer + _bufferFilled, &outlen);
+                    }
+                } else {
+                    memset(_buffer + _bufferFilled, 0, outlen * channels * sizeof(float));
+                }
             }
-            _bufferFilled += outlen;
+            _bufferFilled += outlen * channels;
         }
     }
     

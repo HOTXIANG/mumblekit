@@ -491,8 +491,13 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
         }
 
 #if TARGET_OS_IPHONE == 1
-        // ✅ 强制使用 MKVoiceProcessingDevice (支持回声消除/AGC)
-        _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&_audioSettings];
+        if (_audioSettings.enableStereoInput || _audioSettings.enableStereoOutput) {
+            // Stereo I/O is only available through the plain RemoteIO path.
+            _audioDevice = [[MKiOSAudioDevice alloc] initWithSettings:&_audioSettings];
+        } else {
+            // Default path keeps hardware voice processing (AEC/AGC) enabled.
+            _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&_audioSettings];
+        }
 #elif TARGET_OS_OSX == 1
         _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&_audioSettings];
 #else

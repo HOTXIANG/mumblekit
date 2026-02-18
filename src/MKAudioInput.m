@@ -36,6 +36,7 @@
     int                    frameSize;
     int                    micFrequency;
     int                    sampleRate;
+    int                    encodeChannels;
 
     int                    micFilled;
     int                    micLength;
@@ -100,22 +101,35 @@
     _vadGateTimeSeconds = _settings.vadGateTimeSeconds;
     _vadOpenLastTime = [[NSDate date] timeIntervalSince1970];
 
+    micFrequency = [_device inputSampleRate];
+    numMicChannels = MAX(1, [_device numberOfInputChannels]);
+    int requestedChannels = _settings.enableStereoInput ? 2 : 1;
+    encodeChannels = MIN(requestedChannels, numMicChannels);
+
     // Fall back to CELT if Opus is not enabled.
     if (![[MKVersion sharedVersion] isOpusEnabled] && _settings.codec == MKCodecFormatOpus) {
         _settings.codec = MKCodecFormatCELT;
         NSLog(@"Falling back to CELT");
     }
 
+    if (_settings.codec == MKCodecFormatSpeex && encodeChannels > 1) {
+        NSLog(@"MKAudioInput: Speex does not support stereo encode path. Falling back to mono.");
+        encodeChannels = 1;
+    }
+    if (_settings.enableStereoInput && encodeChannels < 2 && _settings.codec != MKCodecFormatSpeex) {
+        NSLog(@"MKAudioInput: Stereo input requested but unavailable from device. Falling back to mono.");
+    }
+
     if (_settings.codec == MKCodecFormatOpus) {
         sampleRate = SAMPLE_RATE;
         frameSize = SAMPLE_RATE / 100;
-        _opusEncoder = opus_encoder_create(SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP, NULL);
+        _opusEncoder = opus_encoder_create(SAMPLE_RATE, encodeChannels, OPUS_APPLICATION_VOIP, NULL);
         opus_encoder_ctl(_opusEncoder, OPUS_SET_VBR(0)); // CBR
-        NSLog(@"MKAudioInput: %i bits/s, %d Hz, %d sample Opus", _settings.quality, sampleRate, frameSize);
+        NSLog(@"MKAudioInput: %i bits/s, %d Hz, %d sample Opus (%d ch)", _settings.quality, sampleRate, frameSize, encodeChannels);
     } else if (_settings.codec == MKCodecFormatCELT) {
         sampleRate = SAMPLE_RATE;
         frameSize = SAMPLE_RATE / 100;
-        NSLog(@"MKAudioInput: %i bits/s, %d Hz, %d sample CELT", _settings.quality, sampleRate, frameSize);
+        NSLog(@"MKAudioInput: %i bits/s, %d Hz, %d sample CELT (%d ch input)", _settings.quality, sampleRate, frameSize, encodeChannels);
     } else if (_settings.codec == MKCodecFormatSpeex) {
         sampleRate = 32000;
 
@@ -162,7 +176,11 @@
     udpMessageType = ~0;
     
     micFrequency = [_device inputSampleRate];
-    numMicChannels = [_device numberOfInputChannels];
+    numMicChannels = MAX(1, [_device numberOfInputChannels]);
+    encodeChannels = MIN(encodeChannels, numMicChannels);
+    if (encodeChannels < 1) {
+        encodeChannels = 1;
+    }
     
     [self initializeMixer];
  
@@ -230,16 +248,16 @@
         free(psOut);
 
     if (micFrequency != sampleRate) {
-        _micResampler = speex_resampler_init(1, micFrequency, sampleRate, 3, &err);
+        _micResampler = speex_resampler_init(encodeChannels, micFrequency, sampleRate, 3, &err);
         NSLog(@"MKAudioInput: initialized resampler (%iHz -> %iHz)", micFrequency, sampleRate);
     }
 
-    psMic = malloc(micLength * sizeof(short));
-    psOut = malloc(frameSize * sizeof(short));
+    psMic = malloc(micLength * encodeChannels * sizeof(short));
+    psOut = malloc(frameSize * encodeChannels * sizeof(short));
     micSampleSize = numMicChannels * sizeof(short);
     doResetPreprocessor = YES;
 
-    NSLog(@"MKAudioInput: Initialized mixer for %i channel %i Hz and %i channel %i Hz echo", numMicChannels, micFrequency, 0, 0);
+    NSLog(@"MKAudioInput: Initialized mixer for input=%i ch @ %i Hz, encode=%i ch @ %i Hz", numMicChannels, micFrequency, encodeChannels, sampleRate);
 }
 
 - (void) addMicrophoneDataWithBuffer:(short *)input amount:(NSUInteger)nsamp {
@@ -248,13 +266,28 @@
     while (nsamp > 0) {
         NSUInteger left = MIN(nsamp, micLength - micFilled);
 
-        short *output = psMic + micFilled;
+        short *output = psMic + (micFilled * encodeChannels);
 
         for (i = 0; i < left; i++) {
-            output[i] = input[i];
+            short *inFrame = input + (i * numMicChannels);
+            short *outFrame = output + (i * encodeChannels);
+            short sampleL = inFrame[0];
+            short sampleR = (numMicChannels > 1) ? inFrame[1] : sampleL;
+
+            if (encodeChannels > 1) {
+                outFrame[0] = sampleL;
+                outFrame[1] = sampleR;
+            } else {
+                if (numMicChannels > 1) {
+                    int mixed = ((int)sampleL + (int)sampleR) / 2;
+                    outFrame[0] = (short)mixed;
+                } else {
+                    outFrame[0] = sampleL;
+                }
+            }
         }
 
-        input += left;
+        input += (left * numMicChannels);
         micFilled += left;
         nsamp -= left;
 
@@ -263,7 +296,11 @@
             if (_micResampler) {
                 spx_uint32_t inlen = micLength;
                 spx_uint32_t outlen = frameSize;
-                speex_resampler_process_int(_micResampler, 0, psMic, &inlen, psOut, &outlen);
+                if (encodeChannels > 1) {
+                    speex_resampler_process_interleaved_int(_micResampler, psMic, &inlen, psOut, &outlen);
+                } else {
+                    speex_resampler_process_int(_micResampler, 0, psMic, &inlen, psOut, &outlen);
+                }
             }
             micFilled = 0;
 
@@ -283,7 +320,7 @@
     // This is a deliberate choice for now, because it allows us to avoid resampling a
     // perhaps already resampled signal.
     if (micFrequency == 48000) {
-        NSData *data = [[NSData alloc] initWithBytes:psMic length:micLength*sizeof(short)];
+        NSData *data = [[NSData alloc] initWithBytes:psMic length:micLength * encodeChannels * sizeof(short)];
         [[[MKAudio sharedAudio] sidetoneOutput] addFrame:data];
         [data release];
     }
@@ -345,13 +382,13 @@
         if (_opusBuffer == nil)
             _opusBuffer = [[NSMutableData alloc] init];
         _bufferedFrames++;
-        [_opusBuffer appendBytes:(resampled ? psOut : psMic) length:frameSize*sizeof(short)];
+        [_opusBuffer appendBytes:(resampled ? psOut : psMic) length:frameSize * encodeChannels * sizeof(short)];
         if (!isSpeech || _bufferedFrames >= _settings.audioPerPacket) {
             // Ensure we have enough frames for the Opus encoder.
             // Pad with silence if needed.
             if (_bufferedFrames < _settings.audioPerPacket) {
                 NSUInteger numMissingFrames = _settings.audioPerPacket - _bufferedFrames;
-                NSUInteger extraBytes = numMissingFrames * frameSize * sizeof(short);
+                NSUInteger extraBytes = numMissingFrames * frameSize * encodeChannels * sizeof(short);
                 [_opusBuffer increaseLengthBy:extraBytes];
                 _bufferedFrames += numMissingFrames;
             }
@@ -413,8 +450,19 @@
     int isSpeech = 0;
     BOOL resampled = micFrequency != sampleRate;
     short *frame = resampled ? psOut : psMic;
+    int frameSamples = frameSize * encodeChannels;
+    short monoFrame[frameSize];
     if (_settings.enablePreprocessor) {
-        isSpeech = speex_preprocess_run(_preprocessorState, frame);
+        if (encodeChannels > 1) {
+            int i;
+            for (i = 0; i < frameSize; i++) {
+                int mixed = ((int)frame[i * encodeChannels] + (int)frame[i * encodeChannels + 1]) / 2;
+                monoFrame[i] = (short)mixed;
+            }
+            isSpeech = speex_preprocess_run(_preprocessorState, monoFrame);
+        } else {
+            isSpeech = speex_preprocess_run(_preprocessorState, frame);
+        }
     } else {
         int i;
         float gain = _settings.micBoost; // 1.0 = 100%, 3.0 = 300%
@@ -422,7 +470,7 @@
             gain = 0.0f;
         }
         
-        for (i = 0; i < frameSize; i++) {
+        for (i = 0; i < frameSamples; i++) {
             // 1. 转为浮点数计算，防止中间计算溢出
             // 32767.0f 是 Short 的最大值
             float val = frame[i] * gain;
@@ -443,7 +491,11 @@
     float sum = 1.0f;
     int i;
     for (i = 0; i < frameSize; i++) {
-        sum += frame[i] * frame[i];
+        float sample = frame[i * encodeChannels];
+        if (encodeChannels > 1) {
+            sample = (sample + frame[i * encodeChannels + 1]) * 0.5f;
+        }
+        sum += sample * sample;
     }
     float micLevel = sqrtf(sum / frameSize);
     float peakSignal = 20.0f*log10f(micLevel/32768.0f);

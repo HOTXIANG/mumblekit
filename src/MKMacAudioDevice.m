@@ -309,12 +309,13 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         return NO;
     }
     
-    if (fmt.mChannelsPerFrame > 1) {
-        NSLog(@"MKMacAudioDevice: Input device with more than one channel detected. Defaulting to 1.");
-    }
-    
     _recordFrequency = (int) fmt.mSampleRate;
-    _recordMicChannels = 1;
+    int hardwareInputChannels = (int)MAX((UInt32)1, fmt.mChannelsPerFrame);
+    int requestedInputChannels = _settings.enableStereoInput ? 2 : 1;
+    _recordMicChannels = MIN(requestedInputChannels, hardwareInputChannels);
+    if (_settings.enableStereoInput && _recordMicChannels < 2) {
+        NSLog(@"MKMacAudioDevice: Stereo input requested but unavailable on selected microphone. Falling back to mono.");
+    }
     _recordSampleSize = _recordMicChannels * sizeof(short);
     
     fmt.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
@@ -414,7 +415,12 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     }
     
     _playbackFrequency = (int) 48000;
-    _playbackChannels = (int) fmt.mChannelsPerFrame;
+    int hardwareOutputChannels = (int)MAX((UInt32)1, fmt.mChannelsPerFrame);
+    int requestedOutputChannels = _settings.enableStereoOutput ? 2 : 1;
+    _playbackChannels = MIN(requestedOutputChannels, hardwareOutputChannels);
+    if (_settings.enableStereoOutput && _playbackChannels < 2) {
+        NSLog(@"MKMacAudioDevice: Stereo output requested but unavailable on selected playback device. Falling back to mono.");
+    }
     _playbackSampleSize = _playbackChannels * sizeof(short);
     
     fmt.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
@@ -424,6 +430,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     fmt.mFormatID = kAudioFormatLinearPCM;
     fmt.mSampleRate = (float) _playbackFrequency;
+    fmt.mChannelsPerFrame = _playbackChannels;
     fmt.mBytesPerFrame = _playbackSampleSize;
     fmt.mBytesPerPacket = _playbackSampleSize;
     fmt.mFramesPerPacket = 1;

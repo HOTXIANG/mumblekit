@@ -12,6 +12,7 @@
 - (MKUser *) user;
 - (float *) buffer;
 - (NSUInteger) bufferLength;
+- (NSUInteger) outputChannels;
 
 - (BOOL) needSamples:(NSUInteger)nsamples;
 - (void) resizeBuffer:(NSUInteger)newSize;

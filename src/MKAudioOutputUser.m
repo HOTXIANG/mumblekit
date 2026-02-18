@@ -40,6 +40,10 @@
     return _bufferSize;
 }
 
+- (NSUInteger) outputChannels {
+    return 1;
+}
+
 - (void) resizeBuffer:(NSUInteger)newSize {
     if (newSize > _bufferSize) {
         float *n = malloc(sizeof(float) * newSize);

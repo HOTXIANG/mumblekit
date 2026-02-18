@@ -19,6 +19,7 @@
     int                          _micFrequency;
     int                          _micSampleSize;
     int                          _numMicChannels;
+    int                          _numOutputChannels;
     MKAudioDeviceOutputFunc      _outputFunc;
     MKAudioDeviceInputFunc       _inputFunc;
 }
@@ -119,7 +120,8 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     OSStatus err;
     AudioComponent comp;
     AudioComponentDescription desc;
-    AudioStreamBasicDescription fmt;
+    AudioStreamBasicDescription inputFmt;
+    AudioStreamBasicDescription outputFmt;
 
     desc.componentType = kAudioUnitType_Output;
     desc.componentSubType = kAudioUnitSubType_RemoteIO;
@@ -173,38 +175,62 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     }
     
     len = sizeof(AudioStreamBasicDescription);
-    err = AudioUnitGetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &fmt, &len);
+    err = AudioUnitGetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &inputFmt, &len);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Unable to query device for stream info.");
+        NSLog(@"MKiOSAudioDevice: Unable to query input stream info.");
         return NO;
     }
     
-    if (fmt.mChannelsPerFrame > 1) {
-        NSLog(@"MKiOSAudioDevice: Input device with more than one channel detected. Defaulting to 1.");
+    len = sizeof(AudioStreamBasicDescription);
+    err = AudioUnitGetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &outputFmt, &len);
+    if (err != noErr) {
+        NSLog(@"MKiOSAudioDevice: Unable to query output stream info.");
+        return NO;
     }
     
     _micFrequency = 48000;
-    _numMicChannels = 1;
+    int hardwareInputChannels = (int)MAX((UInt32)1, inputFmt.mChannelsPerFrame);
+    int requestedInputChannels = _settings.enableStereoInput ? 2 : 1;
+    _numMicChannels = MIN(requestedInputChannels, hardwareInputChannels);
+    if (_settings.enableStereoInput && _numMicChannels < 2) {
+        NSLog(@"MKiOSAudioDevice: Stereo input requested but unavailable on current route. Falling back to mono.");
+    }
+    
+    int hardwareOutputChannels = (int)MAX((UInt32)1, outputFmt.mChannelsPerFrame);
+    int requestedOutputChannels = _settings.enableStereoOutput ? 2 : 1;
+    _numOutputChannels = MIN(requestedOutputChannels, hardwareOutputChannels);
+    if (_settings.enableStereoOutput && _numOutputChannels < 2) {
+        NSLog(@"MKiOSAudioDevice: Stereo output requested but unavailable on current route. Falling back to mono.");
+    }
     _micSampleSize = _numMicChannels * sizeof(short);
     
-    fmt.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
-    fmt.mBitsPerChannel = sizeof(short) * 8;
-    fmt.mFormatID = kAudioFormatLinearPCM;
-    fmt.mSampleRate = _micFrequency;
-    fmt.mChannelsPerFrame = _numMicChannels;
-    fmt.mBytesPerFrame = _micSampleSize;
-    fmt.mBytesPerPacket = _micSampleSize;
-    fmt.mFramesPerPacket = 1;
+    inputFmt.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+    inputFmt.mBitsPerChannel = sizeof(short) * 8;
+    inputFmt.mFormatID = kAudioFormatLinearPCM;
+    inputFmt.mSampleRate = _micFrequency;
+    inputFmt.mChannelsPerFrame = _numMicChannels;
+    inputFmt.mBytesPerFrame = _numMicChannels * sizeof(short);
+    inputFmt.mBytesPerPacket = _numMicChannels * sizeof(short);
+    inputFmt.mFramesPerPacket = 1;
+    
+    outputFmt.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+    outputFmt.mBitsPerChannel = sizeof(short) * 8;
+    outputFmt.mFormatID = kAudioFormatLinearPCM;
+    outputFmt.mSampleRate = _micFrequency;
+    outputFmt.mChannelsPerFrame = _numOutputChannels;
+    outputFmt.mBytesPerFrame = _numOutputChannels * sizeof(short);
+    outputFmt.mBytesPerPacket = _numOutputChannels * sizeof(short);
+    outputFmt.mFramesPerPacket = 1;
     
     len = sizeof(AudioStreamBasicDescription);
-    err = AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &fmt, len);
+    err = AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &inputFmt, len);
     if (err != noErr) {
         NSLog(@"MKiOSAudioDevice: Unable to set stream format for output device. (output scope)");
         return NO;
     }
     
     len = sizeof(AudioStreamBasicDescription);
-    err = AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &fmt, len);
+    err = AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &outputFmt, len);
     if (err != noErr) {
         NSLog(@"MKiOSAudioDevice: Unable to set stream format for input device. (input scope)");
         return NO;
@@ -269,7 +295,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 }
 
 - (int) numberOfOutputChannels {
-    return _numMicChannels;
+    return _numOutputChannels;
 }
 
 @end
