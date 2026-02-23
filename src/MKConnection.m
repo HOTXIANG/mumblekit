@@ -37,6 +37,8 @@
 // The bitstream we should send to the server.
 // It's currently hard-coded.
 #define MUMBLEKIT_CELT_BITSTREAM 0x8000000bUL
+static const NSUInteger MKUDPRebuildFailureThreshold = 3;
+static const uint64_t MKUDPRebuildCooldownUsec = 2ULL * 1000ULL * 1000ULL;
 
 @interface MKConnection () {
     MKCryptState   *_crypt;
@@ -52,6 +54,8 @@
 
     BOOL           _forceTCP;
     BOOL           _udpAvailable;
+    NSUInteger     _udpConsecutiveSendFailures;
+    uint64_t       _lastUdpRebuildAttemptUsec;
     unsigned long  _connTime;
     NSTimer        *_pingTimer;
     NSOutputStream *_outputStream;
@@ -102,7 +106,8 @@
 - (void) _teardownUdpSock;
 - (void) _udpDataReady:(NSData *)data;
 - (void) _udpMessageReceived:(NSData *)data;
-- (void) _sendUDPMessage:(NSData *)data;
+- (BOOL) _sendUDPMessage:(NSData *)data;
+- (void) _attemptUdpSocketRecoveryIfNeeded;
 - (void) _sendVoiceDataOnConnectionThread:(NSData *)data;
 
 // Error handling
@@ -170,6 +175,9 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         if (_reconnect) {
             _reconnect = NO;
             _readyVoice = NO;
+            _udpAvailable = NO;
+            _udpConsecutiveSendFailures = 0;
+            _lastUdpRebuildAttemptUsec = 0;
         }
 
         [_crypt release];
@@ -279,6 +287,9 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     _connectionEstablished = NO;
     _keepRunning = YES;
     _readyVoice = NO;
+    _udpAvailable = NO;
+    _udpConsecutiveSendFailures = 0;
+    _lastUdpRebuildAttemptUsec = 0;
     _rejected = NO;
 
     [self start];
@@ -459,6 +470,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) _setupUdpSock {
+    _udpAvailable = NO;
+    _udpConsecutiveSendFailures = 0;
     struct sockaddr_storage sa;
 
     socklen_t sl = sizeof(sa);
@@ -487,13 +500,19 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     CFSocketError err = CFSocketConnectToAddress(_udpSock, (CFDataRef)_udpAddr, -1);
     if (err == kCFSocketError) {
         NSLog(@"MKConnection: Unable to CFSocketConnectToAddress()");
+        [self _teardownUdpSock];
         return;
     }
 }
 
 - (void) _teardownUdpSock {
-    CFSocketInvalidate(_udpSock);
-    CFRelease(_udpSock);
+    _udpAvailable = NO;
+    _udpConsecutiveSendFailures = 0;
+    if (_udpSock) {
+        CFSocketInvalidate(_udpSock);
+        CFRelease(_udpSock);
+        _udpSock = NULL;
+    }
 }
 
 - (void) setIgnoreSSLVerification:(BOOL)flag {
@@ -579,22 +598,55 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     return _forceTCP;
 }
 
-- (void) _sendUDPMessage:(NSData *)data {
+- (BOOL) _sendUDPMessage:(NSData *)data {
     if (![_crypt valid] || !CFSocketIsValid(_udpSock)) {
         NSLog(@"MKConnection: Invalid CryptState or CFSocket.");
-        return;
+        _udpAvailable = NO;
+        _udpConsecutiveSendFailures += 1;
+        [self _attemptUdpSocketRecoveryIfNeeded];
+        return NO;
     }
 
     NSData *crypted = [_crypt encryptData:data];
     if (crypted == nil) {
         NSLog(@"MKConnection: unable to encrypt UDP message");
-        return;
+        _udpAvailable = NO;
+        _udpConsecutiveSendFailures += 1;
+        [self _attemptUdpSocketRecoveryIfNeeded];
+        return NO;
     }
 
     CFSocketError err = CFSocketSendData(_udpSock, NULL, (CFDataRef)crypted, -1.0f);
     if (err != kCFSocketSuccess) {
         NSLog(@"MKConnection: CFSocketSendData failed with err=%i", (int)err);
+        _udpAvailable = NO;
+        _udpConsecutiveSendFailures += 1;
+        [self _attemptUdpSocketRecoveryIfNeeded];
+        return NO;
     }
+    _udpConsecutiveSendFailures = 0;
+    return YES;
+}
+
+- (void) _attemptUdpSocketRecoveryIfNeeded {
+    if (_forceTCP || !_connectionEstablished || _socket == -1) {
+        return;
+    }
+    if (_udpConsecutiveSendFailures < MKUDPRebuildFailureThreshold) {
+        return;
+    }
+
+    uint64_t now = [self _currentTimeStamp];
+    if (_lastUdpRebuildAttemptUsec != 0 &&
+        now - _lastUdpRebuildAttemptUsec < MKUDPRebuildCooldownUsec) {
+        return;
+    }
+
+    _lastUdpRebuildAttemptUsec = now;
+    NSLog(@"MKConnection: Rebuilding UDP socket after %lu consecutive failures.",
+          (unsigned long)_udpConsecutiveSendFailures);
+    [self _teardownUdpSock];
+    [self _setupUdpSock];
 }
 
 - (void) sendMessageWithType:(MKMessageType)messageType data:(NSData *)data {
@@ -647,10 +699,13 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     if (!_readyVoice || !_connectionEstablished)
         return;
     if (!_forceTCP && _udpAvailable) {
-        [self _sendUDPMessage:data];
-    } else {
-        [self sendMessageWithType:UDPTunnelMessage data:data];
+        if ([self _sendUDPMessage:data]) {
+            return;
+        }
+    } else if (!_forceTCP) {
+        [self _attemptUdpSocketRecoveryIfNeeded];
     }
+    [self sendMessageWithType:UDPTunnelMessage data:data];
 }
 
 - (void) _udpDataReady:(NSData *)crypted {
@@ -658,6 +713,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         _udpAvailable = true;
         NSLog(@"MKConnection: UDP is now available!");
     }
+    _udpConsecutiveSendFailures = 0;
 
     if ([crypted length] > 4) {
         NSData *plain = [_crypt decryptData:crypted];
