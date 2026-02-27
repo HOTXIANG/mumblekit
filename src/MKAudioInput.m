@@ -343,6 +343,8 @@
     
     iArg = 0;
     speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_AGC, &iArg);
+
+    iArg = _settings.enableDenoise ? 1 : 0;
     speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_DENOISE, &iArg);
     speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_DEREVERB, &iArg);
 

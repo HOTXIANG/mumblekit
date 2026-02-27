@@ -37,6 +37,7 @@
 NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
 #if TARGET_OS_OSX == 1
 static NSString *const MUMacAudioInputDevicesChangedNotification = @"MUMacAudioInputDevicesChanged";
+static NSString *const MUMacAudioVPIOToHALTransitionNotification = @"MUMacAudioVPIOToHALTransition";
 #endif
 
 @interface MKAudio () {
@@ -57,6 +58,7 @@ static NSString *const MUMacAudioInputDevicesChangedNotification = @"MUMacAudioI
     BOOL                     _isObservingDefaultInputDevice;
     CFAbsoluteTime           _lastDefaultInputSwitchTime;
     BOOL                     _isRestartingForDeviceChange;
+    BOOL                     _lastDeviceWasVPIO;
 #endif
 }
 #if TARGET_OS_OSX == 1
@@ -143,6 +145,27 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
     free(devIds);
     return found;
 }
+
+static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
+    AudioDeviceID devId = kAudioObjectUnknown;
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = kAudioHardwarePropertyDefaultInputDevice;
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    addr.mElement = kAudioObjectPropertyElementMain;
+    UInt32 size = sizeof(AudioDeviceID);
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &devId) != noErr) {
+        return NO;
+    }
+    addr.mSelector = kAudioDevicePropertyTransportType;
+    UInt32 transportType = 0;
+    size = sizeof(UInt32);
+    if (AudioObjectGetPropertyData(devId, &addr, 0, NULL, &size, &transportType) != noErr) {
+        return NO;
+    }
+    return (transportType == kAudioDeviceTransportTypeBuiltIn ||
+            transportType == kAudioDeviceTransportTypeBluetooth ||
+            transportType == kAudioDeviceTransportTypeBluetoothLE);
+}
 #endif
 
 @implementation MKAudio
@@ -221,7 +244,10 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
 
     // 2. 设置 Category 和 Mode
     // ✅ Category: PlayAndRecord (录音+播放)
-    // ✅ Mode: VoiceChat (激活硬件回声消除 AEC 和自动增益 AGC)
+    // ✅ Mode: VoiceChat — 必须使用此模式以确保系统硬件层面的 AEC 正常工作。
+    //    Default 模式下虽然 VPIO AudioUnit 有 AEC，但系统不会对硬件路径做回声消除优化，
+    //    导致对方说话被麦克风重新采集回去。
+    //    系统麦克风模式选择器（标准/语音突显/宽谱）在 VoiceChat + VPIO 下仍然可用。
     BOOL success = [session setCategory:AVAudioSessionCategoryPlayAndRecord
                                    mode:AVAudioSessionModeVoiceChat
                                 options:options
@@ -415,8 +441,13 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
             return;
         }
         self->_isRestartingForDeviceChange = YES;
+        BOOL wasVPIO = [self->_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
+        BOOL nowExternal = !MKAudioSystemDefaultInputIsBuiltInOrBluetooth();
         NSLog(@"MKAudio: Default input device changed. Restarting audio to apply new microphone.");
         [self restart];
+        if (wasVPIO && nowExternal) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioVPIOToHALTransitionNotification object:self];
+        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             self->_isRestartingForDeviceChange = NO;
         });
@@ -450,6 +481,9 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
 
 - (void) stop {
     @synchronized(self) {
+#if TARGET_OS_OSX == 1
+        _lastDeviceWasVPIO = [_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
+#endif
         [_audioInput release];
         _audioInput = nil;
         [_audioOutput release];
@@ -485,26 +519,53 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
     @synchronized(self) {
         // 如果已经在运行，先清理
         if (_running) {
+#if TARGET_OS_OSX == 1
+            _lastDeviceWasVPIO = [_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
+#endif
             [_audioDevice teardownDevice];
             [_audioDevice release];
             _audioDevice = nil;
         }
 
 #if TARGET_OS_IPHONE == 1
-        if (_audioSettings.enableStereoInput || _audioSettings.enableStereoOutput) {
-            // Stereo I/O is only available through the plain RemoteIO path.
+        if (_audioSettings.enableStereoInput) {
+            // Stereo INPUT requires the plain RemoteIO path (VPIO forces mono input).
             _audioDevice = [[MKiOSAudioDevice alloc] initWithSettings:&_audioSettings];
         } else {
-            // Default path keeps hardware voice processing (AEC/AGC) enabled.
+            // VPIO handles mono input + stereo output, with hardware AEC/AGC.
             _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&_audioSettings];
         }
 #elif TARGET_OS_OSX == 1
-        _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&_audioSettings];
+        {
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            BOOL followSystem = YES;
+            if ([defaults objectForKey:@"AudioFollowSystemInputDevice"] != nil) {
+                followSystem = [defaults boolForKey:@"AudioFollowSystemInputDevice"];
+            }
+            BOOL useVPIO = followSystem
+                        && !_audioSettings.enableStereoInput
+                        && MKAudioSystemDefaultInputIsBuiltInOrBluetooth();
+            if (useVPIO) {
+                NSLog(@"MKAudio: macOS using VPIO (follow-system, built-in/Bluetooth).");
+                _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&_audioSettings];
+            } else {
+                NSLog(@"MKAudio: macOS using HALOutput.");
+                _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&_audioSettings];
+            }
+        }
 #else
 # error Missing MKAudioDevice
 #endif
         
         BOOL setupSuccess = [_audioDevice setupDevice];
+#if TARGET_OS_OSX == 1
+        if (!setupSuccess && ![_audioDevice isKindOfClass:[MKMacAudioDevice class]]) {
+            NSLog(@"MKAudio: VPIO setup failed on macOS, falling back to HALOutput.");
+            [_audioDevice release];
+            _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&_audioSettings];
+            setupSuccess = [_audioDevice setupDevice];
+        }
+#endif
         if (!setupSuccess) {
             NSLog(@"MKAudio: Failed to setup audio device.");
             [_audioDevice release];
@@ -532,7 +593,18 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
 
 - (void) restart {
     [self stop];
-    // updateAudioSettings 在 setupAudioSession 中被包含，start 会调用它
+#if TARGET_OS_OSX == 1
+    if (_lastDeviceWasVPIO) {
+        _lastDeviceWasVPIO = NO;
+        NSLog(@"MKAudio: VPIO teardown detected, delaying start for pipeline release...");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
+                       dispatch_get_main_queue(), ^{
+            [self start];
+            [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
+        });
+        return;
+    }
+#endif
     [self start];
     [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
 }
@@ -645,13 +717,18 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
     }
 }
 
-// 现代 API 不再需要手动检查路由来判断 AEC 是否可用
-// VPIO (VoiceProcessingIO) 会自动处理，我们直接返回 YES 即可
 - (BOOL) echoCancellationAvailable {
 #if TARGET_OS_IPHONE
     return YES;
 #else
-    return NO;
+    {
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        BOOL followSystem = YES;
+        if ([defaults objectForKey:@"AudioFollowSystemInputDevice"] != nil) {
+            followSystem = [defaults boolForKey:@"AudioFollowSystemInputDevice"];
+        }
+        return followSystem && MKAudioSystemDefaultInputIsBuiltInOrBluetooth();
+    }
 #endif
 }
 

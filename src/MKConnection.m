@@ -47,6 +47,8 @@ static const uint64_t MKUDPRebuildCooldownUsec = 2ULL * 1000ULL * 1000ULL;
     int            packetLength;
     int            packetBufferOffset;
     NSMutableData  *packetBuffer;
+    unsigned char  _headerBuf[6];
+    int            _headerBufLen;
     NSString       *_hostname;
     NSUInteger     _port;
     BOOL           _keepRunning;
@@ -284,6 +286,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
     _socket = -1;
     packetLength = -1;
+    _headerBufLen = 0;
     _connectionEstablished = NO;
     _keepRunning = YES;
     _readyVoice = NO;
@@ -724,33 +727,47 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) _dataReady {
-    unsigned char buffer[6];
-
-    if (! packetBuffer) {
+    if (!packetBuffer) {
         packetBuffer = [[NSMutableData alloc] initWithLength:0];
     }
 
     if (packetLength == -1) {
-        NSInteger availableBytes = [_inputStream read:&buffer[0] maxLength:6];
-        if (availableBytes < 6) {
+        NSInteger need = 6 - _headerBufLen;
+        NSInteger got = [_inputStream read:&_headerBuf[_headerBufLen] maxLength:need];
+        if (got <= 0) {
+            return;
+        }
+        _headerBufLen += got;
+        if (_headerBufLen < 6) {
             return;
         }
 
-        packetType = (MKMessageType) CFSwapInt16BigToHost(*(UInt16 *)(&buffer[0]));
-        packetLength = (int) CFSwapInt32BigToHost(*(UInt32 *)(&buffer[2]));
+        packetType = (MKMessageType) CFSwapInt16BigToHost(*(UInt16 *)(&_headerBuf[0]));
+        UInt32 rawLen = CFSwapInt32BigToHost(*(UInt32 *)(&_headerBuf[2]));
+        _headerBufLen = 0;
 
+        if (rawLen > 8 * 1024 * 1024) {
+            NSLog(@"MKConnection: Received absurd packet length (%u). Dropping connection.", (unsigned)rawLen);
+            _keepRunning = NO;
+            return;
+        }
+
+        packetLength = (int)rawLen;
         packetBufferOffset = 0;
         [packetBuffer setLength:packetLength];
     }
 
     if (packetLength > 0) {
         UInt8 *packetBytes = [packetBuffer mutableBytes];
-        if (! packetBytes) {
+        if (!packetBytes) {
             NSLog(@"MKConnection: NSMutableData is stubborn.");
             return;
         }
 
         NSInteger availableBytes = [_inputStream read:packetBytes + packetBufferOffset maxLength:packetLength];
+        if (availableBytes <= 0) {
+            return;
+        }
         packetLength -= availableBytes;
         packetBufferOffset += availableBytes;
     }

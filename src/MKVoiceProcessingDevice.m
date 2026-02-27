@@ -9,6 +9,7 @@
 #import <AudioUnit/AudioUnit.h>
 #import <AudioUnit/AUComponent.h>
 #import <AudioToolbox/AudioToolbox.h>
+#include <pthread.h>
 #if defined(TARGET_OS_VISION) && TARGET_OS_VISION
     #define IS_UIDEVICE_AVAILABLE 1
 #elif TARGET_OS_IOS || TARGET_OS_TV || TARGET_OS_MACCATALYST
@@ -19,6 +20,10 @@
 
 #if IS_UIDEVICE_AVAILABLE
     #import <UIKit/UIKit.h>
+#endif
+
+#if TARGET_OS_OSX == 1
+#import <CoreAudio/CoreAudio.h>
 #endif
 
 @interface MKVoiceProcessingDevice () {
@@ -86,23 +91,17 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     MKVoiceProcessingDevice *dev = (MKVoiceProcessingDevice *) udata;
     AudioBuffer *buf = buflist->mBuffers;
     MKAudioDeviceOutputFunc outputFunc = dev->_outputFunc;
-    BOOL done;
-    
+
     if (outputFunc == NULL) {
-        // No frames available yet.
-        buf->mDataByteSize = 0;
-        return -1;
+        memset(buf->mData, 0, buf->mDataByteSize);
+        return noErr;
     }
-    
+
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    done = outputFunc(buf->mData, nframes);
-    if (! done) {
-        // No frames available yet.
-        buf->mDataByteSize = 0;
-        [pool release];
-        return -1;
+    BOOL done = outputFunc(buf->mData, nframes);
+    if (!done) {
+        memset(buf->mData, 0, buf->mDataByteSize);
     }
-        
     [pool release];
     return noErr;
 }
@@ -148,7 +147,14 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         NSLog(@"MKVoiceProcessingDevice: Unable to instantiate new AudioUnit. err=%d", (int)err);
         return NO;
     }
-    
+
+#if TARGET_OS_OSX == 1
+    // macOS: 不显式设置 kAudioOutputUnitProperty_CurrentDevice。
+    // VPIO 会自动使用系统默认输入/输出设备并创建内部聚合设备。
+    // 显式设置设备 ID 会导致多通道内置麦克风（3ch beamforming）的聚合设备创建失败。
+    NSLog(@"MKVoiceProcessingDevice: macOS VPIO using system default input/output devices.");
+#endif
+
     val = 1;
     err = AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &val, sizeof(UInt32));
     if (err != noErr) {
@@ -248,11 +254,15 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         NSLog(@"MKVoiceProcessingDevice: Unable to ENABLE voice processing (Bypass failed). err=%d", (int)err);
     }
         
+#if TARGET_OS_IPHONE
     val = 1;
+#else
+    val = 0;
+#endif
     len = sizeof(UInt32);
     err = AudioUnitSetProperty(_audioUnit, kAUVoiceIOProperty_VoiceProcessingEnableAGC, kAudioUnitScope_Global, 0, &val, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to ENABLE VPIO AGC. err=%d", (int)err);
+        NSLog(@"MKVoiceProcessingDevice: Unable to set VPIO AGC (%u). err=%d", (unsigned)val, (int)err);
     }
     
     val = 0;
@@ -279,25 +289,41 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 
 - (BOOL) teardownDevice {
     OSStatus err;
-    
+
+    AURenderCallbackStruct nullCb = {0};
+    AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_SetInputCallback,
+                         kAudioUnitScope_Global, 0, &nullCb, sizeof(nullCb));
+    AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_SetRenderCallback,
+                         kAudioUnitScope_Global, 0, &nullCb, sizeof(nullCb));
+
+    qos_class_t origQoS;
+    int origRP;
+    pthread_get_qos_class_np(pthread_self(), &origQoS, &origRP);
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+
     err = AudioOutputUnitStop(_audioUnit);
     if (err != noErr) {
         NSLog(@"MKVoiceProcessingDevice: unable to stop AudioUnit. err=%d", (int)err);
-        return NO;
     }
-    
+
+    err = AudioUnitUninitialize(_audioUnit);
+    if (err != noErr) {
+        NSLog(@"MKVoiceProcessingDevice: unable to uninitialize AudioUnit. err=%d", (int)err);
+    }
+
     err = AudioComponentInstanceDispose(_audioUnit);
     if (err != noErr) {
         NSLog(@"MKVoiceProcessingDevice: unable to dispose of AudioUnit. err=%d", (int)err);
-        return NO;
     }
-    
+
+    pthread_set_qos_class_self_np(origQoS, origRP);
+
     AudioBuffer *b = _buflist.mBuffers;
     if (b && b->mData)
         free(b->mData);
-    
+
     NSLog(@"MKVoiceProcessingDevice: teardown finished.");
-    return YES;
+    return (err == noErr);
 }
 
 - (void) setupOutput:(MKAudioDeviceOutputFunc)outf {
