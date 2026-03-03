@@ -58,6 +58,7 @@ static NSString *const MUMacAudioVPIOToHALTransitionNotification = @"MUMacAudioV
 #if TARGET_OS_OSX == 1
     BOOL                     _isObservingDefaultInputDevice;
     CFAbsoluteTime           _lastDefaultInputSwitchTime;
+    CFAbsoluteTime           _lastDefaultOutputSwitchTime;
     BOOL                     _isRestartingForDeviceChange;
     BOOL                     _lastDeviceWasVPIO;
 #endif
@@ -69,6 +70,7 @@ static NSString *const MUMacAudioVPIOToHALTransitionNotification = @"MUMacAudioV
 - (void)startObservingDefaultInputDeviceChanges;
 - (void)stopObservingDefaultInputDeviceChanges;
 - (void)handleDefaultInputDeviceChanged;
+- (void)handleDefaultOutputDeviceChanged;
 #endif
 @end
 
@@ -80,6 +82,16 @@ static OSStatus MKAudioDefaultInputDeviceChangedCallback(AudioObjectID inObjectI
     MKAudio *audio = (MKAudio *)inClientData;
     if (!audio) return noErr;
     [audio handleDefaultInputDeviceChanged];
+    return noErr;
+}
+
+static OSStatus MKAudioDefaultOutputDeviceChangedCallback(AudioObjectID inObjectID,
+                                                           UInt32 inNumberAddresses,
+                                                           const AudioObjectPropertyAddress inAddresses[],
+                                                           void *inClientData) {
+    MKAudio *audio = (MKAudio *)inClientData;
+    if (!audio) return noErr;
+    [audio handleDefaultOutputDeviceChanged];
     return noErr;
 }
 
@@ -271,6 +283,7 @@ static void MKAudioNormalizeSettings(MKAudioSettings *settings) {
                                                    object:nil];
 #elif TARGET_OS_OSX == 1
         _lastDefaultInputSwitchTime = 0;
+        _lastDefaultOutputSwitchTime = 0;
         [self startObservingDefaultInputDeviceChanges];
 #endif
     }
@@ -440,8 +453,30 @@ static void MKAudioNormalizeSettings(MKAudioSettings *settings) {
         return;
     }
     
+    AudioObjectPropertyAddress defaultOutputAddr;
+    defaultOutputAddr.mSelector = kAudioHardwarePropertyDefaultOutputDevice;
+    defaultOutputAddr.mScope = kAudioObjectPropertyScopeGlobal;
+    defaultOutputAddr.mElement = kAudioObjectPropertyElementMain;
+    
+    OSStatus outputErr = AudioObjectAddPropertyListener(kAudioObjectSystemObject,
+                                                        &defaultOutputAddr,
+                                                        MKAudioDefaultOutputDeviceChangedCallback,
+                                                        self);
+    if (outputErr != noErr) {
+        AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
+                                          &defaultInputAddr,
+                                          MKAudioDefaultInputDeviceChangedCallback,
+                                          self);
+        AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
+                                          &devicesAddr,
+                                          MKAudioDefaultInputDeviceChangedCallback,
+                                          self);
+        NSLog(@"MKAudio: Failed to observe default output device changes (%d).", (int)outputErr);
+        return;
+    }
+    
     _isObservingDefaultInputDevice = YES;
-    NSLog(@"MKAudio: Observing default input and device list changes.");
+    NSLog(@"MKAudio: Observing default input/output and device list changes.");
 }
 
 - (void)stopObservingDefaultInputDeviceChanges {
@@ -471,6 +506,19 @@ static void MKAudioNormalizeSettings(MKAudioSettings *settings) {
                                                             self);
     if (devicesErr != noErr) {
         NSLog(@"MKAudio: Failed to remove device list observer (%d).", (int)devicesErr);
+    }
+    
+    AudioObjectPropertyAddress defaultOutputAddr;
+    defaultOutputAddr.mSelector = kAudioHardwarePropertyDefaultOutputDevice;
+    defaultOutputAddr.mScope = kAudioObjectPropertyScopeGlobal;
+    defaultOutputAddr.mElement = kAudioObjectPropertyElementMain;
+    
+    OSStatus outputErr = AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
+                                                           &defaultOutputAddr,
+                                                           MKAudioDefaultOutputDeviceChangedCallback,
+                                                           self);
+    if (outputErr != noErr) {
+        NSLog(@"MKAudio: Failed to remove default output device observer (%d).", (int)outputErr);
     }
     
     _isObservingDefaultInputDevice = NO;
@@ -521,6 +569,30 @@ static void MKAudioNormalizeSettings(MKAudioSettings *settings) {
         if (wasVPIO && nowExternal) {
             [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioVPIOToHALTransitionNotification object:self];
         }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            self->_isRestartingForDeviceChange = NO;
+        });
+    });
+}
+
+- (void)handleDefaultOutputDeviceChanged {
+    // 节流：避免切换输出设备时系统短时间多次回调导致重复 restart
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - _lastDefaultOutputSwitchTime < 0.6) {
+        return;
+    }
+    _lastDefaultOutputSwitchTime = now;
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!self->_running) {
+            return;
+        }
+        if (self->_isRestartingForDeviceChange) {
+            return;
+        }
+        self->_isRestartingForDeviceChange = YES;
+        NSLog(@"MKAudio: Default output device changed. Restarting audio to apply new speaker/output.");
+        [self restart];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             self->_isRestartingForDeviceChange = NO;
         });
