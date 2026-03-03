@@ -60,6 +60,9 @@ static NSString *const MUMacAudioVPIOToHALTransitionNotification = @"MUMacAudioV
     BOOL                     _isRestartingForDeviceChange;
     BOOL                     _lastDeviceWasVPIO;
 #endif
+    
+    // P0 修复：使用串行队列替代 @synchronized，提升性能
+    dispatch_queue_t         _accessQueue;
 }
 #if TARGET_OS_OSX == 1
 - (void)startObservingDefaultInputDeviceChanges;
@@ -187,6 +190,10 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
 - (instancetype)init {
     self = [super init];
     if (self) {
+        // P0 修复：创建串行队列用于线程安全访问，替代 @synchronized
+        NSString *queueName = [NSString stringWithFormat:@"com.mumble.audio.%p", self];
+        _accessQueue = dispatch_queue_create([queueName UTF8String], DISPATCH_QUEUE_SERIAL);
+        
 #if TARGET_OS_IOS
         // 注册通知监听 (替代旧的 C 回调)
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -216,6 +223,13 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
     [self stopObservingDefaultInputDeviceChanges];
 #endif
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    
+    // P0 修复：清理访问队列
+    if (_accessQueue) {
+        dispatch_release(_accessQueue);
+        _accessQueue = NULL;
+    }
+    
     [super dealloc];
 }
 
@@ -459,10 +473,10 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
 
 // Should audio be running?
 - (BOOL) _audioShouldBeRunning {
-    id<MKAudioDelegate> delegate;
-    @synchronized(self) {
+    __block id<MKAudioDelegate> delegate;
+    dispatch_sync(_accessQueue, ^{
         delegate = _delegate;
-    }
+    });
     
     if ([(id)delegate respondsToSelector:@selector(audioShouldBeRunning:)]) {
         return [delegate audioShouldBeRunning:self];
@@ -612,109 +626,126 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
 #pragma mark - Properties & Accessors
 
 - (MKAudioOutput *) output {
-    return _audioOutput;
+    __block MKAudioOutput *result;
+    dispatch_sync(_accessQueue, ^{
+        result = _audioOutput;
+    });
+    return result;
 }
 
+// P0 修复：使用 dispatch_async/sync 替代 @synchronized，提升性能
 - (void) setDelegate:(id<MKAudioDelegate>)delegate {
-    @synchronized(self) {
+    dispatch_async(_accessQueue, ^{
         _delegate = delegate;
-    }
+    });
 }
 
 - (id<MKAudioDelegate>) delegate {
-    id<MKAudioDelegate> delegate;
-    @synchronized(self) {
+    __block id<MKAudioDelegate> delegate;
+    dispatch_sync(_accessQueue, ^{
         delegate = _delegate;
-    }
+    });
     return delegate;
 }
 
 - (void) readAudioSettings:(MKAudioSettings *)settings {
     if (settings == NULL) return;
-    @synchronized(self) {
+    dispatch_sync(_accessQueue, ^{
         memcpy(settings, &_audioSettings, sizeof(MKAudioSettings));
-    }
+    });
 }
 
 - (void) updateAudioSettings:(MKAudioSettings *)settings {
-    @synchronized(self) {
+    dispatch_async(_accessQueue, ^{
         memcpy(&_audioSettings, settings, sizeof(MKAudioSettings));
         if (_audioOutput != nil) {
             [_audioOutput setMasterVolume:settings->volume];
         }
-    }
+    });
     // 如果设置改变（如切换扬声器），可能需要刷新 Session 配置
     // 注意：这里没有自动 restart，调用者通常会在更新设置后手动 restart
 }
 
 - (void) setMainConnectionForAudio:(MKConnection *)conn {
-    @synchronized(self) {
+    dispatch_async(_accessQueue, ^{
         [conn retain];
         [_audioInput setMainConnectionForAudio:conn];
         [_connection release];
         _connection = conn;
-    }
+    });
 }
 
 - (void) addFrameToBufferWithSession:(NSUInteger)session data:(NSData *)data sequence:(NSUInteger)seq type:(MKUDPMessageType)msgType {
-    @synchronized(self) {
+    dispatch_async(_accessQueue, ^{
         [_audioOutput addFrameToBufferWithSession:session data:data sequence:seq type:msgType];
-    }
+    });
 }
 
 - (MKAudioOutputSidetone *) sidetoneOutput {
-    return _sidetoneOutput;
+    __block MKAudioOutputSidetone *result;
+    dispatch_sync(_accessQueue, ^{
+        result = _sidetoneOutput;
+    });
+    return result;
 }
 
 - (MKTransmitType) transmitType {
-    @synchronized(self) {
-        return _audioSettings.transmitType;
-    }
+    __block MKTransmitType result;
+    dispatch_sync(_accessQueue, ^{
+        result = _audioSettings.transmitType;
+    });
+    return result;
 }
 
 - (BOOL) forceTransmit {
-    @synchronized(self) {
-        return [_audioInput forceTransmit];
-    }
+    __block BOOL result;
+    dispatch_sync(_accessQueue, ^{
+        result = [_audioInput forceTransmit];
+    });
+    return result;
 }
 
 - (void) setForceTransmit:(BOOL)flag {
-    @synchronized(self) {
+    dispatch_async(_accessQueue, ^{
         [_audioInput setForceTransmit:flag];
-    }
+    });
 }
 
 - (float) speechProbablity {
-    @synchronized(self) {
-        return [_audioInput speechProbability];
-    }
+    __block float result;
+    dispatch_sync(_accessQueue, ^{
+        result = [_audioInput speechProbability];
+    });
+    return result;
 }
 
 - (float) peakCleanMic {
-    @synchronized(self) {
-        return [_audioInput peakCleanMic];
-    }
+    __block float result;
+    dispatch_sync(_accessQueue, ^{
+        result = [_audioInput peakCleanMic];
+    });
+    return result;
 }
 
 - (void) setSelfMuted:(BOOL)selfMuted {
-    @synchronized(self) {
+    dispatch_async(_accessQueue, ^{
         _cachedSelfMuted = selfMuted;
         [_audioInput setSelfMuted:selfMuted];
-    }
+    });
 }
 
 - (void) setSuppressed:(BOOL)suppressed {
-    @synchronized(self) {
+    dispatch_async(_accessQueue, ^{
         _cachedSuppressed = suppressed;
         [_audioInput setSuppressed:suppressed];
-    }
+    });
 }
 
 - (void) setMuted:(BOOL)muted {
-    @synchronized(self) {
+    dispatch_async(_accessQueue, ^{
         _cachedMuted = muted;
         [_audioInput setMuted:muted];
-    }
+    });
 }
 
 - (BOOL) echoCancellationAvailable {

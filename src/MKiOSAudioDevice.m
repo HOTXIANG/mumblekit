@@ -86,17 +86,29 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         return -1;
     }
     
-    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    done = outputFunc(buf->mData, nframes);
-    if (! done) {
-        // No frames available yet.
+    // P0 修复：验证音频缓冲区指针有效性，防止 EXC_BAD_ACCESS
+    if (buf->mData == NULL || buf->mDataByteSize == 0) {
+        NSLog(@"MKiOSAudioDevice: outputCallback received invalid buffer (data=%p, size=%u). Skipping.", 
+              buf->mData, (unsigned int)buf->mDataByteSize);
         buf->mDataByteSize = 0;
-        [pool release];
         return -1;
     }
     
-    [pool release];
-    return noErr;
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    @try {
+        done = outputFunc(buf->mData, nframes);
+    } @catch (NSException *exception) {
+        NSLog(@"MKiOSAudioDevice: outputFunc threw exception: %@. Audio playback interrupted.", exception);
+        done = NO;
+    } @finally {
+        if (! done) {
+            // No frames available yet.
+            buf->mDataByteSize = 0;
+        }
+        [pool release];
+    }
+    
+    return done ? noErr : -1;
 }
 
 @implementation MKiOSAudioDevice

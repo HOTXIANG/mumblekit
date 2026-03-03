@@ -162,10 +162,61 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) dealloc {
+    // 确保连接已断开
     [self disconnect];
 
-    [_peerCertificates release];
-    [_certificateChain release];
+    // 释放 Core Foundation 和 Objective-C 对象
+    // 注意：_peerCertificates 和 _certificateChain 可能包含 SecCertificateRef 等 CF 对象
+    if (_peerCertificates) {
+        [_peerCertificates release];
+        _peerCertificates = nil;
+    }
+    
+    if (_certificateChain) {
+        [_certificateChain release];
+        _certificateChain = nil;
+    }
+    
+    // 释放其他实例变量
+    if (_hostname) {
+        [_hostname release];
+        _hostname = nil;
+    }
+    
+    if (packetBuffer) {
+        [packetBuffer release];
+        packetBuffer = nil;
+    }
+    
+    if (_crypt) {
+        [_crypt release];
+        _crypt = nil;
+    }
+    
+    if (_serverVersion) {
+        [_serverVersion release];
+        _serverVersion = nil;
+    }
+    
+    if (_serverRelease) {
+        [_serverRelease release];
+        _serverRelease = nil;
+    }
+    
+    if (_serverOSName) {
+        [_serverOSName release];
+        _serverOSName = nil;
+    }
+    
+    if (_serverOSVersion) {
+        [_serverOSVersion release];
+        _serverOSVersion = nil;
+    }
+    
+    if (_connError) {
+        [_connError release];
+        _connError = nil;
+    }
 
     [super dealloc];
 }

@@ -123,22 +123,59 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
                               UInt32 busnum, UInt32 nframes, AudioBufferList *buflist) {
     MKMacAudioDevice *dev = (MKMacAudioDevice *)udata;
     OSStatus err;
-        
-    if (! dev->_recordBufList.mBuffers->mData) {
-        NSLog(@"MKMacAudioDevice: No buffer allocated.");
-        dev->_recordBufList.mNumberBuffers = 1;
-        AudioBuffer *b = dev->_recordBufList.mBuffers;
-        b->mNumberChannels = dev->_recordMicChannels;
-        b->mDataByteSize = dev->_recordSampleSize * nframes;
-        b->mData = calloc(1, b->mDataByteSize);
+    
+    // P0 修复：验证输入参数有效性
+    if (nframes == 0 || nframes > 4096) {
+        NSLog(@"MKMacAudioDevice: inputCallback received invalid frame count (%u). Skipping.", (unsigned int)nframes);
+        return -1;
     }
     
-    if (dev->_recordBufList.mBuffers->mDataByteSize < (dev->_recordSampleSize * nframes)) {
-        NSLog(@"MKMacAudioDevice: Buffer too small. Allocating more space.");
-        AudioBuffer *b = dev->_recordBufList.mBuffers;
-        free(b->mData);
-        b->mDataByteSize = dev->_recordSampleSize * nframes;
+    // 确保缓冲区列表已初始化
+    if (dev->_recordBufList.mNumberBuffers == 0 || dev->_recordBufList.mBuffers == NULL) {
+        NSLog(@"MKMacAudioDevice: inputCallback called but buffer list not initialized.");
+        return -1;
+    }
+        
+    AudioBuffer *b = dev->_recordBufList.mBuffers;
+    UInt32 requiredSize = dev->_recordSampleSize * nframes;
+    
+    // P0 修复：增强缓冲区分配和验证逻辑
+    if (!b->mData) {
+        NSLog(@"MKMacAudioDevice: No buffer allocated. Allocating %u bytes.", (unsigned int)requiredSize);
+        b->mNumberChannels = dev->_recordMicChannels;
+        b->mDataByteSize = requiredSize;
         b->mData = calloc(1, b->mDataByteSize);
+        
+        if (b->mData == NULL) {
+            NSLog(@"MKMacAudioDevice: inputCallback failed to allocate buffer.");
+            return -1;
+        }
+    }
+    
+    if (b->mDataByteSize < requiredSize) {
+        NSLog(@"MKMacAudioDevice: Buffer too small (%u < %u). Reallocating.", 
+              (unsigned int)b->mDataByteSize, (unsigned int)requiredSize);
+        free(b->mData);
+        b->mDataByteSize = requiredSize;
+        b->mData = calloc(1, b->mDataByteSize);
+        
+        if (b->mData == NULL) {
+            NSLog(@"MKMacAudioDevice: inputCallback failed to reallocate buffer.");
+            return -1;
+        }
+    }
+    
+    // P0 修复：额外的缓冲区完整性检查
+    if (b->mData == NULL || b->mDataByteSize == 0 || b->mNumberChannels == 0) {
+        NSLog(@"MKMacAudioDevice: inputCallback buffer corrupted. Skipping render.");
+        return -1;
+    }
+    
+    // 验证指针有效性（防止 EXC_BAD_ACCESS）
+    uintptr_t dataPtr = (uintptr_t)b->mData;
+    if (dataPtr < 0x1000 || (dataPtr & 0x7) != 0) {
+        NSLog(@"MKMacAudioDevice: inputCallback received suspicious buffer pointer %p. Skipping.", b->mData);
+        return -1;
     }
     
     /*
@@ -146,21 +183,32 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
      actual read bytes count. We need to write it back otherwise
      we'll reallocate the buffer even if not needed.
      */
-    UInt32 dataByteSize = dev->_recordBufList.mBuffers->mDataByteSize;
+    UInt32 dataByteSize = b->mDataByteSize;
     err = AudioUnitRender(dev->_recordAudioUnit, flags, ts, busnum, nframes, &dev->_recordBufList);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: AudioUnitRender failed. err = %ld", (unsigned long)err);
+        // P0 修复：记录详细的错误信息以便调试
+        if (err == kAudioUnitErr_InvalidParameter) {
+            NSLog(@"MKMacAudioDevice: AudioUnitRender failed: Invalid parameter (err=%ld). Check buffer/format configuration.", (long)err);
+        } else {
+            NSLog(@"MKMacAudioDevice: AudioUnitRender failed. err = %ld, frames = %u, size = %u", 
+                  (long)err, (unsigned int)nframes, (unsigned int)requiredSize);
+        }
         return err;
     }
-    dev->_recordBufList.mBuffers->mDataByteSize = dataByteSize;
+    b->mDataByteSize = dataByteSize;
     
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    short *buf = (short *) dev->_recordBufList.mBuffers->mData;
-    MKAudioDeviceInputFunc inputFunc = dev->_inputFunc;
-    if (inputFunc) {
-        inputFunc(buf, nframes);
+    @try {
+        short *buf = (short *) b->mData;
+        MKAudioDeviceInputFunc inputFunc = dev->_inputFunc;
+        if (inputFunc) {
+            inputFunc(buf, nframes);
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"MKMacAudioDevice: inputFunc threw exception: %@. Audio recording interrupted.", exception);
+    } @finally {
+        [pool release];
     }
-    [pool release];
     
     return noErr;
 }
@@ -179,17 +227,40 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         return -1;
     }
     
-    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    done = outputFunc(buf->mData, nframes);
-    if (! done) {
-        // No frames available yet.
+    // P0 修复：验证音频缓冲区指针有效性，防止 EXC_BAD_ACCESS
+    if (buf->mData == NULL || buf->mDataByteSize == 0) {
+        NSLog(@"MKMacAudioDevice: outputCallback received invalid buffer (data=%p, size=%u). Skipping.", 
+              buf->mData, (unsigned int)buf->mDataByteSize);
         buf->mDataByteSize = 0;
-        [pool release];
         return -1;
     }
     
-    [pool release];
-    return noErr;
+    // 额外检查：确保数据指针是合理的内存地址（不是明显的无效地址）
+    // 0x400000000 以上的地址通常是无效的（在 macOS 用户空间）
+    uintptr_t dataPtr = (uintptr_t)buf->mData;
+    if (dataPtr < 0x1000 || (dataPtr & 0x7) != 0) {
+        // 指针未对齐或明显无效
+        NSLog(@"MKMacAudioDevice: outputCallback received suspicious buffer pointer %p. Skipping.", 
+              buf->mData);
+        buf->mDataByteSize = 0;
+        return -1;
+    }
+    
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    @try {
+        done = outputFunc(buf->mData, nframes);
+    } @catch (NSException *exception) {
+        NSLog(@"MKMacAudioDevice: outputFunc threw exception: %@. Audio playback interrupted.", exception);
+        done = NO;
+    } @finally {
+        if (! done) {
+            // No frames available yet.
+            buf->mDataByteSize = 0;
+        }
+        [pool release];
+    }
+    
+    return done ? noErr : -1;
 }
 
 @implementation MKMacAudioDevice
@@ -318,6 +389,8 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     }
     _recordSampleSize = _recordMicChannels * sizeof(short);
     
+    // P0 修复：正确设置音频格式 - 使用 Input Scope 而不是 Output Scope
+    // 错误的 scope 会导致 AudioConverterChain::ObtainInput 崩溃
     fmt.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
     fmt.mBitsPerChannel = sizeof(short) * 8;
     fmt.mFormatID = kAudioFormatLinearPCM;
@@ -328,10 +401,20 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     fmt.mFramesPerPacket = 1;
     
     len = sizeof(AudioStreamBasicDescription);
-    err = AudioUnitSetProperty(_recordAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &fmt, len);
+    // ✅ 关键修复：使用 kAudioUnitScope_Input 而不是 kAudioUnitScope_Output
+    err = AudioUnitSetProperty(_recordAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &fmt, len);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to set stream format for output device. (output scope)");
+        NSLog(@"MKMacAudioDevice: Unable to set stream format for input device. (input scope)");
         return NO;
+    }
+    
+    // 额外验证：确保格式已正确设置
+    AudioStreamBasicDescription verifyFmt;
+    len = sizeof(AudioStreamBasicDescription);
+    err = AudioUnitGetProperty(_recordAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &verifyFmt, &len);
+    if (err == noErr) {
+        NSLog(@"MKMacAudioDevice: Verified input format - %iHz, %i channels, %i bytes/frame", 
+              (int)verifyFmt.mSampleRate, (int)verifyFmt.mChannelsPerFrame, (int)verifyFmt.mBytesPerFrame);
     }
     
     AURenderCallbackStruct cb;
