@@ -345,12 +345,6 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         return NO;
     }
     
-    err = AudioUnitInitialize(_recordAudioUnit);
-    if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to initialize AudioUnit.");
-        return NO;
-    }
-    
     val = 1;
     err = AudioUnitSetProperty(_recordAudioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &val, sizeof(UInt32));
     if (err != noErr) {
@@ -365,7 +359,6 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         return NO;
     }
     
-    // Set selected input device
     len = sizeof(AudioDeviceID);
     err = AudioUnitSetProperty(_recordAudioUnit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &devId, len);
     if (err != noErr) {
@@ -389,8 +382,6 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     }
     _recordSampleSize = _recordMicChannels * sizeof(short);
     
-    // P0 修复：正确设置音频格式 - 使用 Input Scope 而不是 Output Scope
-    // 错误的 scope 会导致 AudioConverterChain::ObtainInput 崩溃
     fmt.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
     fmt.mBitsPerChannel = sizeof(short) * 8;
     fmt.mFormatID = kAudioFormatLinearPCM;
@@ -401,20 +392,10 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     fmt.mFramesPerPacket = 1;
     
     len = sizeof(AudioStreamBasicDescription);
-    // ✅ 关键修复：使用 kAudioUnitScope_Input 而不是 kAudioUnitScope_Output
-    err = AudioUnitSetProperty(_recordAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &fmt, len);
+    err = AudioUnitSetProperty(_recordAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &fmt, len);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to set stream format for input device. (input scope)");
+        NSLog(@"MKMacAudioDevice: Unable to set stream format for recording (output scope, bus 1). err=%d", (int)err);
         return NO;
-    }
-    
-    // 额外验证：确保格式已正确设置
-    AudioStreamBasicDescription verifyFmt;
-    len = sizeof(AudioStreamBasicDescription);
-    err = AudioUnitGetProperty(_recordAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &verifyFmt, &len);
-    if (err == noErr) {
-        NSLog(@"MKMacAudioDevice: Verified input format - %iHz, %i channels, %i bytes/frame", 
-              (int)verifyFmt.mSampleRate, (int)verifyFmt.mChannelsPerFrame, (int)verifyFmt.mBytesPerFrame);
     }
     
     AURenderCallbackStruct cb;
@@ -424,6 +405,17 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     err = AudioUnitSetProperty(_recordAudioUnit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, &cb, len);
     if (err != noErr) {
         NSLog(@"MKMacAudioDevice: Unable to setup callback.");
+        return NO;
+    }
+    
+    _recordBufList.mNumberBuffers = 1;
+    _recordBufList.mBuffers[0].mNumberChannels = _recordMicChannels;
+    _recordBufList.mBuffers[0].mDataByteSize = 0;
+    _recordBufList.mBuffers[0].mData = NULL;
+    
+    err = AudioUnitInitialize(_recordAudioUnit);
+    if (err != noErr) {
+        NSLog(@"MKMacAudioDevice: Unable to initialize AudioUnit.");
         return NO;
     }
     
@@ -484,12 +476,6 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         return NO;
     }
     
-    err = AudioUnitInitialize(_playbackAudioUnit);
-    if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to initialize AudioUnit.");
-        return NO;
-    }
-    
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitGetProperty(_playbackAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &fmt, &len);
     if (err != noErr) {
@@ -535,8 +521,11 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         return NO;
     }
     
-    // On desktop we call AudioDeviceSetProperty() with kAudioDevicePropertyBufferFrameSize
-    // to setup our frame size.
+    err = AudioUnitInitialize(_playbackAudioUnit);
+    if (err != noErr) {
+        NSLog(@"MKMacAudioDevice: Unable to initialize playback AudioUnit.");
+        return NO;
+    }
     
     err = AudioOutputUnitStart(_playbackAudioUnit);
     if (err != noErr) {

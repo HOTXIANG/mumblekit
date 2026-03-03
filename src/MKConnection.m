@@ -311,6 +311,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     } while (_reconnect);
     
     [_crypt release];
+    _crypt = nil;
 
     [NSThread exit];
 }
@@ -358,7 +359,14 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
 - (void) disconnect {
     [self stopConnectionThread];
+    int attempts = 0;
+    BOOL warned = NO;
     while ([self isExecuting] && ![self isFinished]) {
+        if (!warned && ++attempts > 300) {
+            NSLog(@"MKConnection: disconnect still waiting for thread after 3s.");
+            warned = YES;
+        }
+        usleep(10000);
     }
 }
 
@@ -626,11 +634,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     if (err == noErr) {
         switch (trustRes) {
             case kSecTrustResultProceed:
-            case kSecTrustResultUnspecified: // System trusts it.
+            case kSecTrustResultUnspecified:
                 trusted = YES;
                 break;
             default:
-                // kSecTrustResultInvalid, kSecTrustResultDeny, etc.
                 trusted = NO;
                 break;
         }

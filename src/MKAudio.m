@@ -35,6 +35,7 @@
 #endif
 
 NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
+NSString *MKAudioErrorNotification = @"MKAudioErrorNotification";
 #if TARGET_OS_OSX == 1
 static NSString *const MUMacAudioInputDevicesChangedNotification = @"MUMacAudioInputDevicesChanged";
 static NSString *const MUMacAudioVPIOToHALTransitionNotification = @"MUMacAudioVPIOToHALTransition";
@@ -171,6 +172,48 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
 }
 #endif
 
+static void MKAudioNormalizeSettings(MKAudioSettings *settings) {
+    if (settings == NULL) return;
+    
+    if (settings->codec != MKCodecFormatSpeex
+        && settings->codec != MKCodecFormatCELT
+        && settings->codec != MKCodecFormatOpus) {
+        settings->codec = MKCodecFormatOpus;
+    }
+    if (settings->transmitType != MKTransmitTypeVAD
+        && settings->transmitType != MKTransmitTypeToggle
+        && settings->transmitType != MKTransmitTypeContinuous) {
+        settings->transmitType = MKTransmitTypeVAD;
+    }
+    if (settings->vadKind != MKVADKindSignalToNoise
+        && settings->vadKind != MKVADKindAmplitude) {
+        settings->vadKind = MKVADKindAmplitude;
+    }
+    if (settings->quality <= 0) {
+        settings->quality = 100000;
+    }
+    if (settings->audioPerPacket <= 0 || settings->audioPerPacket > 8) {
+        settings->audioPerPacket = 2;
+    }
+    if (settings->volume < 0.0f) {
+        settings->volume = 0.0f;
+    }
+    if (settings->micBoost <= 0.0f) {
+        settings->micBoost = 1.0f;
+    }
+    if (settings->vadMin < 0.0f) {
+        settings->vadMin = 0.0f;
+    }
+    if (settings->vadMax < 0.0f) {
+        settings->vadMax = 0.0f;
+    }
+    if (settings->vadMax < settings->vadMin) {
+        float t = settings->vadMax;
+        settings->vadMax = settings->vadMin;
+        settings->vadMin = t;
+    }
+}
+
 @implementation MKAudio
 
 #pragma mark - Singleton & Init
@@ -193,6 +236,22 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
         // P0 修复：创建串行队列用于线程安全访问，替代 @synchronized
         NSString *queueName = [NSString stringWithFormat:@"com.mumble.audio.%p", self];
         _accessQueue = dispatch_queue_create([queueName UTF8String], DISPATCH_QUEUE_SERIAL);
+        
+        // 安全默认值：避免首个设置更新尚未应用时读取到未定义配置。
+        memset(&_audioSettings, 0, sizeof(MKAudioSettings));
+        _audioSettings.codec = MKCodecFormatOpus;
+        _audioSettings.transmitType = MKTransmitTypeVAD;
+        _audioSettings.vadKind = MKVADKindAmplitude;
+        _audioSettings.vadMin = 0.3f;
+        _audioSettings.vadMax = 0.6f;
+        _audioSettings.quality = 100000;
+        _audioSettings.audioPerPacket = 2;
+        _audioSettings.volume = 1.0f;
+        _audioSettings.micBoost = 1.0f;
+        _audioSettings.enableStereoOutput = YES;
+        _audioSettings.enableVadGate = YES;
+        _audioSettings.vadGateTimeSeconds = 0.1;
+        MKAudioNormalizeSettings(&_audioSettings);
         
 #if TARGET_OS_IOS
         // 注册通知监听 (替代旧的 C 回调)
@@ -526,12 +585,23 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
     [[AVAudioSession sharedInstance] setActive:YES error:&error];
     if (error) {
         NSLog(@"MKAudio: Failed to activate AVAudioSession: %@", error);
-        return; // 激活失败则无法启动
+        NSDictionary *info = @{@"message": [NSString stringWithFormat:@"Audio session activation failed: %@", error.localizedDescription]};
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioErrorNotification object:nil userInfo:info];
+        });
+        return;
     }
 #endif
     
+    __block MKAudioSettings settingsSnapshot;
+    __block MKConnection *connSnapshot = nil;
+    dispatch_sync(_accessQueue, ^{
+        memcpy(&settingsSnapshot, &_audioSettings, sizeof(MKAudioSettings));
+        connSnapshot = [_connection retain];
+    });
+    MKAudioNormalizeSettings(&settingsSnapshot);
+    
     @synchronized(self) {
-        // 如果已经在运行，先清理
         if (_running) {
 #if TARGET_OS_OSX == 1
             _lastDeviceWasVPIO = [_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
@@ -542,12 +612,10 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
         }
 
 #if TARGET_OS_IPHONE == 1
-        if (_audioSettings.enableStereoInput) {
-            // Stereo INPUT requires the plain RemoteIO path (VPIO forces mono input).
-            _audioDevice = [[MKiOSAudioDevice alloc] initWithSettings:&_audioSettings];
+        if (settingsSnapshot.enableStereoInput) {
+            _audioDevice = [[MKiOSAudioDevice alloc] initWithSettings:&settingsSnapshot];
         } else {
-            // VPIO handles mono input + stereo output, with hardware AEC/AGC.
-            _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&_audioSettings];
+            _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&settingsSnapshot];
         }
 #elif TARGET_OS_OSX == 1
         {
@@ -557,14 +625,14 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
                 followSystem = [defaults boolForKey:@"AudioFollowSystemInputDevice"];
             }
             BOOL useVPIO = followSystem
-                        && !_audioSettings.enableStereoInput
+                        && !settingsSnapshot.enableStereoInput
                         && MKAudioSystemDefaultInputIsBuiltInOrBluetooth();
             if (useVPIO) {
                 NSLog(@"MKAudio: macOS using VPIO (follow-system, built-in/Bluetooth).");
-                _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&_audioSettings];
+                _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&settingsSnapshot];
             } else {
                 NSLog(@"MKAudio: macOS using HALOutput.");
-                _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&_audioSettings];
+                _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&settingsSnapshot];
             }
         }
 #else
@@ -576,7 +644,7 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
         if (!setupSuccess && ![_audioDevice isKindOfClass:[MKMacAudioDevice class]]) {
             NSLog(@"MKAudio: VPIO setup failed on macOS, falling back to HALOutput.");
             [_audioDevice release];
-            _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&_audioSettings];
+            _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&settingsSnapshot];
             setupSuccess = [_audioDevice setupDevice];
         }
 #endif
@@ -584,25 +652,31 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
             NSLog(@"MKAudio: Failed to setup audio device.");
             [_audioDevice release];
             _audioDevice = nil;
+            [connSnapshot release];
+            NSDictionary *info = @{@"message": @"Failed to initialize audio device. Check microphone permissions."};
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioErrorNotification object:nil userInfo:info];
+            });
             return;
         }
 
-        _audioInput = [[MKAudioInput alloc] initWithDevice:_audioDevice andSettings:&_audioSettings];
-        [_audioInput setMainConnectionForAudio:_connection];
+        _audioInput = [[MKAudioInput alloc] initWithDevice:_audioDevice andSettings:&settingsSnapshot];
+        [_audioInput setMainConnectionForAudio:connSnapshot];
         
-        // 恢复 audio restart 前的闭麦/不听状态
         [_audioInput setSelfMuted:_cachedSelfMuted];
         [_audioInput setSuppressed:_cachedSuppressed];
         [_audioInput setMuted:_cachedMuted];
         
-        _audioOutput = [[MKAudioOutput alloc] initWithDevice:_audioDevice andSettings:&_audioSettings];
+        _audioOutput = [[MKAudioOutput alloc] initWithDevice:_audioDevice andSettings:&settingsSnapshot];
         
-        if (_audioSettings.enableSideTone) {
-            _sidetoneOutput = [[MKAudioOutputSidetone alloc] initWithSettings:&_audioSettings];
+        if (settingsSnapshot.enableSideTone) {
+            _sidetoneOutput = [[MKAudioOutputSidetone alloc] initWithSettings:&settingsSnapshot];
         }
         
         _running = YES;
     }
+    
+    [connSnapshot release];
 }
 
 - (void) restart {
@@ -656,10 +730,17 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
 }
 
 - (void) updateAudioSettings:(MKAudioSettings *)settings {
+    if (settings == NULL) return;
+    
+    // 关键修复：避免异步 block 捕获调用方栈指针，导致设置结构体损坏。
+    MKAudioSettings settingsCopy;
+    memcpy(&settingsCopy, settings, sizeof(MKAudioSettings));
+    MKAudioNormalizeSettings(&settingsCopy);
+    
     dispatch_async(_accessQueue, ^{
-        memcpy(&_audioSettings, settings, sizeof(MKAudioSettings));
+        memcpy(&_audioSettings, &settingsCopy, sizeof(MKAudioSettings));
         if (_audioOutput != nil) {
-            [_audioOutput setMasterVolume:settings->volume];
+            [_audioOutput setMasterVolume:settingsCopy.volume];
         }
     });
     // 如果设置改变（如切换扬声器），可能需要刷新 Session 配置
@@ -667,11 +748,11 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
 }
 
 - (void) setMainConnectionForAudio:(MKConnection *)conn {
+    MKConnection *retainedConn = [conn retain];
     dispatch_async(_accessQueue, ^{
-        [conn retain];
-        [_audioInput setMainConnectionForAudio:conn];
+        [_audioInput setMainConnectionForAudio:retainedConn];
         [_connection release];
-        _connection = conn;
+        _connection = retainedConn;
     });
 }
 

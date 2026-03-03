@@ -234,6 +234,15 @@
 
 - (void) initializeMixer {
     int err;
+    
+    if (sampleRate <= 0) {
+        NSLog(@"MKAudioInput: Invalid sampleRate=%d, falling back to %d.", sampleRate, SAMPLE_RATE);
+        sampleRate = SAMPLE_RATE;
+    }
+    if (frameSize <= 0) {
+        NSLog(@"MKAudioInput: Invalid frameSize=%d, falling back to %d.", frameSize, SAMPLE_RATE / 100);
+        frameSize = SAMPLE_RATE / 100;
+    }
 
     NSLog(@"MKAudioInput: initializeMixer -- iMicFreq=%u, iSampleRate=%u", micFrequency, sampleRate);
 
