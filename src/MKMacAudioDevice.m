@@ -131,7 +131,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     }
     
     // 确保缓冲区列表已初始化
-    if (dev->_recordBufList.mNumberBuffers == 0 || dev->_recordBufList.mBuffers == NULL) {
+    if (dev->_recordBufList.mNumberBuffers == 0) {
         NSLog(@"MKMacAudioDevice: inputCallback called but buffer list not initialized.");
         return -1;
     }
