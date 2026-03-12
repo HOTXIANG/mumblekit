@@ -4,6 +4,20 @@
 
 #import <MumbleKit/MKTextMessage.h>
 
+static NSString *MKSanitizeStringForXMLParsing(NSString *string) {
+    if (string == nil || [string length] == 0) {
+        return string;
+    }
+    
+    NSError *error = nil;
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"&(?!#?[A-Za-z0-9]+;)" options:0 error:&error];
+    if (regex == nil || error != nil) {
+        return string;
+    }
+    
+    return [regex stringByReplacingMatchesInString:string options:0 range:NSMakeRange(0, [string length]) withTemplate:@"&amp;"];
+}
+
 @interface MKTextMessage () <NSXMLParserDelegate> {
     NSString         *_rawStr;
     NSMutableString  *_plainStr;
@@ -25,31 +39,15 @@
         BOOL possiblyHtml = r.location != NSNotFound;
         if (possiblyHtml) {
             _plainStr = [[NSMutableString alloc] init];
-            NSXMLParser *xmlParser = [[NSXMLParser alloc] initWithData:[[NSString stringWithFormat:@"<doc>%@</doc>", _rawStr] dataUsingEncoding:NSUTF8StringEncoding]];
+            NSString *xmlSafeString = MKSanitizeStringForXMLParsing(_rawStr);
+            NSXMLParser *xmlParser = [[NSXMLParser alloc] initWithData:[[NSString stringWithFormat:@"<doc>%@</doc>", xmlSafeString] dataUsingEncoding:NSUTF8StringEncoding]];
             [xmlParser setDelegate:self];
             [xmlParser parse];
             [xmlParser release];
 
-            // Strip extra whitespace
-            NSMutableData *filtered = [[NSMutableData alloc] init];
-            NSCharacterSet *whitespaceNewlineSet = [NSCharacterSet whitespaceAndNewlineCharacterSet];
-            NSUInteger i, len = [_plainStr length];
-            unichar lastc = 0;
-            for (i = 0; i < len; i++) {
-                unichar c = [_plainStr characterAtIndex:i];
-                if ([whitespaceNewlineSet characterIsMember:c]) {
-                    if (lastc != c)
-                        [filtered appendBytes:&c length:2];
-                } else {
-                    [filtered appendBytes:&c length:2];
-                }
-                lastc = c;
-            }
-
+            _filteredStr = [_plainStr copy];
             [_plainStr release];
             _plainStr = nil;
-            _filteredStr = [[NSString stringWithCharacters:[filtered bytes] length:[filtered length]/2] retain];
-            [filtered release];
         }
     }
 
@@ -59,6 +57,7 @@
 - (void) dealloc {
     [_rawStr release];
     [_plainStr release];
+    [_filteredStr release];
     [_imagesArray release];
     [_linksArray release];
     [super dealloc];
