@@ -80,6 +80,15 @@ typedef enum {
     MKRejectReasonNoCertificate
 } MKRejectReason;
 
+/// UDP transport status for voice path health.
+typedef enum {
+    MKUDPTransportStateUnknown = 0,
+    MKUDPTransportStateUnavailable,
+    MKUDPTransportStateAvailable,
+    MKUDPTransportStateStalled,
+    MKUDPTransportStateRecovering,
+} MKUDPTransportState;
+
 /// @protocol MKConnectionDelegate MumbleKit/MKConnection.h
 ///
 /// MKConnectionDelegate implements a set of methods that are called on the delegate
@@ -133,6 +142,10 @@ typedef enum {
 /// @param reason       The reason for the rejected connection attempt. (See MKRejectReason).
 /// @param explanation  A textual description of the reason for rejection.
 - (void) connection:(MKConnection *)conn rejectedWithReason:(MKRejectReason)reason explanation:(NSString *)explanation;
+
+@optional
+/// Called when UDP voice transport state changes (e.g. stalled/recovering/available).
+- (void) connection:(MKConnection *)conn udpTransportStateChanged:(MKUDPTransportState)state;
 @end
 
 /// @protocol MKMessageHandler MKConnection.h MumbleKit/MKConnection.h

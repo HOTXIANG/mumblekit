@@ -40,6 +40,7 @@
 #define MUMBLEKIT_CELT_BITSTREAM 0x8000000bUL
 static const NSUInteger MKUDPRebuildFailureThreshold = 3;
 static const uint64_t MKUDPRebuildCooldownUsec = 2ULL * 1000ULL * 1000ULL;
+static const uint64_t MKUDPReceiveStallThresholdUsec = 8ULL * 1000ULL * 1000ULL;
 
 @interface MKConnection () {
     MKCryptState   *_crypt;
@@ -57,8 +58,10 @@ static const uint64_t MKUDPRebuildCooldownUsec = 2ULL * 1000ULL * 1000ULL;
 
     BOOL           _forceTCP;
     BOOL           _udpAvailable;
+    MKUDPTransportState _udpTransportState;
     NSUInteger     _udpConsecutiveSendFailures;
     uint64_t       _lastUdpRebuildAttemptUsec;
+    uint64_t       _lastUdpReceiveUsec;
     unsigned long  _connTime;
     NSTimer        *_pingTimer;
     NSOutputStream *_outputStream;
@@ -121,10 +124,13 @@ static const uint64_t MKUDPRebuildCooldownUsec = 2ULL * 1000ULL * 1000ULL;
 // UDP
 - (void) _setupUdpSock;
 - (void) _teardownUdpSock;
+- (void) _applyForceTCPOnConnectionThread:(NSNumber *)flagNumber;
 - (void) _udpDataReady:(NSData *)data;
 - (void) _udpMessageReceived:(NSData *)data;
 - (BOOL) _sendUDPMessage:(NSData *)data;
 - (void) _attemptUdpSocketRecoveryIfNeeded;
+- (void) _checkUdpLivenessAndRecoverIfNeeded;
+- (void) _notifyUDPTransportStateIfChanged:(MKUDPTransportState)newState;
 - (void) _sendVoiceDataOnConnectionThread:(NSData *)data;
 
 // Error handling
@@ -275,8 +281,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
             _reconnect = NO;
             _readyVoice = NO;
             _udpAvailable = NO;
+            _udpTransportState = MKUDPTransportStateUnknown;
             _udpConsecutiveSendFailures = 0;
             _lastUdpRebuildAttemptUsec = 0;
+            _lastUdpReceiveUsec = 0;
             MKConnectionResetRunningStats(&_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
             MKConnectionResetRunningStats(&_tcpPingMeanMs, &_tcpPingM2Ms, &_tcpPingSamples);
             _udpPacketsSent = 0;
@@ -397,8 +405,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     _keepRunning = YES;
     _readyVoice = NO;
     _udpAvailable = NO;
+    _udpTransportState = MKUDPTransportStateUnknown;
     _udpConsecutiveSendFailures = 0;
     _lastUdpRebuildAttemptUsec = 0;
+    _lastUdpReceiveUsec = 0;
     _rejected = NO;
     MKConnectionResetRunningStats(&_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
     MKConnectionResetRunningStats(&_tcpPingMeanMs, &_tcpPingM2Ms, &_tcpPingSamples);
@@ -476,8 +486,13 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     [version setOs: [dev systemName]];
     [version setOsVersion: [dev systemVersion]];
 #elif TARGET_OS_MAC == 1
-    [version setOs:@"Mac OS X"];
-    [version setOsVersion:@"10.6"];
+    NSProcessInfo *processInfo = [NSProcessInfo processInfo];
+    NSOperatingSystemVersion osv = [processInfo operatingSystemVersion];
+    [version setOs:@"macOS"];
+    [version setOsVersion:[NSString stringWithFormat:@"%ld.%ld.%ld",
+                           (long)osv.majorVersion,
+                           (long)osv.minorVersion,
+                           (long)osv.patchVersion]];
 #endif
 
     MKVersion *vers = [MKVersion sharedVersion];
@@ -526,7 +541,11 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
                 setsockopt(_socket, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
             }
 
-            [self _setupUdpSock];
+            if (_forceTCP) {
+                [self _teardownUdpSock];
+            } else {
+                [self _setupUdpSock];
+            }
             break;
         }
 
@@ -594,8 +613,13 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) _setupUdpSock {
+    if (_forceTCP) {
+        return;
+    }
+
     _udpAvailable = NO;
     _udpConsecutiveSendFailures = 0;
+    _lastUdpReceiveUsec = [self _currentTimeStamp];
     struct sockaddr_storage sa;
 
     socklen_t sl = sizeof(sa);
@@ -632,6 +656,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 - (void) _teardownUdpSock {
     _udpAvailable = NO;
     _udpConsecutiveSendFailures = 0;
+    _lastUdpReceiveUsec = 0;
     if (_udpSock) {
         CFSocketInvalidate(_udpSock);
         CFRelease(_udpSock);
@@ -714,7 +739,23 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) setForceTCP:(BOOL)flag {
+    if ([NSThread currentThread] != self) {
+        [self performSelector:@selector(_applyForceTCPOnConnectionThread:) onThread:self withObject:@(flag) waitUntilDone:NO];
+        return;
+    }
+
+    [self _applyForceTCPOnConnectionThread:@(flag)];
+}
+
+- (void) _applyForceTCPOnConnectionThread:(NSNumber *)flagNumber {
+    BOOL flag = [flagNumber boolValue];
+
     _forceTCP = flag;
+    if (_forceTCP) {
+        [self _teardownUdpSock];
+    } else if (_connectionEstablished && _socket != -1 && !_udpSock) {
+        [self _setupUdpSock];
+    }
 }
 
 - (BOOL) forceTCP {
@@ -722,9 +763,14 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (BOOL) _sendUDPMessage:(NSData *)data {
+    if (_forceTCP) {
+        return NO;
+    }
+
     if (![_crypt valid] || !CFSocketIsValid(_udpSock)) {
         NSLog(@"MKConnection: Invalid CryptState or CFSocket.");
         _udpAvailable = NO;
+        [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
         _udpConsecutiveSendFailures += 1;
         [self _attemptUdpSocketRecoveryIfNeeded];
         return NO;
@@ -734,6 +780,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     if (crypted == nil) {
         NSLog(@"MKConnection: unable to encrypt UDP message");
         _udpAvailable = NO;
+        [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
         _udpConsecutiveSendFailures += 1;
         [self _attemptUdpSocketRecoveryIfNeeded];
         return NO;
@@ -743,6 +790,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     if (err != kCFSocketSuccess) {
         NSLog(@"MKConnection: CFSocketSendData failed with err=%i", (int)err);
         _udpAvailable = NO;
+        [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
         _udpConsecutiveSendFailures += 1;
         [self _attemptUdpSocketRecoveryIfNeeded];
         return NO;
@@ -769,6 +817,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 
     _lastUdpRebuildAttemptUsec = now;
+    [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateRecovering];
     NSLog(@"MKConnection: Rebuilding UDP socket after %lu consecutive failures.",
           (unsigned long)_udpConsecutiveSendFailures);
     [self _teardownUdpSock];
@@ -836,12 +885,27 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     [self sendMessageWithType:UDPTunnelMessage data:data];
 }
 
+- (void) _notifyUDPTransportStateIfChanged:(MKUDPTransportState)newState {
+    if (_udpTransportState == newState) {
+        return;
+    }
+    _udpTransportState = newState;
+
+    if ([_delegate respondsToSelector:@selector(connection:udpTransportStateChanged:)]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [_delegate connection:self udpTransportStateChanged:newState];
+        });
+    }
+}
+
 - (void) _udpDataReady:(NSData *)crypted {
     if (! _udpAvailable) {
         _udpAvailable = true;
+        [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateAvailable];
         NSLog(@"MKConnection: UDP is now available!");
     }
     _udpConsecutiveSendFailures = 0;
+    _lastUdpReceiveUsec = [self _currentTimeStamp];
 
     if ([crypted length] > 4) {
         NSData *plain = [_crypt decryptData:crypted];
@@ -921,16 +985,20 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     Float32 udpVar = MKConnectionVarianceFromM2(_udpPingM2Ms, _udpPingSamples);
     Float32 tcpVar = MKConnectionVarianceFromM2(_tcpPingM2Ms, _tcpPingSamples);
 
+    [self _checkUdpLivenessAndRecoverIfNeeded];
+
     // UDP Ping
-    MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:16];
-    buf[0] = UDPPingMessage << 5;
-    [pds addVarint:timeStamp];
-    if ([pds valid]) {
-        data = [[NSData alloc] initWithBytesNoCopy:buf length:[pds size]+1 freeWhenDone:NO];
-        [self _sendUDPMessage:data];
-        [data release];
+    if (!_forceTCP) {
+        MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:16];
+        buf[0] = UDPPingMessage << 5;
+        [pds addVarint:timeStamp];
+        if ([pds valid]) {
+            data = [[NSData alloc] initWithBytesNoCopy:buf length:[pds size]+1 freeWhenDone:NO];
+            [self _sendUDPMessage:data];
+            [data release];
+        }
+        [pds release];
     }
-    [pds release];
         
     // TCP Ping
     MPPing_Builder *ping = [MPPing builder];
@@ -951,6 +1019,35 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
     NSLog(@"MKConnection: Sent ping message (udpAvg=%.2fms, tcpAvg=%.2fms, udpPackets=%u, tcpPackets=%u).",
           _udpPingMeanMs, _tcpPingMeanMs, _udpPacketsSent, _tcpPacketsSent);
+}
+
+- (void) _checkUdpLivenessAndRecoverIfNeeded {
+    if (_forceTCP || !_connectionEstablished || _socket == -1) {
+        return;
+    }
+
+    uint64_t now = [self _currentTimeStamp];
+    if (_lastUdpReceiveUsec == 0) {
+        _lastUdpReceiveUsec = now;
+        return;
+    }
+
+    uint64_t idleUsec = now - _lastUdpReceiveUsec;
+    if (_udpAvailable && idleUsec >= MKUDPReceiveStallThresholdUsec) {
+        NSLog(@"MKConnection: UDP stalled for %.2fs, forcing TCP fallback and rebuilding UDP socket.",
+              (double)idleUsec / 1000000.0);
+        _udpAvailable = NO;
+        [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateStalled];
+        _udpConsecutiveSendFailures = MKUDPRebuildFailureThreshold;
+        _lastUdpRebuildAttemptUsec = 0;
+        [self _attemptUdpSocketRecoveryIfNeeded];
+        return;
+    }
+
+    if (!_udpAvailable && idleUsec >= MKUDPReceiveStallThresholdUsec) {
+        _udpConsecutiveSendFailures = MKUDPRebuildFailureThreshold;
+        [self _attemptUdpSocketRecoveryIfNeeded];
+    }
 }
 
 - (void) _pingResponseFromServer:(MPPing *)pingMessage {
