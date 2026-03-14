@@ -15,10 +15,11 @@ typedef enum {
     MKPermissionWhisper          = 0x00100,
     MKPermissionTextMessage      = 0x00200,
     MKPermissionMakeTempChannel  = 0x00400,
+    MKPermissionListen           = 0x00800,
     MKPermissionKick             = 0x10000,
     MKPermissionBan              = 0x20000,
     MKPermissionRegister         = 0x40000,
     MKPermissionSelfRegister     = 0x80000,
-    MKPermissionAll              = 0xf07ff,
+    MKPermissionResetUserContent = 0x100000,
+    MKPermissionAll              = 0x1f0fff,
 } MKPermission;
-

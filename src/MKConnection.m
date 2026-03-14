@@ -31,6 +31,7 @@
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <math.h>
 
 #import "Mumble.pb.h"
 
@@ -86,6 +87,20 @@ static const uint64_t MKUDPRebuildCooldownUsec = 2ULL * 1000ULL * 1000ULL;
     NSString       *_serverOSVersion;
     NSMutableArray *_peerCertificates;
     BOOL           _trustedChain;
+
+    // Local network stats sent to server in PingMessage.
+    double         _udpPingMeanMs;
+    double         _udpPingM2Ms;
+    uint32_t       _udpPingSamples;
+    double         _tcpPingMeanMs;
+    double         _tcpPingM2Ms;
+    uint32_t       _tcpPingSamples;
+    uint32_t       _udpPacketsSent;
+    uint32_t       _tcpPacketsSent;
+    uint32_t       _lastGood;
+    uint32_t       _lastLate;
+    uint32_t       _lastLost;
+    uint32_t       _lastResync;
 }
 
 - (void) _setupSsl;
@@ -120,6 +135,37 @@ static const uint64_t MKUDPRebuildCooldownUsec = 2ULL * 1000ULL * 1000ULL;
 - (void) startConnectionThread;
 - (void) stopConnectionThread;
 @end
+
+static void MKConnectionResetRunningStats(double *mean, double *m2, uint32_t *samples) {
+    *mean = 0.0;
+    *m2 = 0.0;
+    *samples = 0;
+}
+
+static void MKConnectionAddSample(double sampleMs, double *mean, double *m2, uint32_t *samples) {
+    if (!isfinite(sampleMs) || sampleMs < 0.0) {
+        return;
+    }
+
+    if (*samples == UINT32_MAX) {
+        // Keep estimator stable if samples overflow in very long sessions.
+        *samples = UINT32_MAX - 1;
+    }
+
+    *samples += 1;
+    double n = (double)(*samples);
+    double delta = sampleMs - *mean;
+    *mean += delta / n;
+    double delta2 = sampleMs - *mean;
+    *m2 += delta * delta2;
+}
+
+static Float32 MKConnectionVarianceFromM2(double m2, uint32_t samples) {
+    if (samples < 2 || !isfinite(m2) || m2 < 0.0) {
+        return 0.0f;
+    }
+    return (Float32)(m2 / (double)(samples - 1));
+}
 
 // CFSocket UDP callback.
 static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
@@ -231,6 +277,14 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
             _udpAvailable = NO;
             _udpConsecutiveSendFailures = 0;
             _lastUdpRebuildAttemptUsec = 0;
+            MKConnectionResetRunningStats(&_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
+            MKConnectionResetRunningStats(&_tcpPingMeanMs, &_tcpPingM2Ms, &_tcpPingSamples);
+            _udpPacketsSent = 0;
+            _tcpPacketsSent = 0;
+            _lastGood = 0;
+            _lastLate = 0;
+            _lastLost = 0;
+            _lastResync = 0;
         }
 
         [_crypt release];
@@ -346,6 +400,14 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     _udpConsecutiveSendFailures = 0;
     _lastUdpRebuildAttemptUsec = 0;
     _rejected = NO;
+    MKConnectionResetRunningStats(&_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
+    MKConnectionResetRunningStats(&_tcpPingMeanMs, &_tcpPingM2Ms, &_tcpPingSamples);
+    _udpPacketsSent = 0;
+    _tcpPacketsSent = 0;
+    _lastGood = 0;
+    _lastLate = 0;
+    _lastLost = 0;
+    _lastResync = 0;
 
     [self start];
 }
@@ -686,6 +748,9 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         return NO;
     }
     _udpConsecutiveSendFailures = 0;
+    if (_udpPacketsSent < UINT32_MAX) {
+        _udpPacketsSent += 1;
+    }
     return YES;
 }
 
@@ -744,6 +809,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     NSInteger nwritten = [_outputStream write:[msg bytes] maxLength:[msg length]];
     if (nwritten != expectedLength) {
         NSLog(@"MKConnection: write error, wrote %li, expected %lu", (long int)nwritten, (unsigned long)expectedLength);
+    } else if (_tcpPacketsSent < UINT32_MAX) {
+        _tcpPacketsSent += 1;
     }
     [msg release];
 }
@@ -851,6 +918,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     unsigned char buf[16];
     NSData *data;
     uint64_t timeStamp = [self _currentTimeStamp] - _connTime;
+    Float32 udpVar = MKConnectionVarianceFromM2(_udpPingM2Ms, _udpPingSamples);
+    Float32 tcpVar = MKConnectionVarianceFromM2(_tcpPingM2Ms, _tcpPingSamples);
 
     // UDP Ping
     MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:16];
@@ -866,25 +935,50 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     // TCP Ping
     MPPing_Builder *ping = [MPPing builder];
     [ping setTimestamp:timeStamp];
-    [ping setGood:0];
-    [ping setLate:0];
-    [ping setLost:0];
-    [ping setResync:0];
-    [ping setUdpPingAvg:0.0f];
-    [ping setUdpPingVar:0.0f];
-    [ping setUdpPackets:0];
-    [ping setTcpPingAvg:0.0f];
-    [ping setTcpPingVar:0.0f];
-    [ping setTcpPackets:0];
+    [ping setGood:_lastGood];
+    [ping setLate:_lastLate];
+    [ping setLost:_lastLost];
+    [ping setResync:_lastResync];
+    [ping setUdpPingAvg:(Float32)_udpPingMeanMs];
+    [ping setUdpPingVar:udpVar];
+    [ping setUdpPackets:_udpPacketsSent];
+    [ping setTcpPingAvg:(Float32)_tcpPingMeanMs];
+    [ping setTcpPingVar:tcpVar];
+    [ping setTcpPackets:_tcpPacketsSent];
 
     data = [[ping build] data];
     [self sendMessageWithType:PingMessage data:data];
 
-    NSLog(@"MKConnection: Sent ping message.");
+    NSLog(@"MKConnection: Sent ping message (udpAvg=%.2fms, tcpAvg=%.2fms, udpPackets=%u, tcpPackets=%u).",
+          _udpPingMeanMs, _tcpPingMeanMs, _udpPacketsSent, _tcpPacketsSent);
 }
 
 - (void) _pingResponseFromServer:(MPPing *)pingMessage {
-    NSLog(@"MKConnection: pingResponseFromServer");
+    uint64_t nowUsec = [self _currentTimeStamp] - _connTime;
+
+    if ([pingMessage hasTimestamp]) {
+        uint64_t sentUsec = [pingMessage timestamp];
+        if (nowUsec >= sentUsec) {
+            uint64_t rttUsec = nowUsec - sentUsec;
+            // Guard against obviously stale/invalid timestamps.
+            if (rttUsec <= 5ULL * 60ULL * 1000000ULL) {
+                MKConnectionAddSample((double)rttUsec / 1000.0, &_tcpPingMeanMs, &_tcpPingM2Ms, &_tcpPingSamples);
+            }
+        }
+    }
+
+    if ([pingMessage hasGood]) {
+        _lastGood = [pingMessage good];
+    }
+    if ([pingMessage hasLate]) {
+        _lastLate = [pingMessage late];
+    }
+    if ([pingMessage hasLost]) {
+        _lastLost = [pingMessage lost];
+    }
+    if ([pingMessage hasResync]) {
+        _lastResync = [pingMessage resync];
+    }
 }
 
 - (void) _connectionRejected:(MPReject *)rejectMessage {
@@ -1064,7 +1158,13 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         case UDPPingMessage: {
             uint64_t timeStamp = [pds getVarint];
             uint64_t now = [self _currentTimeStamp] - _connTime;
-            NSLog(@"UDP ping = %llu usec", now - timeStamp);
+            if (now >= timeStamp) {
+                uint64_t rttUsec = now - timeStamp;
+                if (rttUsec <= 5ULL * 60ULL * 1000000ULL) {
+                    MKConnectionAddSample((double)rttUsec / 1000.0, &_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
+                }
+                NSLog(@"UDP ping = %llu usec", rttUsec);
+            }
             break;
         }
 

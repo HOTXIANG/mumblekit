@@ -114,8 +114,8 @@ message UserState {
 	optional bytes texture_hash = 17;
 	optional bool priority_speaker = 18;
 	optional bool recording = 19;
-	repeated uint32 listening_channel_add = 22;
-	repeated uint32 listening_channel_remove = 23;
+	repeated uint32 listening_channel_add = 21;
+	repeated uint32 listening_channel_remove = 22;
 }
 
 message BanList {

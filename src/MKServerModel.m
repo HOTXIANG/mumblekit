@@ -618,7 +618,25 @@
 }
 
 - (void) connection:(MKConnection *)conn handleUserListMessage: (MPUserList *)msg {
-    [_delegate serverModel:self didReceiveUserList:msg];
+    NSMutableArray *users = [NSMutableArray array];
+    PBArray *userArray = [msg users];
+    NSUInteger count = userArray ? [userArray count] : 0;
+
+    for (NSUInteger i = 0; i < count; i++) {
+        MPUserList_User *user = [msg usersAtIndex:i];
+        if (user == nil) {
+            continue;
+        }
+
+        NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+        [entry setObject:@([user userId]) forKey:@"userId"];
+        if ([user hasName] && [user name] != nil) {
+            [entry setObject:[user name] forKey:@"name"];
+        }
+        [users addObject:entry];
+    }
+
+    [_delegate serverModel:self didReceiveUserList:[NSArray arrayWithArray:users]];
 }
 
 - (void) connection:(MKConnection *)conn handleVoiceTargetMessage: (MPVoiceTarget *)msg {
@@ -1030,6 +1048,16 @@
     [_connection sendMessageWithType:UserStateMessage data:data];
 }
 
+// Move a channel to a new parent
+- (void) moveChannel:(MKChannel *)channel toParent:(MKChannel *)parent {
+    MPChannelState_Builder *channelState = [MPChannelState builder];
+    channelState.channelId = (uint32_t)channel.channelId;
+    channelState.parent = (uint32_t)parent.channelId;
+    
+    NSData *data = [[channelState build] data];
+    [_connection sendMessageWithType:ChannelStateMessage data:data];
+}
+
 // Create a channel
 - (void) createChannelWithName:(NSString *)channelName parent:(MKChannel *)parent temporary:(BOOL)temp {
     MPChannelState_Builder *channelState = [MPChannelState builder];
@@ -1313,8 +1341,13 @@
 #pragma mark Channel Listening operations
 
 - (void) addListeningChannel:(MKChannel *)channel {
+    if (channel == nil || _connectedUser == nil) {
+        return;
+    }
+
     // Mumble 1.4+: 使用 UserState.listening_channel_add（单向监听，仅影响本用户）
     MPUserState_Builder *mpus = [MPUserState builder];
+    [mpus setSession:(uint32_t)[_connectedUser session]];
     [mpus addListeningChannelAdd:(uint32_t)[channel channelId]];
     
     NSData *data = [[mpus build] data];
@@ -1322,8 +1355,13 @@
 }
 
 - (void) removeListeningChannel:(MKChannel *)channel {
+    if (channel == nil || _connectedUser == nil) {
+        return;
+    }
+
     // Mumble 1.4+: 使用 UserState.listening_channel_remove
     MPUserState_Builder *mpus = [MPUserState builder];
+    [mpus setSession:(uint32_t)[_connectedUser session]];
     [mpus addListeningChannelRemove:(uint32_t)[channel channelId]];
     
     NSData *data = [[mpus build] data];
@@ -1421,13 +1459,28 @@
 }
 
 - (void) unlinkAllForChannel:(MKChannel *)channel {
+    if (channel == nil) {
+        return;
+    }
+
+    NSArray *linksSnapshot = [[channel linkedChannels] copy];
+    if ([linksSnapshot count] == 0) {
+        [linksSnapshot release];
+        return;
+    }
+
     MPChannelState_Builder *channelState = [MPChannelState builder];
     [channelState setChannelId:(uint32_t)[channel channelId]];
-    // Sending an empty links array clears all links
-    [channelState setLinksArray:@[]];
+
+    // 与官方客户端保持一致：逐个发送 links_remove，而不是发送空 links 列表
+    // 否则服务器端可能无法区分“清空 links”和“未设置 links”。
+    for (MKChannel *linkedChannel in linksSnapshot) {
+        [channelState addLinksRemove:(uint32_t)[linkedChannel channelId]];
+    }
     
     NSData *data = [[channelState build] data];
     [_connection sendMessageWithType:ChannelStateMessage data:data];
+    [linksSnapshot release];
 }
 
 #pragma mark -

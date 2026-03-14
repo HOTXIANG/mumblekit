@@ -4425,10 +4425,10 @@ static MPUserState* defaultMPUserStateInstance = nil;
     [output writeBool:19 value:self.recording];
   }
   for (int i = 0; i < self.listeningChannelAdd.count; i++) {
-    [output writeUInt32:22 value:[self listeningChannelAddAtIndex:i]];
+    [output writeUInt32:21 value:[self listeningChannelAddAtIndex:i]];
   }
   for (int i = 0; i < self.listeningChannelRemove.count; i++) {
-    [output writeUInt32:23 value:[self listeningChannelRemoveAtIndex:i]];
+    [output writeUInt32:22 value:[self listeningChannelRemoveAtIndex:i]];
   }
   [self.unknownFields writeToCodedOutputStream:output];
 }
@@ -4929,11 +4929,11 @@ static MPUserState* defaultMPUserStateInstance = nil;
         [self setRecording:[input readBool]];
         break;
       }
-      case 176: {
+      case 168: {
         [self addListeningChannelAdd:[input readUInt32]];
         break;
       }
-      case 184: {
+      case 176: {
         [self addListeningChannelRemove:[input readUInt32]];
         break;
       }
@@ -13833,4 +13833,3 @@ static MPRequestBlob* defaultMPRequestBlobInstance = nil;
   return self;
 }
 @end
-

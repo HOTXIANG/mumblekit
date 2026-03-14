@@ -589,6 +589,12 @@
 /// @param channel  The target channel.
 - (void) moveUser:(MKUser *)user toChannel:(MKChannel *)channel;
 
+/// Move a channel to a new parent channel.
+///
+/// @param channel  The channel to move.
+/// @param parent   The new parent channel.
+- (void) moveChannel:(MKChannel *)channel toParent:(MKChannel *)parent;
+
 /// Create a new channel in the server the underlying MKConnection is currently
 /// connected to.
 ///
