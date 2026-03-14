@@ -47,6 +47,7 @@ typedef enum {
     UserStatsMessage,
     RequestBlobMessage,
     ServerConfigMessage,
+    SuggestConfigMessage,
 } MKMessageType;
 
 /// MKRejectReason is an integer describing the reason for a
@@ -246,6 +247,24 @@ typedef enum {
 /// @param conn  The connection that received the message.
 /// @param msg   An internal representation of a permission query message.
 - (void) connection:(MKConnection *)conn handlePermissionQueryMessage: /* MPPermissionQuery */ (id)msg;
+
+/// Called whenever a server config message is received.
+///
+/// @param conn  The connection that received the message.
+/// @param msg   An internal representation of a server config message.
+- (void) connection:(MKConnection *)conn handleServerConfigMessage: /* MPServerConfig */ (id)msg;
+
+/// Called whenever a user stats message is received.
+///
+/// @param conn  The connection that received the message.
+/// @param msg   An internal representation of a user stats message.
+- (void) connection:(MKConnection *)conn handleUserStatsMessage: /* MPUserStats */ (id)msg;
+
+/// Called whenever a suggest config message is received.
+///
+/// @param conn  The connection that received the message.
+/// @param msg   An internal representation of a suggest config message.
+- (void) connection:(MKConnection *)conn handleSuggestConfigMessage: /* MPSuggestConfig */ (id)msg;
 @end
 
 /// @class MKConnection MKConnection.h MumbleKit/MKConnection.h

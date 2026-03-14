@@ -1258,6 +1258,33 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
             [self _codecChange:codecVersion];
             break;
         }
+        case ServerConfigMessage: {
+            MPServerConfig *serverConfig = [MPServerConfig parseFromData:data];
+            if ([_msgHandler respondsToSelector:@selector(connection:handleServerConfigMessage:)]) {
+                dispatch_async(main_queue, ^{
+                    [_msgHandler connection:self handleServerConfigMessage:serverConfig];
+                });
+            }
+            break;
+        }
+        case UserStatsMessage: {
+            MPUserStats *userStats = [MPUserStats parseFromData:data];
+            if ([_msgHandler respondsToSelector:@selector(connection:handleUserStatsMessage:)]) {
+                dispatch_async(main_queue, ^{
+                    [_msgHandler connection:self handleUserStatsMessage:userStats];
+                });
+            }
+            break;
+        }
+        case SuggestConfigMessage: {
+            MPSuggestConfig *suggestConfig = [MPSuggestConfig parseFromData:data];
+            if ([_msgHandler respondsToSelector:@selector(connection:handleSuggestConfigMessage:)]) {
+                dispatch_async(main_queue, ^{
+                    [_msgHandler connection:self handleSuggestConfigMessage:suggestConfig];
+                });
+            }
+            break;
+        }
 
         default: {
             NSLog(@"MKConnection: Unknown packet type recieved. Discarding. (type=%u)", packetType);

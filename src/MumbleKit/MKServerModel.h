@@ -447,6 +447,57 @@
 /// @param userNamesById  NSDictionary<NSNumber(userId), NSString(userName)> mapping.
 - (void) serverModel:(MKServerModel *)model didResolveUserNames:(NSDictionary *)userNamesById;
 
+///----------------------------------
+/// @name Ban list events
+///----------------------------------
+
+/// Called when the server's ban list is received.
+///
+/// @param model    The server model object.
+/// @param banList  The raw MPBanList protobuf message containing ban entries.
+- (void) serverModel:(MKServerModel *)model didReceiveBanList:(id)banList;
+
+///----------------------------------
+/// @name Registered user list events
+///----------------------------------
+
+/// Called when the server's registered user list is received.
+///
+/// @param model     The server model object.
+/// @param userList  The raw MPUserList protobuf message containing registered users.
+- (void) serverModel:(MKServerModel *)model didReceiveUserList:(id)userList;
+
+///----------------------------------
+/// @name User stats events
+///----------------------------------
+
+/// Called when user statistics are received from the server.
+///
+/// @param model      The server model object.
+/// @param userStats  The raw MPUserStats protobuf message.
+/// @param user       The user the stats belong to (may be nil if session not found).
+- (void) serverModel:(MKServerModel *)model didReceiveUserStats:(id)userStats forUser:(MKUser *)user;
+
+///----------------------------------
+/// @name Server config events
+///----------------------------------
+
+/// Called when server configuration is received or updated.
+///
+/// @param model         The server model object.
+/// @param serverConfig  The raw MPServerConfig protobuf message.
+- (void) serverModel:(MKServerModel *)model didReceiveServerConfig:(id)serverConfig;
+
+///----------------------------------
+/// @name Suggest config events
+///----------------------------------
+
+/// Called when the server suggests configuration changes for the client.
+///
+/// @param model          The server model object.
+/// @param suggestConfig  The raw MPSuggestConfig protobuf message.
+- (void) serverModel:(MKServerModel *)model didReceiveSuggestConfig:(id)suggestConfig;
+
 @end
 
 /// @class MKServerModel MKServerModel.h MumbleKit/MKServerModel.h
@@ -714,5 +765,131 @@
 /// @param deafened  YES to deafen, NO to undeafen.
 /// @param user      The user to deafen/undeafen.
 - (void) setServerDeafened:(BOOL)deafened forUser:(MKUser *)user;
+
+///-----------------------------
+/// @name Kick/Ban operations
+///-----------------------------
+
+/// Kick a user from the server.
+///
+/// @param user    The user to kick.
+/// @param reason  The reason for the kick (may be nil).
+- (void) kickUser:(MKUser *)user forReason:(NSString *)reason;
+
+/// Ban a user from the server (also kicks them).
+///
+/// @param user    The user to ban.
+/// @param reason  The reason for the ban (may be nil).
+- (void) banUser:(MKUser *)user forReason:(NSString *)reason;
+
+///-----------------------------
+/// @name Ban list operations
+///-----------------------------
+
+/// Request the ban list from the server.
+- (void) requestBanList;
+
+/// Send an updated ban list to the server.
+///
+/// @param banEntries  An NSArray of MPBanList_BanEntry objects to set as the server's ban list.
+- (void) sendBanList:(NSArray *)banEntries;
+
+///-----------------------------
+/// @name Channel link operations
+///-----------------------------
+
+/// Link two channels together.
+///
+/// @param channel  The channel to add links to.
+/// @param target   The channel to link to.
+- (void) linkChannel:(MKChannel *)channel toChannel:(MKChannel *)target;
+
+/// Unlink a channel from another channel.
+///
+/// @param channel  The channel to remove links from.
+/// @param target   The channel to unlink from.
+- (void) unlinkChannel:(MKChannel *)channel fromChannel:(MKChannel *)target;
+
+/// Remove all links from a channel.
+///
+/// @param channel  The channel to unlink all from.
+- (void) unlinkAllForChannel:(MKChannel *)channel;
+
+///-----------------------------
+/// @name Priority speaker operations
+///-----------------------------
+
+/// Set the priority speaker status for a user.
+///
+/// @param prioritySpeaker  YES to make user a priority speaker, NO to remove.
+/// @param user             The user to modify.
+- (void) setPrioritySpeaker:(BOOL)prioritySpeaker forUser:(MKUser *)user;
+
+///-----------------------------
+/// @name Self texture operations
+///-----------------------------
+
+/// Set the texture (avatar) for the currently connected user.
+///
+/// @param texture  The texture data (PNG/JPEG image data), or nil to clear.
+- (void) setSelfTexture:(NSData *)texture;
+
+///-----------------------------
+/// @name Recording state operations
+///-----------------------------
+
+/// Set the recording state for the currently connected user.
+///
+/// @param recording  YES if the user is recording, NO otherwise.
+- (void) setSelfRecording:(BOOL)recording;
+
+///-----------------------------
+/// @name Registered user list operations
+///-----------------------------
+
+/// Request the list of registered users from the server.
+- (void) requestUserList;
+
+///-----------------------------
+/// @name User stats operations
+///-----------------------------
+
+/// Request statistics for a specific user.
+///
+/// @param user  The user to request stats for.
+- (void) requestStatsForUser:(MKUser *)user;
+
+///-----------------------------
+/// @name Texture request operations
+///-----------------------------
+
+/// Request the full texture (avatar) for a user from the server.
+///
+/// @param user  The user whose texture to request.
+- (void) requestTextureForUser:(MKUser *)user;
+
+///-----------------------------
+/// @name Voice target operations
+///-----------------------------
+
+/// Register a voice target (whisper target) with the server.
+///
+/// @param targetId  The target ID (1-30) to register.
+/// @param targets   An NSArray of target specification dictionaries.
+///                  Each dict may contain: @"sessions" (NSArray<NSNumber>),
+///                  @"channelId" (NSNumber), @"group" (NSString),
+///                  @"links" (NSNumber/BOOL), @"children" (NSNumber/BOOL).
+- (void) setVoiceTargetId:(NSUInteger)targetId targets:(NSArray *)targets;
+
+///-----------------------------
+/// @name Context action operations
+///-----------------------------
+
+/// Send a context action to the server.
+///
+/// @param action     The action identifier string.
+/// @param session    The session ID for user context (0 if none).
+/// @param channelId  The channel ID for channel context (use -1 if none).
+- (void) sendContextAction:(NSString *)action forSession:(NSUInteger)session channelId:(NSInteger)channelId;
 
 @end

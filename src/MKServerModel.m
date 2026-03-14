@@ -414,6 +414,7 @@
 }
 
 - (void) connection:(MKConnection *)conn handleBanListMessage: (MPBanList *)msg {
+    [_delegate serverModel:self didReceiveBanList:msg];
 }
 
 - (void) connection:(MKConnection *)conn handlePermissionDeniedMessage: (MPPermissionDenied *)msg {
@@ -617,6 +618,7 @@
 }
 
 - (void) connection:(MKConnection *)conn handleUserListMessage: (MPUserList *)msg {
+    [_delegate serverModel:self didReceiveUserList:msg];
 }
 
 - (void) connection:(MKConnection *)conn handleVoiceTargetMessage: (MPVoiceTarget *)msg {
@@ -903,7 +905,7 @@
     for (i = 0; i < numLinks; i++) {
         MKChannel *linkedChan = [self channelWithId:(NSUInteger)[links uint32AtIndex:i]];
         [channels addObject:linkedChan];
-        [chan unlinkFromChannel:chan];
+        [chan unlinkFromChannel:linkedChan];
     }
 
     if (_connectedUser) {
@@ -994,6 +996,12 @@
 }
 
 - (MKUser *) userWithHash:(NSString *)hash {
+    if (hash == nil) return nil;
+    for (MKUser *user in [_userMap allValues]) {
+        if ([[user userHash] isEqualToString:hash]) {
+            return user;
+        }
+    }
     return nil;
 }
 
@@ -1341,6 +1349,243 @@
     
     NSData *data = [[mpus build] data];
     [_connection sendMessageWithType:UserStateMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Kick/Ban operations
+
+- (void) kickUser:(MKUser *)user forReason:(NSString *)reason {
+    MPUserRemove_Builder *userRemove = [MPUserRemove builder];
+    [userRemove setSession:(uint32_t)[user session]];
+    if (reason != nil) {
+        [userRemove setReason:reason];
+    }
+    
+    NSData *data = [[userRemove build] data];
+    [_connection sendMessageWithType:UserRemoveMessage data:data];
+}
+
+- (void) banUser:(MKUser *)user forReason:(NSString *)reason {
+    MPUserRemove_Builder *userRemove = [MPUserRemove builder];
+    [userRemove setSession:(uint32_t)[user session]];
+    [userRemove setBan:YES];
+    if (reason != nil) {
+        [userRemove setReason:reason];
+    }
+    
+    NSData *data = [[userRemove build] data];
+    [_connection sendMessageWithType:UserRemoveMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Ban list operations
+
+- (void) requestBanList {
+    MPBanList_Builder *banList = [MPBanList builder];
+    [banList setQuery:YES];
+    
+    NSData *data = [[banList build] data];
+    [_connection sendMessageWithType:BanListMessage data:data];
+}
+
+- (void) sendBanList:(NSArray *)banEntries {
+    MPBanList_Builder *banList = [MPBanList builder];
+    [banList setQuery:NO];
+    if (banEntries != nil) {
+        [banList setBansArray:banEntries];
+    }
+    
+    NSData *data = [[banList build] data];
+    [_connection sendMessageWithType:BanListMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Channel link operations
+
+- (void) linkChannel:(MKChannel *)channel toChannel:(MKChannel *)target {
+    MPChannelState_Builder *channelState = [MPChannelState builder];
+    [channelState setChannelId:(uint32_t)[channel channelId]];
+    [channelState addLinksAdd:(uint32_t)[target channelId]];
+    
+    NSData *data = [[channelState build] data];
+    [_connection sendMessageWithType:ChannelStateMessage data:data];
+}
+
+- (void) unlinkChannel:(MKChannel *)channel fromChannel:(MKChannel *)target {
+    MPChannelState_Builder *channelState = [MPChannelState builder];
+    [channelState setChannelId:(uint32_t)[channel channelId]];
+    [channelState addLinksRemove:(uint32_t)[target channelId]];
+    
+    NSData *data = [[channelState build] data];
+    [_connection sendMessageWithType:ChannelStateMessage data:data];
+}
+
+- (void) unlinkAllForChannel:(MKChannel *)channel {
+    MPChannelState_Builder *channelState = [MPChannelState builder];
+    [channelState setChannelId:(uint32_t)[channel channelId]];
+    // Sending an empty links array clears all links
+    [channelState setLinksArray:@[]];
+    
+    NSData *data = [[channelState build] data];
+    [_connection sendMessageWithType:ChannelStateMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Priority speaker operations
+
+- (void) setPrioritySpeaker:(BOOL)prioritySpeaker forUser:(MKUser *)user {
+    MPUserState_Builder *mpus = [MPUserState builder];
+    [mpus setSession:(uint32_t)[user session]];
+    [mpus setPrioritySpeaker:prioritySpeaker];
+    
+    NSData *data = [[mpus build] data];
+    [_connection sendMessageWithType:UserStateMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Self texture operations
+
+- (void) setSelfTexture:(NSData *)texture {
+    MPUserState_Builder *mpus = [MPUserState builder];
+    [mpus setSession:(uint32_t)[_connectedUser session]];
+    if (texture != nil) {
+        [mpus setTexture:texture];
+    } else {
+        [mpus setTexture:[NSData data]];
+    }
+    
+    NSData *data = [[mpus build] data];
+    [_connection sendMessageWithType:UserStateMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Recording state operations
+
+- (void) setSelfRecording:(BOOL)recording {
+    MPUserState_Builder *mpus = [MPUserState builder];
+    [mpus setSession:(uint32_t)[_connectedUser session]];
+    [mpus setRecording:recording];
+    
+    NSData *data = [[mpus build] data];
+    [_connection sendMessageWithType:UserStateMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Registered user list operations
+
+- (void) requestUserList {
+    MPUserList_Builder *userList = [MPUserList builder];
+    
+    NSData *data = [[userList build] data];
+    [_connection sendMessageWithType:UserListMessage data:data];
+}
+
+#pragma mark -
+#pragma mark User stats operations
+
+- (void) requestStatsForUser:(MKUser *)user {
+    MPUserStats_Builder *userStats = [MPUserStats builder];
+    [userStats setSession:(uint32_t)[user session]];
+    
+    NSData *data = [[userStats build] data];
+    [_connection sendMessageWithType:UserStatsMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Texture request operations
+
+- (void) requestTextureForUser:(MKUser *)user {
+    MPRequestBlob_Builder *req = [MPRequestBlob builder];
+    [req addSessionTexture:(uint32_t)[user session]];
+    
+    NSData *data = [[req build] data];
+    [_connection sendMessageWithType:RequestBlobMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Voice target operations
+
+- (void) setVoiceTargetId:(NSUInteger)targetId targets:(NSArray *)targets {
+    MPVoiceTarget_Builder *vt = [MPVoiceTarget builder];
+    [vt setId:(uint32_t)targetId];
+    
+    for (NSDictionary *targetDict in targets) {
+        MPVoiceTarget_Target_Builder *target = [MPVoiceTarget_Target builder];
+        
+        NSArray *sessions = [targetDict objectForKey:@"sessions"];
+        if (sessions != nil) {
+            for (NSNumber *s in sessions) {
+                [target addSession:[s unsignedIntValue]];
+            }
+        }
+        
+        NSNumber *channelId = [targetDict objectForKey:@"channelId"];
+        if (channelId != nil) {
+            [target setChannelId:[channelId unsignedIntValue]];
+        }
+        
+        NSString *group = [targetDict objectForKey:@"group"];
+        if (group != nil) {
+            [target setGroup:group];
+        }
+        
+        NSNumber *links = [targetDict objectForKey:@"links"];
+        if (links != nil) {
+            [target setLinks:[links boolValue]];
+        }
+        
+        NSNumber *children = [targetDict objectForKey:@"children"];
+        if (children != nil) {
+            [target setChildren:[children boolValue]];
+        }
+        
+        [vt addTargets:[target build]];
+    }
+    
+    NSData *data = [[vt build] data];
+    [_connection sendMessageWithType:VoiceTargetMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Context action operations
+
+- (void) sendContextAction:(NSString *)action forSession:(NSUInteger)session channelId:(NSInteger)channelId {
+    MPContextAction_Builder *ctx = [MPContextAction builder];
+    [ctx setAction:action];
+    if (session > 0) {
+        [ctx setSession:(uint32_t)session];
+    }
+    if (channelId >= 0) {
+        [ctx setChannelId:(uint32_t)channelId];
+    }
+    
+    NSData *data = [[ctx build] data];
+    [_connection sendMessageWithType:ContextActionMessage data:data];
+}
+
+#pragma mark -
+#pragma mark Server config handler
+
+- (void) connection:(MKConnection *)conn handleServerConfigMessage:(MPServerConfig *)msg {
+    [_delegate serverModel:self didReceiveServerConfig:msg];
+}
+
+#pragma mark -
+#pragma mark User stats handler
+
+- (void) connection:(MKConnection *)conn handleUserStatsMessage:(MPUserStats *)msg {
+    MKUser *user = nil;
+    if ([msg hasSession]) {
+        user = [self userWithSession:[msg session]];
+    }
+    [_delegate serverModel:self didReceiveUserStats:msg forUser:user];
+}
+
+#pragma mark -
+#pragma mark Suggest config handler
+
+- (void) connection:(MKConnection *)conn handleSuggestConfigMessage:(MPSuggestConfig *)msg {
+    [_delegate serverModel:self didReceiveSuggestConfig:msg];
 }
 
 @end
