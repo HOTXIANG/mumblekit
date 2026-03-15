@@ -9,6 +9,7 @@
 #import "MKAudioDevice.h"
 
 #import "MKMacAudioDevice.h"
+#import "MKAudioPerfStats.h"
 
 #import <AudioUnit/AudioUnit.h>
 #import <AudioUnit/AUComponent.h>
@@ -33,6 +34,25 @@
     MKAudioDeviceInputFunc       _inputFunc;
 }
 @end
+
+static MKAudioPerfStats sInputPerfStats;
+static MKAudioPerfStats sOutputPerfStats;
+
+static void MKAudioPerfLogAndReset(NSString *label, MKAudioPerfStats *stats) {
+    if (stats->sampledCount == 0) {
+        return;
+    }
+
+    NSLog(@"PERF audio_callback %@ callbacks=%llu sampled=%llu avg_us=%llu p95_us=%llu p99_us=%llu max_us=%llu",
+          label,
+          stats->callbackCount,
+          stats->sampledCount,
+          MKAudioPerfAverageUs(stats),
+          MKAudioPerfPercentileUs(stats, 95, 100),
+          MKAudioPerfPercentileUs(stats, 99, 100),
+          MKAudioPerfMaxUs(stats));
+    MKAudioPerfReset(stats);
+}
 
 static BOOL MUAudioDeviceHasInputStreams(AudioDeviceID devId) {
     AudioObjectPropertyAddress addr;
@@ -123,6 +143,8 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
                               UInt32 busnum, UInt32 nframes, AudioBufferList *buflist) {
     MKMacAudioDevice *dev = (MKMacAudioDevice *)udata;
     OSStatus err;
+    bool shouldSample = MKAudioPerfShouldSample(&sInputPerfStats);
+    uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
     
     // P0 修复：验证输入参数有效性
     if (nframes == 0 || nframes > 4096) {
@@ -209,6 +231,9 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     } @finally {
         [pool release];
     }
+    if (shouldSample) {
+        MKAudioPerfRecordTicks(&sInputPerfStats, MKAudioPerfNowTicks() - startTicks);
+    }
     
     return noErr;
 }
@@ -220,6 +245,8 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     AudioBuffer *buf = buflist->mBuffers;
     MKAudioDeviceOutputFunc outputFunc = dev->_outputFunc;
     BOOL done;
+    bool shouldSample = MKAudioPerfShouldSample(&sOutputPerfStats);
+    uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
     
     if (outputFunc == NULL) {
         // No frames available yet.
@@ -258,6 +285,10 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
             buf->mDataByteSize = 0;
         }
         [pool release];
+    }
+
+    if (shouldSample) {
+        MKAudioPerfRecordTicks(&sOutputPerfStats, MKAudioPerfNowTicks() - startTicks);
     }
     
     return done ? noErr : -1;
@@ -555,6 +586,8 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 
 - (BOOL) setupDevice {
     BOOL ok = YES;
+    MKAudioPerfReset(&sInputPerfStats);
+    MKAudioPerfReset(&sOutputPerfStats);
     if (ok)
         ok = [self setupRecording];
     if (ok)
@@ -564,6 +597,8 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 
 - (BOOL) teardownDevice {
     BOOL ok = YES;
+    MKAudioPerfLogAndReset(@"mac_hal_input", &sInputPerfStats);
+    MKAudioPerfLogAndReset(@"mac_hal_output", &sOutputPerfStats);
     if (ok)
         ok = [self teardownRecording];
     if (ok)

@@ -26,6 +26,8 @@
 #import <CoreAudio/CoreAudio.h>
 #endif
 
+#import "MKAudioPerfStats.h"
+
 @interface MKVoiceProcessingDevice () {
 @public
     MKAudioSettings              _settings;
@@ -40,10 +42,31 @@
 }
 @end
 
+static MKAudioPerfStats sInputPerfStats;
+static MKAudioPerfStats sOutputPerfStats;
+
+static void MKAudioPerfLogAndReset(NSString *label, MKAudioPerfStats *stats) {
+    if (stats->sampledCount == 0) {
+        return;
+    }
+
+    NSLog(@"PERF audio_callback %@ callbacks=%llu sampled=%llu avg_us=%llu p95_us=%llu p99_us=%llu max_us=%llu",
+          label,
+          stats->callbackCount,
+          stats->sampledCount,
+          MKAudioPerfAverageUs(stats),
+          MKAudioPerfPercentileUs(stats, 95, 100),
+          MKAudioPerfPercentileUs(stats, 99, 100),
+          MKAudioPerfMaxUs(stats));
+    MKAudioPerfReset(stats);
+}
+
 static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts,
                               UInt32 busnum, UInt32 nframes, AudioBufferList *buflist) {
     MKVoiceProcessingDevice *dev = (MKVoiceProcessingDevice *)udata;
     OSStatus err;
+    bool shouldSample = MKAudioPerfShouldSample(&sInputPerfStats);
+    uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
         
     if (! dev->_buflist.mBuffers->mData) {
         NSLog(@"MKVoiceProcessingDevice: No buffer allocated. Allocating for %d frames.", (int)nframes);
@@ -82,6 +105,9 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
         inputFunc(buf, nframes);
     }
     [pool release];
+    if (shouldSample) {
+        MKAudioPerfRecordTicks(&sInputPerfStats, MKAudioPerfNowTicks() - startTicks);
+    }
     
     return noErr;
 }
@@ -91,6 +117,8 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     MKVoiceProcessingDevice *dev = (MKVoiceProcessingDevice *) udata;
     AudioBuffer *buf = buflist->mBuffers;
     MKAudioDeviceOutputFunc outputFunc = dev->_outputFunc;
+    bool shouldSample = MKAudioPerfShouldSample(&sOutputPerfStats);
+    uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
 
     if (outputFunc == NULL) {
         memset(buf->mData, 0, buf->mDataByteSize);
@@ -103,6 +131,9 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         memset(buf->mData, 0, buf->mDataByteSize);
     }
     [pool release];
+    if (shouldSample) {
+        MKAudioPerfRecordTicks(&sOutputPerfStats, MKAudioPerfNowTicks() - startTicks);
+    }
     return noErr;
 }
 
@@ -129,6 +160,9 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     AudioComponentDescription desc;
     AudioStreamBasicDescription inputFmt;
     AudioStreamBasicDescription outputFmt;
+
+    MKAudioPerfReset(&sInputPerfStats);
+    MKAudioPerfReset(&sOutputPerfStats);
     
     desc.componentType = kAudioUnitType_Output;
     desc.componentSubType = kAudioUnitSubType_VoiceProcessingIO;
@@ -289,6 +323,9 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 
 - (BOOL) teardownDevice {
     OSStatus err;
+
+    MKAudioPerfLogAndReset(@"voice_processing_input", &sInputPerfStats);
+    MKAudioPerfLogAndReset(@"voice_processing_output", &sOutputPerfStats);
 
     AURenderCallbackStruct nullCb = {0};
     AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_SetInputCallback,

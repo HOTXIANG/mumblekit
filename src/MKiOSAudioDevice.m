@@ -6,6 +6,7 @@
 #import "MKAudioDevice.h"
 
 #import "MKiOSAudioDevice.h"
+#import "MKAudioPerfStats.h"
 
 #import <AudioUnit/AudioUnit.h>
 #import <AudioUnit/AUComponent.h>
@@ -25,10 +26,31 @@
 }
 @end
 
+static MKAudioPerfStats sInputPerfStats;
+static MKAudioPerfStats sOutputPerfStats;
+
+static void MKAudioPerfLogAndReset(NSString *label, MKAudioPerfStats *stats) {
+    if (stats->sampledCount == 0) {
+        return;
+    }
+
+    NSLog(@"PERF audio_callback %@ callbacks=%llu sampled=%llu avg_us=%llu p95_us=%llu p99_us=%llu max_us=%llu",
+          label,
+          stats->callbackCount,
+          stats->sampledCount,
+          MKAudioPerfAverageUs(stats),
+          MKAudioPerfPercentileUs(stats, 95, 100),
+          MKAudioPerfPercentileUs(stats, 99, 100),
+          MKAudioPerfMaxUs(stats));
+    MKAudioPerfReset(stats);
+}
+
 static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts,
                               UInt32 busnum, UInt32 nframes, AudioBufferList *buflist) {
     MKiOSAudioDevice *dev = (MKiOSAudioDevice *)udata;
     OSStatus err;
+    bool shouldSample = MKAudioPerfShouldSample(&sInputPerfStats);
+    uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
     
     if (! dev->_buflist.mBuffers->mData) {
         NSLog(@"MKiOSAudioDevice: No buffer allocated. Allocating for %d frames.", (int)nframes);
@@ -69,6 +91,9 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
         inputFunc(buf, nframes);
     }
     [pool release];
+    if (shouldSample) {
+        MKAudioPerfRecordTicks(&sInputPerfStats, MKAudioPerfNowTicks() - startTicks);
+    }
     
     return noErr;
 }
@@ -79,6 +104,8 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     AudioBuffer *buf = buflist->mBuffers;
     MKAudioDeviceOutputFunc outputFunc = dev->_outputFunc;
     BOOL done;
+    bool shouldSample = MKAudioPerfShouldSample(&sOutputPerfStats);
+    uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
     
     if (outputFunc == NULL) {
         // No frames available yet.
@@ -107,6 +134,10 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         }
         [pool release];
     }
+
+    if (shouldSample) {
+        MKAudioPerfRecordTicks(&sOutputPerfStats, MKAudioPerfNowTicks() - startTicks);
+    }
     
     return done ? noErr : -1;
 }
@@ -134,6 +165,9 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     AudioComponentDescription desc;
     AudioStreamBasicDescription inputFmt;
     AudioStreamBasicDescription outputFmt;
+
+    MKAudioPerfReset(&sInputPerfStats);
+    MKAudioPerfReset(&sOutputPerfStats);
 
     desc.componentType = kAudioUnitType_Output;
     desc.componentSubType = kAudioUnitSubType_RemoteIO;
@@ -265,6 +299,9 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 
 - (BOOL) teardownDevice {
     OSStatus err;
+
+    MKAudioPerfLogAndReset(@"ios_remoteio_input", &sInputPerfStats);
+    MKAudioPerfLogAndReset(@"ios_remoteio_output", &sOutputPerfStats);
     
     err = AudioOutputUnitStop(_audioUnit);
     if (err != noErr) {
