@@ -36,6 +36,11 @@
     
     NSMutableDictionary  *_sessionVolumes;
     NSMutableDictionary  *_sessionMutes;
+    NSMutableArray       *_remoteSessionOrder;
+    NSMutableDictionary  *_remoteTrackProcessors;
+    NSMutableDictionary  *_remoteTrackProcessorContexts;
+    MKAudioOutputFloatProcessCallback _remoteBusProcessor;
+    void                 *_remoteBusProcessorContext;
 }
 @end
 
@@ -53,6 +58,11 @@
         
         _sessionVolumes = [[NSMutableDictionary alloc] init];
         _sessionMutes = [[NSMutableDictionary alloc] init];
+        _remoteSessionOrder = [[NSMutableArray alloc] init];
+        _remoteTrackProcessors = [[NSMutableDictionary alloc] init];
+        _remoteTrackProcessorContexts = [[NSMutableDictionary alloc] init];
+        _remoteBusProcessor = NULL;
+        _remoteBusProcessorContext = NULL;
         
         _mixerFrequency = [_device inputSampleRate];
         _numChannels = [_device numberOfOutputChannels];
@@ -99,6 +109,9 @@
     [_outputs release];
     [_sessionVolumes release];
     [_sessionMutes release];
+    [_remoteSessionOrder release];
+    [_remoteTrackProcessors release];
+    [_remoteTrackProcessorContexts release];
     [super dealloc];
 }
 
@@ -151,12 +164,16 @@
     }
 
     NSMutableArray *mix = [[NSMutableArray alloc] init];
+    NSMutableArray *sidetoneMix = [[NSMutableArray alloc] init];
     NSMutableArray *del = [[NSMutableArray alloc] init];
     unsigned int nchan = _numChannels;
 
     [_outputLock lock];
-    for (NSNumber *sessionKey in _outputs) {
+    for (NSNumber *sessionKey in _remoteSessionOrder) {
         MKAudioOutputUser *ou = [_outputs objectForKey:sessionKey];
+        if (ou == nil) {
+            continue;
+        }
         if (! [ou needSamples:nsamp]) {
             [del addObject:ou];
         } else {
@@ -167,7 +184,7 @@
     if (_settings.enableSideTone) {
         MKAudioOutputSidetone *sidetone = [[MKAudio sharedAudio] sidetoneOutput];
         if ([sidetone needSamples:nsamp]) {
-            [mix addObject:[[MKAudio sharedAudio] sidetoneOutput]];
+            [sidetoneMix addObject:[[MKAudio sharedAudio] sidetoneOutput]];
         }
     }
     
@@ -177,6 +194,9 @@
         NSMutableArray *removed = [[[NSMutableArray alloc] init] autorelease];
 
         for (id ou in mix) {
+            [sources addObject:[self audioOutputDebugDescription:ou]];
+        }
+        for (id ou in sidetoneMix) {
             [sources addObject:[self audioOutputDebugDescription:ou]];
         }
     
@@ -198,51 +218,42 @@
     float *mixBuffer = alloca(sizeof(float)*_numChannels*nsamp);
     memset(mixBuffer, 0, sizeof(float)*_numChannels*nsamp);
 
-    if ([mix count] > 0) {
+    if ([mix count] > 0 || [sidetoneMix count] > 0) {
         for (MKAudioOutputUser *ou in mix) {
-            
-            // Sidetone 没有 userSession，直接混音即可（不需要 session 级别的静音/音量控制）
-            if ([ou isKindOfClass:[MKAudioOutputSidetone class]]) {
-                const float * restrict userBuffer = [ou buffer];
-                NSUInteger sourceChannels = MAX((NSUInteger)1, [ou outputChannels]);
-                for (s = 0; s < nchan; ++s) {
-                    const float str = _speakerVolume[s] * globalVolume;
-                    NSUInteger sourceChannelIndex = sourceChannels > 1 ? MIN((NSUInteger)s, sourceChannels - 1) : 0;
-                    float * restrict o = (float *)mixBuffer + s;
-                    for (i = 0; i < nsamp; ++i) {
-                        float sample = userBuffer[i * sourceChannels + sourceChannelIndex];
-                        if (nchan == 1 && sourceChannels > 1) {
-                            sample = 0.5f * (userBuffer[i * sourceChannels] + userBuffer[i * sourceChannels + 1]);
-                        }
-                        o[i*nchan] += sample * str;
-                    }
-                }
-                continue;
-            }
-            
-            // 1. 获取 Session ID (确保类型匹配)
             NSUInteger sessionID = [(MKAudioOutputSpeech *)ou userSession];
             NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:sessionID];
-            
-            // 2. 检查屏蔽 (Local Mute)
+
             if ([[_sessionMutes objectForKey:sessionKey] boolValue]) {
-                continue; // 直接跳过，不混音
+                continue;
             }
-            
-            // 3. 获取自定义音量
+
             float volMultiplier = 1.0f;
             NSNumber *customVol = [_sessionVolumes objectForKey:sessionKey];
             if (customVol) {
                 volMultiplier = [customVol floatValue];
             }
-            
-            const float * restrict userBuffer = [ou buffer];
+
+            MKAudioOutputFloatProcessCallback trackProcessor = NULL;
+            void *trackContext = NULL;
+            NSValue *processorValue = [_remoteTrackProcessors objectForKey:sessionKey];
+            NSValue *contextValue = [_remoteTrackProcessorContexts objectForKey:sessionKey];
+            if (processorValue != nil) {
+                trackProcessor = (MKAudioOutputFloatProcessCallback)[processorValue pointerValue];
+                if (contextValue != nil) {
+                    trackContext = [contextValue pointerValue];
+                }
+            }
+
+            float *userBuffer = [ou buffer];
             NSUInteger sourceChannels = MAX((NSUInteger)1, [ou outputChannels]);
+            if (trackProcessor != NULL) {
+                trackProcessor(userBuffer, (NSUInteger)nsamp, sourceChannels, (NSUInteger)_mixerFrequency, trackContext);
+            }
+
             for (s = 0; s < nchan; ++s) {
-                // 4. 应用音量乘数
                 const float str = _speakerVolume[s] * volMultiplier * globalVolume;
                 NSUInteger sourceChannelIndex = sourceChannels > 1 ? MIN((NSUInteger)s, sourceChannels - 1) : 0;
-                
+
                 float * restrict o = (float *)mixBuffer + s;
                 for (i = 0; i < nsamp; ++i) {
                     float sample = userBuffer[i * sourceChannels + sourceChannelIndex];
@@ -252,7 +263,28 @@
                     o[i*nchan] += sample * str;
                 }
             }
+        }
+
+        if (_remoteBusProcessor != NULL && [mix count] > 0) {
+            _remoteBusProcessor(mixBuffer, (NSUInteger)nsamp, (NSUInteger)_numChannels, (NSUInteger)_mixerFrequency, _remoteBusProcessorContext);
+        }
+
+        for (MKAudioOutputUser *ou in sidetoneMix) {
+            const float * restrict userBuffer = [ou buffer];
+            NSUInteger sourceChannels = MAX((NSUInteger)1, [ou outputChannels]);
+            for (s = 0; s < nchan; ++s) {
+                const float str = _speakerVolume[s] * globalVolume;
+                NSUInteger sourceChannelIndex = sourceChannels > 1 ? MIN((NSUInteger)s, sourceChannels - 1) : 0;
+                float * restrict o = (float *)mixBuffer + s;
+                for (i = 0; i < nsamp; ++i) {
+                    float sample = userBuffer[i * sourceChannels + sourceChannelIndex];
+                    if (nchan == 1 && sourceChannels > 1) {
+                        sample = 0.5f * (userBuffer[i * sourceChannels] + userBuffer[i * sourceChannels + 1]);
+                    }
+                    o[i*nchan] += sample * str;
                 }
+            }
+        }
 
         short *outputBuffer = (short *)frames;
         for (i = 0; i < nsamp * _numChannels; ++i) {
@@ -273,9 +305,10 @@
         [self removeBuffer:ou];
     }
 
-    retVal = [mix count] > 0;
+    retVal = [mix count] > 0 || [sidetoneMix count] > 0;
 
     [mix release];
+    [sidetoneMix release];
     [del release];
 
     if(!retVal && _cngEnabled) {
@@ -308,8 +341,14 @@
 
 - (void) removeBuffer:(MKAudioOutputUser *)u {
     if ([u respondsToSelector:@selector(userSession)]) {
+        NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:[(id)u userSession]];
         [_outputLock lock];
-        [_outputs removeObjectForKey:[NSNumber numberWithUnsignedInteger:[(id)u userSession]]];
+        [_outputs removeObjectForKey:sessionKey];
+        [_remoteSessionOrder removeObject:sessionKey];
+        [_remoteTrackProcessors removeObjectForKey:sessionKey];
+        [_remoteTrackProcessorContexts removeObjectForKey:sessionKey];
+        [_sessionVolumes removeObjectForKey:sessionKey];
+        [_sessionMutes removeObjectForKey:sessionKey];
         [_outputLock unlock];
     }
 }
@@ -318,8 +357,10 @@
     if (_numChannels == 0)
         return;
 
+    NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
+
     [_outputLock lock];
-    MKAudioOutputSpeech *outputUser = [_outputs objectForKey:[NSNumber numberWithUnsignedInteger:session]];
+    MKAudioOutputSpeech *outputUser = [_outputs objectForKey:sessionKey];
     [outputUser retain];
     [_outputLock unlock];
 
@@ -331,7 +372,10 @@
         BOOL useStereoOutput = _settings.enableStereoOutput && _numChannels > 1;
         outputUser = [[MKAudioOutputSpeech alloc] initWithSession:session sampleRate:_mixerFrequency messageType:msgType useStereo:useStereoOutput];
         [_outputLock lock];
-        [_outputs setObject:outputUser forKey:[NSNumber numberWithUnsignedInteger:session]];
+        [_outputs setObject:outputUser forKey:sessionKey];
+        if (![_remoteSessionOrder containsObject:sessionKey]) {
+            [_remoteSessionOrder addObject:sessionKey];
+        }
         [_outputLock unlock];
     }
 
@@ -363,6 +407,55 @@
     [_outputLock lock];
     [_sessionMutes setObject:[NSNumber numberWithBool:muted] forKey:[NSNumber numberWithUnsignedInteger:session]];
     [_outputLock unlock];
+}
+
+- (void) setRemoteTrackProcessor:(MKAudioOutputFloatProcessCallback)processor context:(void *)context forSession:(NSUInteger)session {
+    NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
+    [_outputLock lock];
+    if (processor != NULL) {
+        [_remoteTrackProcessors setObject:[NSValue valueWithPointer:processor] forKey:sessionKey];
+        [_remoteTrackProcessorContexts setObject:[NSValue valueWithPointer:context] forKey:sessionKey];
+    } else {
+        [_remoteTrackProcessors removeObjectForKey:sessionKey];
+        [_remoteTrackProcessorContexts removeObjectForKey:sessionKey];
+    }
+    [_outputLock unlock];
+}
+
+- (void) clearRemoteTrackProcessorForSession:(NSUInteger)session {
+    NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
+    [_outputLock lock];
+    [_remoteTrackProcessors removeObjectForKey:sessionKey];
+    [_remoteTrackProcessorContexts removeObjectForKey:sessionKey];
+    [_outputLock unlock];
+}
+
+- (void) clearAllRemoteTrackProcessors {
+    [_outputLock lock];
+    [_remoteTrackProcessors removeAllObjects];
+    [_remoteTrackProcessorContexts removeAllObjects];
+    [_outputLock unlock];
+}
+
+- (void) setRemoteBusProcessor:(MKAudioOutputFloatProcessCallback)processor context:(void *)context {
+    [_outputLock lock];
+    _remoteBusProcessor = processor;
+    _remoteBusProcessorContext = context;
+    [_outputLock unlock];
+}
+
+- (void) clearRemoteBusProcessor {
+    [_outputLock lock];
+    _remoteBusProcessor = NULL;
+    _remoteBusProcessorContext = NULL;
+    [_outputLock unlock];
+}
+
+- (NSArray *) copyRemoteSessionOrder {
+    [_outputLock lock];
+    NSArray *order = [_remoteSessionOrder copy];
+    [_outputLock unlock];
+    return order;
 }
 
 @end

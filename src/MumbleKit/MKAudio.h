@@ -231,4 +231,33 @@ typedef struct _MKAudioSettings {
 /// info will be mostly empty, but still valid.
 - (NSDictionary *) copyAudioOutputMixerDebugInfo;
 
+///----------------------------
+/// @name Plugin Host (Preview)
+///----------------------------
+
+/// Apply a lightweight input-track preview processor.
+/// Processing occurs after system capture processing and before encode/transmit.
+- (void) setInputTrackPreviewGain:(float)gain enabled:(BOOL)enabled;
+
+/// Apply a lightweight remote-bus preview processor.
+/// Processing occurs after remote-user mix and before output quantization.
+- (void) setRemoteBusPreviewGain:(float)gain enabled:(BOOL)enabled;
+
+/// Apply a lightweight per-remote-track preview processor.
+/// Processing occurs after per-user decode and before user is mixed into remote bus.
+- (void) setRemoteTrackPreviewGain:(float)gain enabled:(BOOL)enabled forSession:(NSUInteger)session;
+- (void) clearRemoteTrackPreviewForSession:(NSUInteger)session;
+- (void) clearAllRemoteTrackPreview;
+
+/// Configure true Audio Unit DSP chain for input track processing.
+/// Chain units are applied in order after preview gain and before encode/transmit.
+- (void) setInputTrackAudioUnitChain:(NSArray *)audioUnits;
+
+/// Configure true Audio Unit DSP chain for remote bus processing.
+/// Chain units are applied in order after remote mix and before output quantization.
+- (void) setRemoteBusAudioUnitChain:(NSArray *)audioUnits;
+
+/// Returns current remote session order snapshot used by mixer.
+- (NSArray<NSNumber *> *) copyRemoteSessionOrder;
+
 @end

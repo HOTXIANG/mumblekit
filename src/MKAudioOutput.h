@@ -10,6 +10,8 @@
 
 @class MKUser;
 
+typedef void (*MKAudioOutputFloatProcessCallback)(float *samples, NSUInteger frameCount, NSUInteger channels, NSUInteger sampleRate, void *context);
+
 @interface MKAudioOutput : NSObject
 
 - (id) initWithDevice:(MKAudioDevice *)device andSettings:(MKAudioSettings *)settings;
@@ -23,5 +25,14 @@
 - (void) setMasterVolume:(float)volume;
 - (void) setVolume:(float)volume forSession:(NSUInteger)session;
 - (void) setMuted:(BOOL)muted forSession:(NSUInteger)session;
+
+- (void) setRemoteTrackProcessor:(MKAudioOutputFloatProcessCallback)processor context:(void *)context forSession:(NSUInteger)session;
+- (void) clearRemoteTrackProcessorForSession:(NSUInteger)session;
+- (void) clearAllRemoteTrackProcessors;
+
+- (void) setRemoteBusProcessor:(MKAudioOutputFloatProcessCallback)processor context:(void *)context;
+- (void) clearRemoteBusProcessor;
+
+- (NSArray *) copyRemoteSessionOrder;
 
 @end

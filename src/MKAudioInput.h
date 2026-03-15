@@ -6,6 +6,8 @@
 #import <MumbleKit/MKConnection.h>
 #import "MKAudioDevice.h"
 
+typedef void (*MKAudioInputInt16ProcessCallback)(short *samples, NSUInteger frameCount, NSUInteger channels, NSUInteger sampleRate, void *context);
+
 @interface MKAudioInput : NSObject
 
 - (id) initWithDevice:(MKAudioDevice *)device andSettings:(MKAudioSettings *)settings;
@@ -18,6 +20,9 @@
 - (void) resetPreprocessor;
 - (void) addMicrophoneDataWithBuffer:(short *)input amount:(NSUInteger)nsamp;
 - (void) flushCheck:(NSData *)outputBuffer terminator:(BOOL)terminator;
+
+- (void) setInputTrackProcessor:(MKAudioInputInt16ProcessCallback)processor context:(void *)context;
+- (void) clearInputTrackProcessor;
 
 - (void) setForceTransmit:(BOOL)flag;
 - (BOOL) forceTransmit;

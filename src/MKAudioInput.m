@@ -73,6 +73,8 @@
 
     NSMutableData          *_encodingOutputBuffer;
     NSMutableData          *_opusBuffer;
+    MKAudioInputInt16ProcessCallback _inputTrackProcessor;
+    void                   *_inputTrackProcessorContext;
     
     MKConnection           *_connection;
 }
@@ -100,6 +102,8 @@
     _vadGateEnabled = _settings.enableVadGate;
     _vadGateTimeSeconds = _settings.vadGateTimeSeconds;
     _vadOpenLastTime = [[NSDate date] timeIntervalSince1970];
+    _inputTrackProcessor = NULL;
+    _inputTrackProcessorContext = NULL;
 
     micFrequency = [_device inputSampleRate];
     numMicChannels = MAX(1, [_device numberOfInputChannels]);
@@ -499,6 +503,10 @@
         }
     }
     
+    if (_inputTrackProcessor != NULL) {
+        _inputTrackProcessor(frame, (NSUInteger)frameSize, (NSUInteger)encodeChannels, (NSUInteger)sampleRate, _inputTrackProcessorContext);
+    }
+
     float sum = 1.0f;
     int i;
     for (i = 0; i < frameSize; i++) {
@@ -682,6 +690,20 @@
 
 - (void) setMuted:(BOOL)muted {
     _muted = muted;
+}
+
+- (void) setInputTrackProcessor:(MKAudioInputInt16ProcessCallback)processor context:(void *)context {
+    @synchronized(self) {
+        _inputTrackProcessor = processor;
+        _inputTrackProcessorContext = context;
+    }
+}
+
+- (void) clearInputTrackProcessor {
+    @synchronized(self) {
+        _inputTrackProcessor = NULL;
+        _inputTrackProcessorContext = NULL;
+    }
 }
 
 @end
