@@ -121,6 +121,18 @@
 		28CC36FB132ED92500241269 /* Mumble.pb.m in Sources */ = {isa = PBXBuildFile; fileRef = 28CC36F8132ED92500241269 /* Mumble.pb.m */; };
 		28CC36FC132ED92500241269 /* ObjectivecDescriptor.pb.m in Sources */ = {isa = PBXBuildFile; fileRef = 28CC36F9132ED92500241269 /* ObjectivecDescriptor.pb.m */; };
 		28CC36FD132ED92500241269 /* ObjectivecDescriptor.pb.m in Sources */ = {isa = PBXBuildFile; fileRef = 28CC36F9132ED92500241269 /* ObjectivecDescriptor.pb.m */; };
+		F3AA10042F45800100A0B123 /* MKAudioRemoteBusRackBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10022F45800100A0B123 /* MKAudioRemoteBusRackBridge.m */; };
+		F3AA10052F45800100A0B123 /* MKAudioRemoteBusRackBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10022F45800100A0B123 /* MKAudioRemoteBusRackBridge.m */; };
+		F3AA10062F45800100A0B123 /* MKAudioRemoteBusRack.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10032F45800100A0B123 /* MKAudioRemoteBusRack.swift */; };
+		F3AA10072F45800100A0B123 /* MKAudioRemoteBusRack.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10032F45800100A0B123 /* MKAudioRemoteBusRack.swift */; };
+		F3AA10082F45800100A0B123 /* MKAudioInputRackBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F3AA100A2F45800100A0B123 /* MKAudioInputRackBridge.m */; };
+		F3AA10092F45800100A0B123 /* MKAudioInputRackBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F3AA100A2F45800100A0B123 /* MKAudioInputRackBridge.m */; };
+		F3AA100B2F45800100A0B123 /* MKAudioInputRack.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3AA100C2F45800100A0B123 /* MKAudioInputRack.swift */; };
+		F3AA100D2F45800100A0B123 /* MKAudioInputRack.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3AA100C2F45800100A0B123 /* MKAudioInputRack.swift */; };
+		F3AA100E2F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10102F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m */; };
+		F3AA100F2F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10102F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m */; };
+		F3AA10112F45800100A0B123 /* MKAudioRemoteTrackRack.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10122F45800100A0B123 /* MKAudioRemoteTrackRack.swift */; };
+		F3AA10132F45800100A0B123 /* MKAudioRemoteTrackRack.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10122F45800100A0B123 /* MKAudioRemoteTrackRack.swift */; };
 		28CC3705132EDA5200241269 /* OpenSSL.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 2849235F132ED67E00B4EAAC /* OpenSSL.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		28CC3706132EDA5200241269 /* ProtocolBuffers.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 28492360132ED67E00B4EAAC /* ProtocolBuffers.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		28CC3707132EDA5200241269 /* Speex.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 28492361132ED67E00B4EAAC /* Speex.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
@@ -379,6 +391,15 @@
 		288211BF161CE44B00E72F91 /* MKAudioDevice.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKAudioDevice.m; path = src/MKAudioDevice.m; sourceTree = SOURCE_ROOT; };
 		288211C5161CECD000E72F91 /* MKiOSAudioDevice.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = MKiOSAudioDevice.h; path = src/MKiOSAudioDevice.h; sourceTree = SOURCE_ROOT; };
 		288211C6161CECD000E72F91 /* MKiOSAudioDevice.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKiOSAudioDevice.m; path = src/MKiOSAudioDevice.m; sourceTree = SOURCE_ROOT; };
+		F3AA10012F45800100A0B123 /* MKAudioRemoteBusRackBridge.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = MKAudioRemoteBusRackBridge.h; path = src/MKAudioRemoteBusRackBridge.h; sourceTree = SOURCE_ROOT; };
+		F3AA10022F45800100A0B123 /* MKAudioRemoteBusRackBridge.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKAudioRemoteBusRackBridge.m; path = src/MKAudioRemoteBusRackBridge.m; sourceTree = SOURCE_ROOT; };
+		F3AA10032F45800100A0B123 /* MKAudioRemoteBusRack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MKAudioRemoteBusRack.swift; path = src/MKAudioRemoteBusRack.swift; sourceTree = SOURCE_ROOT; };
+		F3AA10142F45800100A0B123 /* MKAudioInputRackBridge.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = MKAudioInputRackBridge.h; path = src/MKAudioInputRackBridge.h; sourceTree = SOURCE_ROOT; };
+		F3AA100A2F45800100A0B123 /* MKAudioInputRackBridge.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKAudioInputRackBridge.m; path = src/MKAudioInputRackBridge.m; sourceTree = SOURCE_ROOT; };
+		F3AA100C2F45800100A0B123 /* MKAudioInputRack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MKAudioInputRack.swift; path = src/MKAudioInputRack.swift; sourceTree = SOURCE_ROOT; };
+		F3AA10152F45800100A0B123 /* MKAudioRemoteTrackRackBridge.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = MKAudioRemoteTrackRackBridge.h; path = src/MKAudioRemoteTrackRackBridge.h; sourceTree = SOURCE_ROOT; };
+		F3AA10102F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKAudioRemoteTrackRackBridge.m; path = src/MKAudioRemoteTrackRackBridge.m; sourceTree = SOURCE_ROOT; };
+		F3AA10122F45800100A0B123 /* MKAudioRemoteTrackRack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MKAudioRemoteTrackRack.swift; path = src/MKAudioRemoteTrackRack.swift; sourceTree = SOURCE_ROOT; };
 		28BCF2C1132AE3B40003AEC1 /* libMumbleKit.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libMumbleKit.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		28CC36EA132ED87000241269 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		28CC36EC132ED88200241269 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
@@ -575,6 +596,12 @@
 				284C1ABB161CABCC00B87340 /* MKVoiceProcessingDevice.m */,
 				2845A783132D9C220034D631 /* MKAudioInput.m */,
 				2845A784132D9C220034D631 /* MKAudioOutput.m */,
+				F3AA100A2F45800100A0B123 /* MKAudioInputRackBridge.m */,
+				F3AA100C2F45800100A0B123 /* MKAudioInputRack.swift */,
+				F3AA10022F45800100A0B123 /* MKAudioRemoteBusRackBridge.m */,
+				F3AA10032F45800100A0B123 /* MKAudioRemoteBusRack.swift */,
+				F3AA10102F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m */,
+				F3AA10122F45800100A0B123 /* MKAudioRemoteTrackRack.swift */,
 				2845A785132D9C220034D631 /* MKAudioOutputSpeech.m */,
 				28074E8F158A6E5100E0A4D0 /* MKAudioOutputSidetone.m */,
 				2845A786132D9C220034D631 /* MKAudioOutputUser.m */,
@@ -631,6 +658,9 @@
 				28503D61168793CE00A78419 /* MKMacAudioDevice.h */,
 				284C1ABA161CABCC00B87340 /* MKVoiceProcessingDevice.h */,
 				2845A7C8132D9C520034D631 /* MKAudioInput.h */,
+				F3AA10142F45800100A0B123 /* MKAudioInputRackBridge.h */,
+				F3AA10012F45800100A0B123 /* MKAudioRemoteBusRackBridge.h */,
+				F3AA10152F45800100A0B123 /* MKAudioRemoteTrackRackBridge.h */,
 				2845A7CA132D9C520034D631 /* MKAudioOutputSpeech.h */,
 				28074E8E158A6E5100E0A4D0 /* MKAudioOutputSidetone.h */,
 				2845A7CB132D9C520034D631 /* MKAudioOutputUser.h */,
@@ -1132,6 +1162,12 @@
 				2879526514C1BAB900567430 /* MKTextMessage.m in Sources */,
 				281EADA81530EA30000793AB /* MKDistinguishedNameParser.m in Sources */,
 				28074E93158A6E5100E0A4D0 /* MKAudioOutputSidetone.m in Sources */,
+				F3AA10082F45800100A0B123 /* MKAudioInputRackBridge.m in Sources */,
+				F3AA100B2F45800100A0B123 /* MKAudioInputRack.swift in Sources */,
+				F3AA10042F45800100A0B123 /* MKAudioRemoteBusRackBridge.m in Sources */,
+				F3AA10062F45800100A0B123 /* MKAudioRemoteBusRack.swift in Sources */,
+				F3AA100E2F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m in Sources */,
+				F3AA10112F45800100A0B123 /* MKAudioRemoteTrackRack.swift in Sources */,
 				BCD11E0A158F40FA00321E06 /* MKAccessControl.m in Sources */,
 				BCD11E0C158F40FA00321E06 /* MKChannelACL.m in Sources */,
 				BCD11E0E158F40FA00321E06 /* MKChannelGroup.m in Sources */,
@@ -1167,6 +1203,12 @@
 				2879526414C1BAB900567430 /* MKTextMessage.m in Sources */,
 				281EADA71530EA30000793AB /* MKDistinguishedNameParser.m in Sources */,
 				28074E92158A6E5100E0A4D0 /* MKAudioOutputSidetone.m in Sources */,
+				F3AA10092F45800100A0B123 /* MKAudioInputRackBridge.m in Sources */,
+				F3AA100D2F45800100A0B123 /* MKAudioInputRack.swift in Sources */,
+				F3AA10052F45800100A0B123 /* MKAudioRemoteBusRackBridge.m in Sources */,
+				F3AA10072F45800100A0B123 /* MKAudioRemoteBusRack.swift in Sources */,
+				F3AA100F2F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m in Sources */,
+				F3AA10132F45800100A0B123 /* MKAudioRemoteTrackRack.swift in Sources */,
 				BCD11E09158F40FA00321E06 /* MKAccessControl.m in Sources */,
 				BCD11E0B158F40FA00321E06 /* MKChannelACL.m in Sources */,
 				BCD11E0D158F40FA00321E06 /* MKChannelGroup.m in Sources */,
@@ -1235,28 +1277,36 @@
 		2845A729132D9B2F0034D631 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEFINES_MODULE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_INSTALL_OBJC_HEADER = YES;
+				SWIFT_VERSION = 5.0;
 			};
 			name = Debug;
 		};
 		2845A72A132D9B2F0034D631 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEFINES_MODULE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_INSTALL_OBJC_HEADER = YES;
+				SWIFT_VERSION = 5.0;
 			};
 			name = Release;
 		};
@@ -1281,14 +1331,18 @@
 		28498F1C138AB6A9000509DD /* BetaDist */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEFINES_MODULE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_INSTALL_OBJC_HEADER = YES;
+				SWIFT_VERSION = 5.0;
 			};
 			name = BetaDist;
 		};
@@ -1304,23 +1358,31 @@
 		28A2AEC31478A92700F3B83F /* AppStore */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
+				DEFINES_MODULE = YES;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_INSTALL_OBJC_HEADER = YES;
+				SWIFT_VERSION = 5.0;
 			};
 			name = AppStore;
 		};
 		28A2AEC41478A92700F3B83F /* AppStore */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEFINES_MODULE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_INSTALL_OBJC_HEADER = YES;
+				SWIFT_VERSION = 5.0;
 			};
 			name = AppStore;
 		};
@@ -1346,18 +1408,26 @@
 		28BCF2CC132AE3B40003AEC1 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
+				DEFINES_MODULE = YES;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_INSTALL_OBJC_HEADER = YES;
+				SWIFT_VERSION = 5.0;
 			};
 			name = Debug;
 		};
 		28BCF2CD132AE3B40003AEC1 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
+				DEFINES_MODULE = YES;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_INSTALL_OBJC_HEADER = YES;
+				SWIFT_VERSION = 5.0;
 			};
 			name = Release;
 		};
