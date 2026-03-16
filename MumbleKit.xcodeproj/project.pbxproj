@@ -116,6 +116,7 @@
 		28CC36F3132ED8B300241269 /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 28CC36F2132ED8B300241269 /* AudioToolbox.framework */; };
 		28CC36F5132ED8BA00241269 /* AudioUnit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 28CC36F4132ED8BA00241269 /* AudioUnit.framework */; };
 		28CC36F7132ED8C300241269 /* CoreAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 28CC36F6132ED8C300241269 /* CoreAudio.framework */; };
+		F3AA00012F45700100A0B123 /* AVFAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F3AA00022F45700100A0B123 /* AVFAudio.framework */; };
 		28CC36FA132ED92500241269 /* Mumble.pb.m in Sources */ = {isa = PBXBuildFile; fileRef = 28CC36F8132ED92500241269 /* Mumble.pb.m */; };
 		28CC36FB132ED92500241269 /* Mumble.pb.m in Sources */ = {isa = PBXBuildFile; fileRef = 28CC36F8132ED92500241269 /* Mumble.pb.m */; };
 		28CC36FC132ED92500241269 /* ObjectivecDescriptor.pb.m in Sources */ = {isa = PBXBuildFile; fileRef = 28CC36F9132ED92500241269 /* ObjectivecDescriptor.pb.m */; };
@@ -386,6 +387,7 @@
 		28CC36F2132ED8B300241269 /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
 		28CC36F4132ED8BA00241269 /* AudioUnit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioUnit.framework; path = System/Library/Frameworks/AudioUnit.framework; sourceTree = SDKROOT; };
 		28CC36F6132ED8C300241269 /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = System/Library/Frameworks/CoreAudio.framework; sourceTree = SDKROOT; };
+		F3AA00022F45700100A0B123 /* AVFAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFAudio.framework; path = System/Library/Frameworks/AVFAudio.framework; sourceTree = SDKROOT; };
 		28CC36F8132ED92500241269 /* Mumble.pb.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = Mumble.pb.m; path = proto/Mumble.pb.m; sourceTree = SOURCE_ROOT; };
 		28CC36F9132ED92500241269 /* ObjectivecDescriptor.pb.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = ObjectivecDescriptor.pb.m; path = proto/ObjectivecDescriptor.pb.m; sourceTree = SOURCE_ROOT; };
 		28CC370E132EDC7300241269 /* libCELT-0.7.0.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; path = "libCELT-0.7.0.a"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -487,6 +489,7 @@
 				28CC36F7132ED8C300241269 /* CoreAudio.framework in Frameworks */,
 				28CC36F5132ED8BA00241269 /* AudioUnit.framework in Frameworks */,
 				28CC36F3132ED8B300241269 /* AudioToolbox.framework in Frameworks */,
+				F3AA00012F45700100A0B123 /* AVFAudio.framework in Frameworks */,
 				28CC36F1132ED89A00241269 /* CoreServices.framework in Frameworks */,
 				28CC36EF132ED88A00241269 /* Cocoa.framework in Frameworks */,
 				28CC36ED132ED88200241269 /* Foundation.framework in Frameworks */,
@@ -543,6 +546,7 @@
 				28CC36F6132ED8C300241269 /* CoreAudio.framework */,
 				28CC36F4132ED8BA00241269 /* AudioUnit.framework */,
 				28CC36F2132ED8B300241269 /* AudioToolbox.framework */,
+				F3AA00022F45700100A0B123 /* AVFAudio.framework */,
 				28CC36F0132ED89A00241269 /* CoreServices.framework */,
 				28CC36EE132ED88A00241269 /* Cocoa.framework */,
 				28CC36EC132ED88200241269 /* Foundation.framework */,

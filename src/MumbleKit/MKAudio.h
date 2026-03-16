@@ -250,14 +250,42 @@ typedef struct _MKAudioSettings {
 - (void) clearAllRemoteTrackPreview;
 
 /// Configure true Audio Unit DSP chain for input track processing.
-/// Chain units are applied in order after preview gain and before encode/transmit.
+/// Each entry may be an AVAudioUnit or a stage descriptor dictionary with
+/// keys @"audioUnit" and @"mix" (0.0 dry to 1.0 wet). Stages are applied
+/// in order after preview gain and before encode/transmit.
 - (void) setInputTrackAudioUnitChain:(NSArray *)audioUnits;
 
 /// Configure true Audio Unit DSP chain for remote bus processing.
-/// Chain units are applied in order after remote mix and before output quantization.
+/// Each entry may be an AVAudioUnit or a stage descriptor dictionary with
+/// keys @"audioUnit" and @"mix" (0.0 dry to 1.0 wet). Stages are applied
+/// in order after remote mix and before output quantization.
 - (void) setRemoteBusAudioUnitChain:(NSArray *)audioUnits;
+
+/// Configure true Audio Unit DSP chain for a specific remote session.
+/// Each entry may be an AVAudioUnit or a stage descriptor dictionary with
+/// keys @"audioUnit" and @"mix" (0.0 dry to 1.0 wet). Stages are applied
+/// in order after per-user decode and before mixing into remote bus.
+- (void) setRemoteTrackAudioUnitChain:(NSArray *)audioUnits forSession:(NSUInteger)session;
+- (void) clearRemoteTrackAudioUnitChainForSession:(NSUInteger)session;
+- (void) clearAllRemoteTrackAudioUnitChains;
 
 /// Returns current remote session order snapshot used by mixer.
 - (NSArray<NSNumber *> *) copyRemoteSessionOrder;
+
+/// Configure the plugin host render block size used to chunk AU processing.
+- (void)setPluginHostBufferFrames:(NSUInteger)frames;
+- (NSUInteger)pluginHostBufferFrames;
+
+/// Returns the preferred sample rate for loading/configuring plugins on a track.
+/// The result matches the live DSP path as closely as possible to avoid AU
+/// state churn from immediately reconfiguring a freshly loaded plugin.
+- (NSUInteger)pluginSampleRateForTrackKey:(NSString *)trackKey;
+
+/// Query current input/remote-bus DSP peaks for real-time metering.
+- (NSDictionary *)copyInputTrackDSPStatus;
+- (NSDictionary *)copyRemoteBusDSPStatus;
+
+/// DSP Observability - Query per-session DSP status and I/O levels.
+- (NSDictionary *)copyDSPStatus:(NSUInteger)session;
 
 @end

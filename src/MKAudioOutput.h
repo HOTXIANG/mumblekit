@@ -34,5 +34,8 @@ typedef void (*MKAudioOutputFloatProcessCallback)(float *samples, NSUInteger fra
 - (void) clearRemoteBusProcessor;
 
 - (NSArray *) copyRemoteSessionOrder;
+- (NSUInteger) outputSampleRate;
 
+/// DSP Observability - Query per-track DSP status and I/O levels
+- (NSDictionary *) copyDSPStatusForSession:(NSUInteger)session;
 @end

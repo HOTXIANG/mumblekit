@@ -277,7 +277,7 @@
                 if (avail < want) {
                     _missCount++;
                     if (_missCount < 20) {
-                        memset(output, 0, _frameSize * sizeof(float));
+                        memset(output, 0, _frameSize * channels * sizeof(float));
                         goto nextframe;
                     }
                 }
@@ -385,7 +385,7 @@
                     }
                 } else {
                     decodedSamples = (int)_frameSize;
-                    memset(output, 0, _frameSize * sizeof(float));
+                    memset(output, 0, _frameSize * channels * sizeof(float));
                 }
 
                 [_frames removeObjectAtIndex:0];
@@ -429,7 +429,7 @@
                         output[i] *= (1.0f / 32767.0f);
                 } else {
                     decodedSamples = (int)_frameSize;
-                    memset(output, 0, _frameSize * sizeof(float));
+                    memset(output, 0, _frameSize * channels * sizeof(float));
                 }
             }
 

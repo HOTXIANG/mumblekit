@@ -12,6 +12,15 @@
 #import <AudioUnit/AudioUnit.h>
 #import <AudioUnit/AUComponent.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <os/lock.h>
+
+typedef struct {
+    os_unfair_lock lock;
+    float inputPeak;
+    float outputPeak;
+    OSStatus lastRenderStatus;
+    NSUInteger frameCount;
+} MKAudioDSPStatus;
 
 @interface MKAudioOutput () {
     MKAudioDevice        *_device;
@@ -24,7 +33,7 @@
     float                *_speakerVolume;
     NSLock               *_outputLock;
     NSMutableDictionary  *_outputs;
-    
+
     NSLock               *_mixerInfoLock;
     NSDictionary         *_mixerInfo;
 
@@ -33,7 +42,7 @@
     long                  _cngRegister1;
     long                  _cngRegister2;
     BOOL                  _cngEnabled;
-    
+
     NSMutableDictionary  *_sessionVolumes;
     NSMutableDictionary  *_sessionMutes;
     NSMutableArray       *_remoteSessionOrder;
@@ -41,6 +50,9 @@
     NSMutableDictionary  *_remoteTrackProcessorContexts;
     MKAudioOutputFloatProcessCallback _remoteBusProcessor;
     void                 *_remoteBusProcessorContext;
+
+    // DSP observability - per-session status
+    NSMutableDictionary  *_sessionDSPStatuses;
 }
 @end
 
@@ -63,8 +75,15 @@
         _remoteTrackProcessorContexts = [[NSMutableDictionary alloc] init];
         _remoteBusProcessor = NULL;
         _remoteBusProcessorContext = NULL;
-        
-        _mixerFrequency = [_device inputSampleRate];
+        _sessionDSPStatuses = [[NSMutableDictionary alloc] init];
+
+        _mixerFrequency = [_device outputSampleRate];
+        if (_mixerFrequency <= 0) {
+            _mixerFrequency = [_device inputSampleRate];
+        }
+        if (_mixerFrequency <= 0) {
+            _mixerFrequency = SAMPLE_RATE;
+        }
         _numChannels = [_device numberOfOutputChannels];
         _sampleSize = _numChannels * sizeof(short);
         
@@ -112,6 +131,7 @@
     [_remoteSessionOrder release];
     [_remoteTrackProcessors release];
     [_remoteTrackProcessorContexts release];
+    [_sessionDSPStatuses release];
     [super dealloc];
 }
 
@@ -456,6 +476,40 @@
     NSArray *order = [_remoteSessionOrder copy];
     [_outputLock unlock];
     return order;
+}
+
+- (NSUInteger) outputSampleRate {
+    [_outputLock lock];
+    NSUInteger sampleRate = (NSUInteger)_mixerFrequency;
+    [_outputLock unlock];
+    return sampleRate;
+}
+
+- (NSDictionary *) copyDSPStatusForSession:(NSUInteger)session {
+    NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
+    [_outputLock lock];
+    NSValue *value = [_sessionDSPStatuses objectForKey:sessionKey];
+    [_outputLock unlock];
+
+    if (value == nil) {
+        return [[NSDictionary alloc] initWithObjectsAndKeys:
+            @0.0f, @"inputPeak",
+            @0.0f, @"outputPeak",
+            @(noErr), @"lastRenderStatus",
+            @0, @"frameCount",
+            nil];
+    }
+
+    MKAudioDSPStatus *status = (MKAudioDSPStatus *)[value pointerValue];
+    os_unfair_lock_lock(&status->lock);
+    NSDictionary *result = [[NSDictionary alloc] initWithObjectsAndKeys:
+        [NSNumber numberWithFloat:status->inputPeak], @"inputPeak",
+        [NSNumber numberWithFloat:status->outputPeak], @"outputPeak",
+        [NSNumber numberWithInt:status->lastRenderStatus], @"lastRenderStatus",
+        [NSNumber numberWithUnsignedInteger:status->frameCount], @"frameCount",
+        nil];
+    os_unfair_lock_unlock(&status->lock);
+    return result;
 }
 
 @end
