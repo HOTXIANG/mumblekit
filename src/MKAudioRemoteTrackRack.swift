@@ -85,6 +85,12 @@ final class MKAudioRemoteTrackRack: NSObject {
             }
         }
 
+        var probeSummary: String {
+            let inLayout = configuredInputFormat.isInterleaved ? "i" : "ni"
+            let outLayout = configuredOutputFormat.isInterleaved ? "i" : "ni"
+            return "in=\(configuredInputFormat.channelCount)ch@\(Int(configuredInputFormat.sampleRate))/\(inLayout) out=\(configuredOutputFormat.channelCount)ch@\(Int(configuredOutputFormat.sampleRate))/\(outLayout) max=\(maximumFramesToRender)"
+        }
+
         private static func configureFormats(for auAudioUnit: AUAudioUnit, preferredChannels: AVAudioChannelCount, sampleRate: Double) throws -> (input: AVAudioFormat, output: AVAudioFormat) {
             guard auAudioUnit.inputBusses.count > 0, auAudioUnit.outputBusses.count > 0 else {
                 throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudioUnitErr_InvalidElement))
@@ -241,14 +247,102 @@ final class MKAudioRemoteTrackRack: NSObject {
         }
     }
 
+    private final class VST3StageHost {
+        let pluginHost: MKVST3PluginHost
+        let wetDryMix: Float
+
+        init(pluginHost: MKVST3PluginHost,
+             wetDryMix: Float,
+             preferredChannels: AVAudioChannelCount,
+             sampleRate: Double,
+             hostBufferFrames: Int) throws {
+            self.pluginHost = pluginHost
+            self.wetDryMix = min(max(wetDryMix, 0.0), 1.0)
+            try pluginHost.configure(
+                withInputChannels: UInt(preferredChannels),
+                outputChannels: UInt(preferredChannels),
+                sampleRate: sampleRate > 0 ? sampleRate : 48_000,
+                maximumFramesToRender: UInt(max(hostBufferFrames, 64))
+            )
+        }
+
+        func process(samples: UnsafeMutablePointer<Float>, frameCount: Int, hostChannels: Int) {
+            guard frameCount > 0, hostChannels > 0, wetDryMix > 0.0001 else { return }
+
+            let sampleCount = frameCount * hostChannels
+            let dryCopy: UnsafeMutablePointer<Float>?
+            if wetDryMix >= 0.9999 {
+                dryCopy = nil
+            } else {
+                let allocated = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
+                allocated.initialize(from: samples, count: sampleCount)
+                dryCopy = allocated
+            }
+
+            defer {
+                if let dryCopy {
+                    dryCopy.deinitialize(count: sampleCount)
+                    dryCopy.deallocate()
+                }
+            }
+
+            do {
+                try pluginHost.processInterleaved(inPlace: samples,
+                                                 frameCount: UInt(frameCount),
+                                                 hostChannels: UInt(hostChannels))
+            } catch {
+                print("MKAudioRack: Remote Track stage render failed \(pluginHost.displayName): \(error.localizedDescription)")
+                return
+            }
+
+            guard let dryCopy else { return }
+            let dryMix = 1.0 as Float - wetDryMix
+            for index in 0..<sampleCount {
+                samples[index] = (dryCopy[index] * dryMix) + (samples[index] * wetDryMix)
+            }
+        }
+
+        var probeSummary: String {
+            pluginHost.probeSummary()
+        }
+    }
+
+    private enum AnyStageHost {
+        case audioUnit(StageHost)
+        case vst3(VST3StageHost)
+
+        func process(samples: UnsafeMutablePointer<Float>, frameCount: Int, hostChannels: Int) {
+            switch self {
+            case .audioUnit(let host):
+                host.process(samples: samples, frameCount: frameCount, hostChannels: hostChannels)
+            case .vst3(let host):
+                host.process(samples: samples, frameCount: frameCount, hostChannels: hostChannels)
+            }
+        }
+
+        var probeSummary: String {
+            switch self {
+            case .audioUnit(let host):
+                return host.probeSummary
+            case .vst3(let host):
+                return host.probeSummary
+            }
+        }
+    }
+
+    private enum StageProcessor {
+        case audioUnit(AVAudioUnit)
+        case vst3(MKVST3PluginHost)
+    }
+
     private struct StageConfiguration {
-        let audioUnit: AVAudioUnit
+        let processor: StageProcessor
         let wetDryMix: Float
     }
 
     private let stateLock = NSLock()
     private var stageConfigurations: [StageConfiguration] = []
-    private var stageHosts: [StageHost] = []
+    private var stageHosts: [AnyStageHost] = []
     private var previewGain: Float = 1.0
     private var previewEnabled = false
     private var hostBufferFrames: Int = 256
@@ -338,11 +432,15 @@ final class MKAudioRemoteTrackRack: NSObject {
 
     func currentStatus() -> NSDictionary {
         stateLock.lock()
+        let hostSummaries = stageHosts.map { $0.probeSummary }
         let result: NSDictionary = [
             "inputPeak": NSNumber(value: inputPeak),
             "outputPeak": NSNumber(value: outputPeak),
             "lastRenderStatus": NSNumber(value: noErr),
-            "frameCount": NSNumber(value: frameCount)
+            "frameCount": NSNumber(value: frameCount),
+            "hosts": hostSummaries,
+            "sampleRate": NSNumber(value: configuredSampleRate),
+            "bufferFrames": NSNumber(value: hostBufferFrames)
         ]
         stateLock.unlock()
         return result
@@ -353,31 +451,54 @@ final class MKAudioRemoteTrackRack: NSObject {
         var normalized: [StageConfiguration] = []
         for element in stages {
             if let audioUnit = element as? AVAudioUnit {
-                normalized.append(StageConfiguration(audioUnit: audioUnit, wetDryMix: 1.0))
+                normalized.append(StageConfiguration(processor: .audioUnit(audioUnit), wetDryMix: 1.0))
                 continue
             }
-            guard let dictionary = element as? NSDictionary,
-                  let audioUnit = dictionary["audioUnit"] as? AVAudioUnit else {
+            if let vst3Host = element as? MKVST3PluginHost {
+                normalized.append(StageConfiguration(processor: .vst3(vst3Host), wetDryMix: 1.0))
+                continue
+            }
+            guard let dictionary = element as? NSDictionary else {
                 continue
             }
             let wetDryMix = (dictionary["mix"] as? NSNumber)?.floatValue ?? 1.0
-            normalized.append(StageConfiguration(audioUnit: audioUnit, wetDryMix: min(max(wetDryMix, 0.0), 1.0)))
+            if let audioUnit = dictionary["audioUnit"] as? AVAudioUnit {
+                normalized.append(StageConfiguration(processor: .audioUnit(audioUnit), wetDryMix: min(max(wetDryMix, 0.0), 1.0)))
+            } else if let vst3Host = dictionary["vst3Host"] as? MKVST3PluginHost {
+                normalized.append(StageConfiguration(processor: .vst3(vst3Host), wetDryMix: min(max(wetDryMix, 0.0), 1.0)))
+            }
         }
         return normalized
     }
 
-    private func buildStageHosts(from configurations: [StageConfiguration], sampleRate: Double, hostBufferFrames: Int) -> [StageHost] {
-        var hosts: [StageHost] = []
+    private func buildStageHosts(from configurations: [StageConfiguration], sampleRate: Double, hostBufferFrames: Int) -> [AnyStageHost] {
+        var hosts: [AnyStageHost] = []
         for configuration in configurations {
             do {
-                let host = try StageHost(audioUnit: configuration.audioUnit,
-                                         wetDryMix: configuration.wetDryMix,
-                                         preferredChannels: 2,
-                                         sampleRate: sampleRate,
-                                         hostBufferFrames: hostBufferFrames)
-                hosts.append(host)
+                switch configuration.processor {
+                case .audioUnit(let audioUnit):
+                    let host = try StageHost(audioUnit: audioUnit,
+                                             wetDryMix: configuration.wetDryMix,
+                                             preferredChannels: 2,
+                                             sampleRate: sampleRate,
+                                             hostBufferFrames: hostBufferFrames)
+                    hosts.append(.audioUnit(host))
+                case .vst3(let vst3Host):
+                    let host = try VST3StageHost(pluginHost: vst3Host,
+                                                 wetDryMix: configuration.wetDryMix,
+                                                 preferredChannels: 2,
+                                                 sampleRate: sampleRate,
+                                                 hostBufferFrames: hostBufferFrames)
+                    hosts.append(.vst3(host))
+                }
             } catch {
-                let componentName = configuration.audioUnit.auAudioUnit.componentName ?? "Unknown AU"
+                let componentName: String
+                switch configuration.processor {
+                case .audioUnit(let audioUnit):
+                    componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
+                case .vst3(let vst3Host):
+                    componentName = vst3Host.displayName
+                }
                 print("MKAudioRack: Failed to configure Remote Track stage \(componentName): \(error)")
             }
         }
