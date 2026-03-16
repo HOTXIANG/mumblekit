@@ -1344,6 +1344,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -1399,6 +1400,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -1467,6 +1469,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -1489,6 +1492,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
