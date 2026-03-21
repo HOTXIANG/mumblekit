@@ -4,6 +4,7 @@
 
 #import <MumbleKit/MKCertificate.h>
 #import "MKDistinguishedNameParser.h"
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #include <openssl/evp.h>
 #include <openssl/err.h>
@@ -465,7 +466,7 @@ static int add_ext(X509 * crt, int nid, char *value) {
     } else if (time->type == V_ASN1_GENERALIZEDTIME && time->length == 15 && time->data[14] == 'Z') {
         memcpy(buf, time->data, time->length-1);
     } else {
-        NSLog(@"MKCertificate: Invalid ASN.1 date for PKIX purposes encountered.");
+        MKLogWarning(Certificate, @"MKCertificate: Invalid ASN.1 date for PKIX purposes encountered.");
         return nil;
     }
 
@@ -476,7 +477,7 @@ static int add_ext(X509 * crt, int nid, char *value) {
     buf[18] = '0';
     buf[19] = 0;
     if (strptime_l(buf, "%Y%m%d%H%M%S%z", &tm, NULL) == NULL) {
-        NSLog(@"MKCertificate: Unable to parse ASN.1 date.");
+        MKLogWarning(Certificate, @"MKCertificate: Unable to parse ASN.1 date.");
         return nil;
     }
         

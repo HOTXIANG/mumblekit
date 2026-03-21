@@ -7,6 +7,7 @@
 
 #import "MKiOSAudioDevice.h"
 #import "MKAudioPerfStats.h"
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #import <AudioUnit/AudioUnit.h>
 #import <AudioUnit/AUComponent.h>
@@ -34,7 +35,7 @@ static void MKAudioPerfLogAndReset(NSString *label, MKAudioPerfStats *stats) {
         return;
     }
 
-    NSLog(@"PERF audio_callback %@ callbacks=%llu sampled=%llu avg_us=%llu p95_us=%llu p99_us=%llu max_us=%llu",
+    MKLogVerbose(Audio, @"PERF audio_callback %@ callbacks=%llu sampled=%llu avg_us=%llu p95_us=%llu p99_us=%llu max_us=%llu",
           label,
           stats->callbackCount,
           stats->sampledCount,
@@ -53,7 +54,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
     
     if (! dev->_buflist.mBuffers->mData) {
-        NSLog(@"MKiOSAudioDevice: No buffer allocated. Allocating for %d frames.", (int)nframes);
+        MKLogDebug(Audio, @"MKiOSAudioDevice: No buffer allocated. Allocating for %d frames.", (int)nframes);
         dev->_buflist.mNumberBuffers = 1;
         AudioBuffer *b = dev->_buflist.mBuffers;
         b->mNumberChannels = dev->_numMicChannels;
@@ -62,7 +63,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     }
     
     if (dev->_buflist.mBuffers->mDataByteSize < (dev->_micSampleSize * nframes)) {
-        NSLog(@"MKiOSAudioDevice: Buffer too small. Allocating more space.");
+        MKLogDebug(Audio, @"MKiOSAudioDevice: Buffer too small. Allocating more space.");
         AudioBuffer *b = dev->_buflist.mBuffers;
         free(b->mData);
         b->mDataByteSize = dev->_micSampleSize * nframes;
@@ -78,7 +79,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     err = AudioUnitRender(dev->_audioUnit, flags, ts, busnum, nframes, &dev->_buflist);
     if (err != noErr) {
 #ifndef TARGET_IPHONE_SIMULATOR
-        NSLog(@"MKiOSAudioDevice: AudioUnitRender failed. err = %d", (int)err);
+        MKLogError(Audio, @"MKiOSAudioDevice: AudioUnitRender failed. err = %d", (int)err);
 #endif
         return err;
     }
@@ -115,7 +116,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     // P0 修复：验证音频缓冲区指针有效性，防止 EXC_BAD_ACCESS
     if (buf->mData == NULL || buf->mDataByteSize == 0) {
-        NSLog(@"MKiOSAudioDevice: outputCallback received invalid buffer (data=%p, size=%u). Skipping.", 
+        MKLogWarning(Audio, @"MKiOSAudioDevice: outputCallback received invalid buffer (data=%p, size=%u). Skipping.",
               buf->mData, (unsigned int)buf->mDataByteSize);
         buf->mDataByteSize = 0;
         return -1;
@@ -125,7 +126,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     @try {
         done = outputFunc(buf->mData, nframes);
     } @catch (NSException *exception) {
-        NSLog(@"MKiOSAudioDevice: outputFunc threw exception: %@. Audio playback interrupted.", exception);
+        MKLogError(Audio, @"MKiOSAudioDevice: outputFunc threw exception: %@. Audio playback interrupted.", exception);
         done = NO;
     } @finally {
         if (! done) {
@@ -177,27 +178,27 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     comp = AudioComponentFindNext(NULL, &desc);
     if (! comp) {
-        NSLog(@"MKiOSAudioDevice: Unable to find AudioUnit.");
+        MKLogError(Audio, @"MKiOSAudioDevice: Unable to find AudioUnit.");
         return NO;
     }
     
     err = AudioComponentInstanceNew(comp, (AudioComponentInstance *) &_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Unable to instantiate new AudioUnit.");
+        MKLogError(Audio, @"MKiOSAudioDevice: Unable to instantiate new AudioUnit.");
         return NO;
     }
         
     val = 1;
     err = AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &val, sizeof(UInt32));
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Unable to configure input scope on AudioUnit.");
+        MKLogError(Audio, @"MKiOSAudioDevice: Unable to configure input scope on AudioUnit.");
         return NO;
     }
     
     val = 1;
     err = AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &val, sizeof(UInt32));
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Unable to configure output scope on AudioUnit.");
+        MKLogError(Audio, @"MKiOSAudioDevice: Unable to configure output scope on AudioUnit.");
         return NO;
     }
     
@@ -207,7 +208,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AURenderCallbackStruct);
     err = AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, &cb, len);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Unable to setup callback.");
+        MKLogError(Audio, @"MKiOSAudioDevice: Unable to setup callback.");
         return NO;
     }
     
@@ -216,21 +217,21 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AURenderCallbackStruct);
     err = AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Global, 0, &cb, len);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Could not set render callback.");
+        MKLogError(Audio, @"MKiOSAudioDevice: Could not set render callback.");
         return NO;
     }
     
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitGetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &inputFmt, &len);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Unable to query input stream info.");
+        MKLogError(Audio, @"MKiOSAudioDevice: Unable to query input stream info.");
         return NO;
     }
     
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitGetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &outputFmt, &len);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Unable to query output stream info.");
+        MKLogError(Audio, @"MKiOSAudioDevice: Unable to query output stream info.");
         return NO;
     }
     
@@ -239,14 +240,14 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     int requestedInputChannels = _settings.enableStereoInput ? 2 : 1;
     _numMicChannels = MIN(requestedInputChannels, hardwareInputChannels);
     if (_settings.enableStereoInput && _numMicChannels < 2) {
-        NSLog(@"MKiOSAudioDevice: Stereo input requested but unavailable on current route. Falling back to mono.");
+        MKLogWarning(Audio, @"MKiOSAudioDevice: Stereo input requested but unavailable on current route. Falling back to mono.");
     }
     
     int hardwareOutputChannels = (int)MAX((UInt32)1, outputFmt.mChannelsPerFrame);
     int requestedOutputChannels = _settings.enableStereoOutput ? 2 : 1;
     _numOutputChannels = MIN(requestedOutputChannels, hardwareOutputChannels);
     if (_settings.enableStereoOutput && _numOutputChannels < 2) {
-        NSLog(@"MKiOSAudioDevice: Stereo output requested but unavailable on current route. Falling back to mono.");
+        MKLogWarning(Audio, @"MKiOSAudioDevice: Stereo output requested but unavailable on current route. Falling back to mono.");
     }
     _micSampleSize = _numMicChannels * sizeof(short);
     
@@ -271,26 +272,26 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &inputFmt, len);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Unable to set stream format for output device. (output scope)");
+        MKLogError(Audio, @"MKiOSAudioDevice: Unable to set stream format for output device. (output scope)");
         return NO;
     }
     
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &outputFmt, len);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Unable to set stream format for input device. (input scope)");
+        MKLogError(Audio, @"MKiOSAudioDevice: Unable to set stream format for input device. (input scope)");
         return NO;
     }
     
     err = AudioUnitInitialize(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Unable to initialize AudioUnit.");
+        MKLogError(Audio, @"MKiOSAudioDevice: Unable to initialize AudioUnit.");
         return NO;
     }
     
     err = AudioOutputUnitStart(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: Unable to start AudioUnit.");
+        MKLogError(Audio, @"MKiOSAudioDevice: Unable to start AudioUnit.");
         return NO;
     }
     
@@ -305,13 +306,13 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     err = AudioOutputUnitStop(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: unable to stop AudioUnit.");
+        MKLogError(Audio, @"MKiOSAudioDevice: unable to stop AudioUnit.");
         return NO;
     }
     
     err = AudioComponentInstanceDispose(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKiOSAudioDevice: unable to dispose of AudioUnit.");
+        MKLogError(Audio, @"MKiOSAudioDevice: unable to dispose of AudioUnit.");
         return NO;
     }
     
@@ -319,7 +320,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     if (b && b->mData)
         free(b->mData);
     
-    NSLog(@"MKiOSAudioDevice: teardown finished.");
+    MKLogInfo(Audio, @"MKiOSAudioDevice: teardown finished.");
     return YES;
 }
 

@@ -9,6 +9,7 @@
 #import "MKAudioInput.h"
 #import "MKAudioOutputSidetone.h"
 #import "MKAudioDevice.h"
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #include <speex/speex.h>
 #include <speex/speex_preprocess.h>
@@ -113,15 +114,15 @@
     // Fall back to CELT if Opus is not enabled.
     if (![[MKVersion sharedVersion] isOpusEnabled] && _settings.codec == MKCodecFormatOpus) {
         _settings.codec = MKCodecFormatCELT;
-        NSLog(@"Falling back to CELT");
+        MKLogWarning(Audio, @"Falling back to CELT");
     }
 
     if (_settings.codec == MKCodecFormatSpeex && encodeChannels > 1) {
-        NSLog(@"MKAudioInput: Speex does not support stereo encode path. Falling back to mono.");
+        MKLogWarning(Audio, @"MKAudioInput: Speex does not support stereo encode path. Falling back to mono.");
         encodeChannels = 1;
     }
     if (_settings.enableStereoInput && encodeChannels < 2 && _settings.codec != MKCodecFormatSpeex) {
-        NSLog(@"MKAudioInput: Stereo input requested but unavailable from device. Falling back to mono.");
+        MKLogWarning(Audio, @"MKAudioInput: Stereo input requested but unavailable from device. Falling back to mono.");
     }
 
     if (_settings.codec == MKCodecFormatOpus) {
@@ -129,11 +130,11 @@
         frameSize = SAMPLE_RATE / 100;
         _opusEncoder = opus_encoder_create(SAMPLE_RATE, encodeChannels, OPUS_APPLICATION_VOIP, NULL);
         opus_encoder_ctl(_opusEncoder, OPUS_SET_VBR(0)); // CBR
-        NSLog(@"MKAudioInput: %i bits/s, %d Hz, %d sample Opus (%d ch)", _settings.quality, sampleRate, frameSize, encodeChannels);
+        MKLogInfo(Audio, @"MKAudioInput: %i bits/s, %d Hz, %d sample Opus (%d ch)", _settings.quality, sampleRate, frameSize, encodeChannels);
     } else if (_settings.codec == MKCodecFormatCELT) {
         sampleRate = SAMPLE_RATE;
         frameSize = SAMPLE_RATE / 100;
-        NSLog(@"MKAudioInput: %i bits/s, %d Hz, %d sample CELT (%d ch input)", _settings.quality, sampleRate, frameSize, encodeChannels);
+        MKLogInfo(Audio, @"MKAudioInput: %i bits/s, %d Hz, %d sample CELT (%d ch input)", _settings.quality, sampleRate, frameSize, encodeChannels);
     } else if (_settings.codec == MKCodecFormatSpeex) {
         sampleRate = 32000;
 
@@ -158,7 +159,7 @@
 
         iArg = 5;
         speex_encoder_ctl(_speexEncoder, SPEEX_SET_COMPLEXITY, &iArg);
-        NSLog(@"MKAudioInput: %d bits/s, %d Hz, %d sample Speex-UWB", _settings.quality, sampleRate, frameSize);
+        MKLogInfo(Audio, @"MKAudioInput: %d bits/s, %d Hz, %d sample Speex-UWB", _settings.quality, sampleRate, frameSize);
     }
 
     doResetPreprocessor = YES;
@@ -240,15 +241,15 @@
     int err;
     
     if (sampleRate <= 0) {
-        NSLog(@"MKAudioInput: Invalid sampleRate=%d, falling back to %d.", sampleRate, SAMPLE_RATE);
+        MKLogWarning(Audio, @"MKAudioInput: Invalid sampleRate=%d, falling back to %d.", sampleRate, SAMPLE_RATE);
         sampleRate = SAMPLE_RATE;
     }
     if (frameSize <= 0) {
-        NSLog(@"MKAudioInput: Invalid frameSize=%d, falling back to %d.", frameSize, SAMPLE_RATE / 100);
+        MKLogWarning(Audio, @"MKAudioInput: Invalid frameSize=%d, falling back to %d.", frameSize, SAMPLE_RATE / 100);
         frameSize = SAMPLE_RATE / 100;
     }
 
-    NSLog(@"MKAudioInput: initializeMixer -- iMicFreq=%u, iSampleRate=%u", micFrequency, sampleRate);
+    MKLogDebug(Audio, @"MKAudioInput: initializeMixer -- iMicFreq=%u, iSampleRate=%u", micFrequency, sampleRate);
 
     micLength = (frameSize * micFrequency) / sampleRate;
 
@@ -262,7 +263,7 @@
 
     if (micFrequency != sampleRate) {
         _micResampler = speex_resampler_init(encodeChannels, micFrequency, sampleRate, 3, &err);
-        NSLog(@"MKAudioInput: initialized resampler (%iHz -> %iHz)", micFrequency, sampleRate);
+        MKLogInfo(Audio, @"MKAudioInput: initialized resampler (%iHz -> %iHz)", micFrequency, sampleRate);
     }
 
     psMic = malloc(micLength * encodeChannels * sizeof(short));
@@ -270,7 +271,7 @@
     micSampleSize = numMicChannels * sizeof(short);
     doResetPreprocessor = YES;
 
-    NSLog(@"MKAudioInput: Initialized mixer for input=%i ch @ %i Hz, encode=%i ch @ %i Hz", numMicChannels, micFrequency, encodeChannels, sampleRate);
+    MKLogInfo(Audio, @"MKAudioInput: Initialized mixer for input=%i ch @ %i Hz, encode=%i ch @ %i Hz", numMicChannels, micFrequency, encodeChannels, sampleRate);
 }
 
 - (void) addMicrophoneDataWithBuffer:(short *)input amount:(NSUInteger)nsamp {

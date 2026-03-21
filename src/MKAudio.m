@@ -15,6 +15,7 @@
 #import "MKAudioRemoteBusRackBridge.h"
 #import "MKAudioRemoteTrackRackBridge.h"
 #import <MumbleKit/MKConnection.h>
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #import <AVFoundation/AVFoundation.h> // ✅ 必须引入
 
@@ -387,7 +388,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                                   error:&error];
     
     if (!success) {
-        NSLog(@"MKAudio: Failed to set session category: %@", error.localizedDescription);
+        MKLogError(Audio, @"MKAudio: Failed to set session category: %@", error.localizedDescription);
     }
 
     // 3. 设置硬件采样率 (推荐 48kHz)
@@ -411,10 +412,10 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     AVAudioSessionInterruptionType type = [userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
 
     if (type == AVAudioSessionInterruptionTypeBegan) {
-        NSLog(@"MKAudio: Interruption BEGAN (Phone call etc.)");
+        MKLogInfo(Audio, @"MKAudio: Interruption BEGAN (Phone call etc.)");
         [self stop];
     } else if (type == AVAudioSessionInterruptionTypeEnded) {
-        NSLog(@"MKAudio: Interruption ENDED. Restarting audio engine...");
+        MKLogInfo(Audio, @"MKAudio: Interruption ENDED. Restarting audio engine...");
         // 不再依赖 ShouldResume 标志位。电话挂断后该标志经常不被设置，
         // 导致音频引擎永远无法恢复。只要中断结束且连接仍然活跃，就无条件重启。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -422,7 +423,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
             NSError *error = nil;
             [[AVAudioSession sharedInstance] setActive:YES withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&error];
             if (error) {
-                NSLog(@"MKAudio: Failed to reactivate session after interruption: %@", error);
+                MKLogError(Audio, @"MKAudio: Failed to reactivate session after interruption: %@", error);
             }
             [self restart];
         });
@@ -433,7 +434,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     NSDictionary *userInfo = notification.userInfo;
     AVAudioSessionRouteChangeReason reason = [userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
     
-    NSLog(@"MKAudio: Route Changed. Reason: %lu", (unsigned long)reason);
+    MKLogInfo(Audio, @"MKAudio: Route Changed. Reason: %lu", (unsigned long)reason);
     
     // 以下情况通常不需要重启：
     // kAudioSessionRouteChangeReasonOverride (我们自己代码改的)
@@ -444,7 +445,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         case AVAudioSessionRouteChangeReasonOldDeviceUnavailable: // 拔出耳机
             // 只有音频引擎已经在运行时才重启，避免在未连接服务器时激活麦克风
             if (_running) {
-                NSLog(@"MKAudio: Restarting audio due to device change.");
+                MKLogInfo(Audio, @"MKAudio: Restarting audio due to device change.");
                 [self restart];
             }
             break;
@@ -454,7 +455,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 }
 
 - (void)handleMediaServicesReset:(NSNotification *)notification {
-    NSLog(@"MKAudio: Media Services Reset (Audio daemon crashed). Re-initializing.");
+    MKLogWarning(Audio, @"MKAudio: Media Services Reset (Audio daemon crashed). Re-initializing.");
     // 彻底重置
     [self stop];
     [self setupAudioSession];
@@ -478,7 +479,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                                                   MKAudioDefaultInputDeviceChangedCallback,
                                                   self);
     if (err != noErr) {
-        NSLog(@"MKAudio: Failed to observe default input device changes (%d).", (int)err);
+        MKLogWarning(Audio, @"MKAudio: Failed to observe default input device changes (%d).", (int)err);
         return;
     }
     
@@ -496,7 +497,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                                           &defaultInputAddr,
                                           MKAudioDefaultInputDeviceChangedCallback,
                                           self);
-        NSLog(@"MKAudio: Failed to observe device list changes (%d).", (int)devicesErr);
+        MKLogWarning(Audio, @"MKAudio: Failed to observe device list changes (%d).", (int)devicesErr);
         return;
     }
     
@@ -518,12 +519,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                                           &devicesAddr,
                                           MKAudioDefaultInputDeviceChangedCallback,
                                           self);
-        NSLog(@"MKAudio: Failed to observe default output device changes (%d).", (int)outputErr);
+        MKLogWarning(Audio, @"MKAudio: Failed to observe default output device changes (%d).", (int)outputErr);
         return;
     }
     
     _isObservingDefaultInputDevice = YES;
-    NSLog(@"MKAudio: Observing default input/output and device list changes.");
+    MKLogInfo(Audio, @"MKAudio: Observing default input/output and device list changes.");
 }
 
 - (void)stopObservingDefaultInputDeviceChanges {
@@ -539,7 +540,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                                                      MKAudioDefaultInputDeviceChangedCallback,
                                                      self);
     if (err != noErr) {
-        NSLog(@"MKAudio: Failed to remove default input device observer (%d).", (int)err);
+        MKLogWarning(Audio, @"MKAudio: Failed to remove default input device observer (%d).", (int)err);
     }
     
     AudioObjectPropertyAddress devicesAddr;
@@ -552,7 +553,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                                                             MKAudioDefaultInputDeviceChangedCallback,
                                                             self);
     if (devicesErr != noErr) {
-        NSLog(@"MKAudio: Failed to remove device list observer (%d).", (int)devicesErr);
+        MKLogWarning(Audio, @"MKAudio: Failed to remove device list observer (%d).", (int)devicesErr);
     }
     
     AudioObjectPropertyAddress defaultOutputAddr;
@@ -565,7 +566,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                                                            MKAudioDefaultOutputDeviceChangedCallback,
                                                            self);
     if (outputErr != noErr) {
-        NSLog(@"MKAudio: Failed to remove default output device observer (%d).", (int)outputErr);
+        MKLogWarning(Audio, @"MKAudio: Failed to remove default output device observer (%d).", (int)outputErr);
     }
     
     _isObservingDefaultInputDevice = NO;
@@ -599,7 +600,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
             // 固定设备已经不存在，自动回退到“跟随系统”
             [defaults setBool:YES forKey:@"AudioFollowSystemInputDevice"];
             [defaults setObject:@"" forKey:@"AudioPreferredInputDeviceUID"];
-            NSLog(@"MKAudio: Preferred input device missing. Auto-fallback to follow system default.");
+            MKLogInfo(Audio, @"MKAudio: Preferred input device missing. Auto-fallback to follow system default.");
         }
         
         if (!self->_running) {
@@ -611,7 +612,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         self->_isRestartingForDeviceChange = YES;
         BOOL wasVPIO = [self->_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
         BOOL nowExternal = !MKAudioSystemDefaultInputIsBuiltInOrBluetooth();
-        NSLog(@"MKAudio: Default input device changed. Restarting audio to apply new microphone.");
+        MKLogInfo(Audio, @"MKAudio: Default input device changed. Restarting audio to apply new microphone.");
         [self restart];
         if (wasVPIO && nowExternal) {
             [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioVPIOToHALTransitionNotification object:self];
@@ -638,7 +639,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
             return;
         }
         self->_isRestartingForDeviceChange = YES;
-        NSLog(@"MKAudio: Default output device changed. Restarting audio to apply new speaker/output.");
+        MKLogInfo(Audio, @"MKAudio: Default output device changed. Restarting audio to apply new speaker/output.");
         [self restart];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             self->_isRestartingForDeviceChange = NO;
@@ -713,7 +714,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     NSError *error = nil;
     [[AVAudioSession sharedInstance] setActive:YES error:&error];
     if (error) {
-        NSLog(@"MKAudio: Failed to activate AVAudioSession: %@", error);
+        MKLogError(Audio, @"MKAudio: Failed to activate AVAudioSession: %@", error);
         NSDictionary *info = @{@"message": [NSString stringWithFormat:@"Audio session activation failed: %@", error.localizedDescription]};
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioErrorNotification object:nil userInfo:info];
@@ -757,10 +758,10 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                         && !settingsSnapshot.enableStereoInput
                         && MKAudioSystemDefaultInputIsBuiltInOrBluetooth();
             if (useVPIO) {
-                NSLog(@"MKAudio: macOS using VPIO (follow-system, built-in/Bluetooth).");
+                MKLogInfo(Audio, @"MKAudio: macOS using VPIO (follow-system, built-in/Bluetooth).");
                 _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&settingsSnapshot];
             } else {
-                NSLog(@"MKAudio: macOS using HALOutput.");
+                MKLogInfo(Audio, @"MKAudio: macOS using HALOutput.");
                 _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&settingsSnapshot];
             }
         }
@@ -771,14 +772,14 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         BOOL setupSuccess = [_audioDevice setupDevice];
 #if TARGET_OS_OSX == 1
         if (!setupSuccess && ![_audioDevice isKindOfClass:[MKMacAudioDevice class]]) {
-            NSLog(@"MKAudio: VPIO setup failed on macOS, falling back to HALOutput.");
+            MKLogWarning(Audio, @"MKAudio: VPIO setup failed on macOS, falling back to HALOutput.");
             [_audioDevice release];
             _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&settingsSnapshot];
             setupSuccess = [_audioDevice setupDevice];
         }
 #endif
         if (!setupSuccess) {
-            NSLog(@"MKAudio: Failed to setup audio device.");
+            MKLogError(Audio, @"MKAudio: Failed to setup audio device.");
             [_audioDevice release];
             _audioDevice = nil;
             [connSnapshot release];
@@ -822,7 +823,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #if TARGET_OS_OSX == 1
     if (_lastDeviceWasVPIO) {
         _lastDeviceWasVPIO = NO;
-        NSLog(@"MKAudio: VPIO teardown detected, delaying start for pipeline release...");
+        MKLogInfo(Audio, @"MKAudio: VPIO teardown detected, delaying start for pipeline release...");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
                        dispatch_get_main_queue(), ^{
             [self start];

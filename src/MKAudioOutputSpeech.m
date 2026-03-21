@@ -6,6 +6,7 @@
 #import "MKPacketDataStream.h"
 #import "MKAudioOutputSpeech.h"
 #import "MKAudioOutputUserPrivate.h"
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #include <speex/speex.h>
 #include <speex/speex_preprocess.h>
@@ -91,7 +92,7 @@
             _sampleRate = SAMPLE_RATE;
             _frameSize = _sampleRate / 100;
             _audioBufferSize = _frameSize;
-            NSLog(@"MKAudioOutputSpeech: Unsupported legacy voice codec type=%d, using silence fallback.", (int)type);
+            MKLogWarning(Audio, @"MKAudioOutputSpeech: Unsupported legacy voice codec type=%d, using silence fallback.", (int)type);
         }
         int outputChannels = _useStereo ? 2 : 1;
         NSUInteger perChannelInputCapacity = (NSUInteger)_audioBufferSize / (NSUInteger)outputChannels;
@@ -101,7 +102,7 @@
             int err;
             _resampler = speex_resampler_init(_useStereo ? 2 : 1, (spx_uint32_t)_sampleRate, (spx_uint32_t)_freq, 3, &err);
             _resamplerBuffer = malloc(sizeof(float)*_audioBufferSize);
-            NSLog(@"AudioOutputSpeech: Resampling from %lu Hz to %lu Hz", (unsigned long)_sampleRate, (unsigned long)_freq);
+            MKLogInfo(Audio, @"AudioOutputSpeech: Resampling from %lu Hz to %lu Hz", (unsigned long)_sampleRate, (unsigned long)_freq);
         }    
 
         _bufferOffset = 0;
@@ -213,7 +214,7 @@
 
     if (! [pds valid]) {
         [pds release];
-        NSLog(@"addFrame:: Invalid pds.");
+        MKLogWarning(Audio, @"addFrame:: Invalid pds.");
         [_jitterLock unlock];
         return;
     }
