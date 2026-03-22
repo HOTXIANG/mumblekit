@@ -39,8 +39,6 @@
 		2845A7A1132D9C220034D631 /* MKCertificate.m in Sources */ = {isa = PBXBuildFile; fileRef = 2845A787132D9C220034D631 /* MKCertificate.m */; };
 		2845A7A2132D9C220034D631 /* MKChannel.m in Sources */ = {isa = PBXBuildFile; fileRef = 2845A788132D9C220034D631 /* MKChannel.m */; };
 		2845A7A3132D9C220034D631 /* MKChannel.m in Sources */ = {isa = PBXBuildFile; fileRef = 2845A788132D9C220034D631 /* MKChannel.m */; };
-				F2MKLOG002000000009AF31D /* MumbleLogger.m in Sources */ = {isa = PBXBuildFile; fileRef = F2MKLOG001000000009AF31D /* MumbleLogger.m */; };
-				F2MKLOG003000000009AF31D /* MumbleLogger.m in Sources */ = {isa = PBXBuildFile; fileRef = F2MKLOG001000000009AF31D /* MumbleLogger.m */; };
 		2845A7A4132D9C220034D631 /* MKConnection.m in Sources */ = {isa = PBXBuildFile; fileRef = 2845A789132D9C220034D631 /* MKConnection.m */; };
 		2845A7A5132D9C220034D631 /* MKConnection.m in Sources */ = {isa = PBXBuildFile; fileRef = 2845A789132D9C220034D631 /* MKConnection.m */; };
 		2845A7A8132D9C220034D631 /* MKCryptState_openssl.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2845A78B132D9C220034D631 /* MKCryptState_openssl.mm */; };
@@ -149,6 +147,8 @@
 		BCD11E0D158F40FA00321E06 /* MKChannelGroup.m in Sources */ = {isa = PBXBuildFile; fileRef = BCD11E08158F40FA00321E06 /* MKChannelGroup.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		BCD11E0E158F40FA00321E06 /* MKChannelGroup.m in Sources */ = {isa = PBXBuildFile; fileRef = BCD11E08158F40FA00321E06 /* MKChannelGroup.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		F24EB7C12F3E4AB500904644 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F24EB7C02F3E4AB500904644 /* PrivacyInfo.xcprivacy */; };
+		F2MKLOG002000000009AF31D /* MumbleLogger.m in Sources */ = {isa = PBXBuildFile; fileRef = F2MKLOG001000000009AF31D /* MumbleLogger.m */; };
+		F2MKLOG003000000009AF31D /* MumbleLogger.m in Sources */ = {isa = PBXBuildFile; fileRef = F2MKLOG001000000009AF31D /* MumbleLogger.m */; };
 		F3AA00012F45700100A0B123 /* AVFAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F3AA00022F45700100A0B123 /* AVFAudio.framework */; };
 		F3AA10042F45800100A0B123 /* MKAudioRemoteBusRackBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10022F45800100A0B123 /* MKAudioRemoteBusRackBridge.m */; };
 		F3AA10052F45800100A0B123 /* MKAudioRemoteBusRackBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10022F45800100A0B123 /* MKAudioRemoteBusRackBridge.m */; };
@@ -347,7 +347,6 @@
 		2845A786132D9C220034D631 /* MKAudioOutputUser.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKAudioOutputUser.m; path = src/MKAudioOutputUser.m; sourceTree = SOURCE_ROOT; };
 		2845A787132D9C220034D631 /* MKCertificate.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKCertificate.m; path = src/MKCertificate.m; sourceTree = SOURCE_ROOT; };
 		2845A788132D9C220034D631 /* MKChannel.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKChannel.m; path = src/MKChannel.m; sourceTree = SOURCE_ROOT; };
-				F2MKLOG001000000009AF31D /* MumbleLogger.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MumbleLogger.m; path = "../Source/Classes/SwiftUI/Core/MumbleLogger.m"; sourceTree = SOURCE_ROOT; };
 		2845A789132D9C220034D631 /* MKConnection.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKConnection.m; path = src/MKConnection.m; sourceTree = SOURCE_ROOT; };
 		2845A78B132D9C220034D631 /* MKCryptState_openssl.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; name = MKCryptState_openssl.mm; path = src/MKCryptState_openssl.mm; sourceTree = SOURCE_ROOT; };
 		2845A78C132D9C220034D631 /* MKPacketDataStream.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKPacketDataStream.m; path = src/MKPacketDataStream.m; sourceTree = SOURCE_ROOT; };
@@ -488,6 +487,7 @@
 		F2C0EEB72E0E1F0800B80B44 /* MUBackgroundView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUBackgroundView.m; sourceTree = "<group>"; };
 		F2C0EEB82E0E1F0800B80B44 /* MUHorizontalFlipTransitionDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MUHorizontalFlipTransitionDelegate.h; sourceTree = "<group>"; };
 		F2C0EEB92E0E1F0800B80B44 /* MUHorizontalFlipTransitionDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MUHorizontalFlipTransitionDelegate.m; sourceTree = "<group>"; };
+		F2MKLOG001000000009AF31D /* MumbleLogger.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MumbleLogger.m; path = ../Source/Classes/SwiftUI/Core/MumbleLogger.m; sourceTree = SOURCE_ROOT; };
 		F3AA00022F45700100A0B123 /* AVFAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFAudio.framework; path = System/Library/Frameworks/AVFAudio.framework; sourceTree = SDKROOT; };
 		F3AA10012F45800100A0B123 /* MKAudioRemoteBusRackBridge.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = MKAudioRemoteBusRackBridge.h; path = src/MKAudioRemoteBusRackBridge.h; sourceTree = SOURCE_ROOT; };
 		F3AA10022F45800100A0B123 /* MKAudioRemoteBusRackBridge.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = MKAudioRemoteBusRackBridge.m; path = src/MKAudioRemoteBusRackBridge.m; sourceTree = SOURCE_ROOT; };

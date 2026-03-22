@@ -4644,13 +4644,14 @@
 			};
 			name = BetaDist;
 		};
-		28498F1E138AB6C0000509DD /* BetaDist */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+			28498F1E138AB6C0000509DD /* BetaDist */ = {
+				isa = XCBuildConfiguration;
+				buildSettings = {
+					ENABLE_USER_SCRIPT_SANDBOXING = NO;
+					SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				};
+				name = BetaDist;
 			};
-			name = BetaDist;
-		};
 		28498F1F138AB6C0000509DD /* BetaDist */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -4670,13 +4671,14 @@
 			};
 			name = AppStore;
 		};
-		28A2AEC71478AA0F00F3B83F /* AppStore */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+			28A2AEC71478AA0F00F3B83F /* AppStore */ = {
+				isa = XCBuildConfiguration;
+				buildSettings = {
+					ENABLE_USER_SCRIPT_SANDBOXING = NO;
+					SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				};
+				name = AppStore;
 			};
-			name = AppStore;
-		};
 		28A2AEC81478AA0F00F3B83F /* AppStore */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -4706,20 +4708,22 @@
 			};
 			name = Release;
 		};
-		28F58C51132AF1070053C348 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+			28F58C51132AF1070053C348 /* Debug */ = {
+				isa = XCBuildConfiguration;
+				buildSettings = {
+					ENABLE_USER_SCRIPT_SANDBOXING = NO;
+					SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				};
+				name = Debug;
 			};
-			name = Debug;
-		};
-		28F58C52132AF1070053C348 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+			28F58C52132AF1070053C348 /* Release */ = {
+				isa = XCBuildConfiguration;
+				buildSettings = {
+					ENABLE_USER_SCRIPT_SANDBOXING = NO;
+					SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				};
+				name = Release;
 			};
-			name = Release;
-		};
 		28F58C62132AF1170053C348 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
