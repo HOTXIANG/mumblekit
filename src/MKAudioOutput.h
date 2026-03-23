@@ -8,6 +8,15 @@
 #import "MKAudioOutputUser.h"
 #import "MKAudioDevice.h"
 
+#define MK_SIDECHAIN_MAX_SESSIONS 64
+#define MK_SIDECHAIN_MAX_FRAMES   4096
+
+struct MKSidechainSlot {
+    float      buffer[MK_SIDECHAIN_MAX_FRAMES * 2];
+    unsigned long session;
+    int        valid;
+};
+
 @class MKUser;
 
 typedef void (*MKAudioOutputFloatProcessCallback)(float *samples, NSUInteger frameCount, NSUInteger channels, NSUInteger sampleRate, void *context);
@@ -45,4 +54,13 @@ typedef void (*MKAudioOutputFloatProcessCallback)(float *samples, NSUInteger fra
 
 /// DSP Observability - Query per-track DSP status and I/O levels
 - (NSDictionary *) copyDSPStatusForSession:(NSUInteger)session;
+
+/// Sidechain buffer pool - retrieve pre-fader audio snapshot by source key
+/// Keys: @"session:NNN" (per-user), @"masterBus1", @"masterBus2", @"input"
+- (const float *) sidechainBufferForSourceKey:(NSString *)key
+                                   frameCount:(NSUInteger *)outFrameCount
+                                     channels:(NSUInteger *)outChannels;
+
+/// Set the input track sidechain buffer (called externally by MKAudio)
+- (void) setSidechainInputBuffer:(const float *)buffer frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels;
 @end

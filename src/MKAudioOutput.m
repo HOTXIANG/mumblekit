@@ -56,6 +56,18 @@ typedef struct {
 
     // DSP observability - per-session status
     NSMutableDictionary  *_sessionDSPStatuses;
+
+    // Sidechain buffer pool - pre-allocated, no runtime allocation
+    struct MKSidechainSlot _sidechainUserSlots[MK_SIDECHAIN_MAX_SESSIONS];
+    float    _sidechainMasterBus1[MK_SIDECHAIN_MAX_FRAMES * 2];
+    float    _sidechainMasterBus2[MK_SIDECHAIN_MAX_FRAMES * 2];
+    BOOL     _sidechainMasterBus1Valid;
+    BOOL     _sidechainMasterBus2Valid;
+    const float *_sidechainInputBuffer;
+    NSUInteger   _sidechainInputFrameCount;
+    NSUInteger   _sidechainInputChannels;
+    NSUInteger   _sidechainFrameCount;
+    NSUInteger   _sidechainChannels;
 }
 @end
 
@@ -190,6 +202,15 @@ typedef struct {
         globalVolume = 0.0f;
     }
 
+    // Sidechain: invalidate all slots at start of each cycle
+    for (int si = 0; si < MK_SIDECHAIN_MAX_SESSIONS; si++) {
+        _sidechainUserSlots[si].valid = NO;
+    }
+    _sidechainMasterBus1Valid = NO;
+    _sidechainMasterBus2Valid = NO;
+    _sidechainFrameCount = nsamp;
+    _sidechainChannels = _numChannels;
+
     NSMutableArray *mix = [[NSMutableArray alloc] init];
     NSMutableArray *sidetoneMix = [[NSMutableArray alloc] init];
     NSMutableArray *del = [[NSMutableArray alloc] init];
@@ -276,6 +297,19 @@ typedef struct {
 
             float *userBuffer = [ou buffer];
             NSUInteger sourceChannels = MAX((NSUInteger)1, [ou outputChannels]);
+
+            // Sidechain: capture pre-fader per-user audio
+            if (nsamp <= MK_SIDECHAIN_MAX_FRAMES) {
+                for (int si = 0; si < MK_SIDECHAIN_MAX_SESSIONS; si++) {
+                    if (!_sidechainUserSlots[si].valid) {
+                        _sidechainUserSlots[si].session = sessionID;
+                        _sidechainUserSlots[si].valid = YES;
+                        memcpy(_sidechainUserSlots[si].buffer, userBuffer, sizeof(float) * nsamp * sourceChannels);
+                        break;
+                    }
+                }
+            }
+
             if (trackProcessor != NULL) {
                 trackProcessor(userBuffer, (NSUInteger)nsamp, sourceChannels, (NSUInteger)_mixerFrequency, trackContext);
             }
@@ -297,6 +331,14 @@ typedef struct {
                     o[i*nchan] += sample * str;
                 }
             }
+        }
+
+        // Sidechain: capture pre-processor master bus audio
+        if (nsamp <= MK_SIDECHAIN_MAX_FRAMES) {
+            memcpy(_sidechainMasterBus1, mixBuffer1, bufferBytes);
+            _sidechainMasterBus1Valid = YES;
+            memcpy(_sidechainMasterBus2, mixBuffer2, bufferBytes);
+            _sidechainMasterBus2Valid = YES;
         }
 
         // 分别对两个总线应用各自的处理器
@@ -559,6 +601,60 @@ typedef struct {
         nil];
     os_unfair_lock_unlock(&status->lock);
     return result;
+}
+
+#pragma mark - Sidechain Buffer Pool
+
+- (const float *) sidechainBufferForSourceKey:(NSString *)key
+                                   frameCount:(NSUInteger *)outFrameCount
+                                     channels:(NSUInteger *)outChannels {
+    if (key == nil) return NULL;
+
+    if ([key isEqualToString:@"input"]) {
+        if (_sidechainInputBuffer != NULL && _sidechainInputFrameCount > 0) {
+            *outFrameCount = _sidechainInputFrameCount;
+            *outChannels = _sidechainInputChannels;
+            return _sidechainInputBuffer;
+        }
+        return NULL;
+    }
+
+    if ([key isEqualToString:@"masterBus1"]) {
+        if (_sidechainMasterBus1Valid) {
+            *outFrameCount = _sidechainFrameCount;
+            *outChannels = _sidechainChannels;
+            return _sidechainMasterBus1;
+        }
+        return NULL;
+    }
+
+    if ([key isEqualToString:@"masterBus2"]) {
+        if (_sidechainMasterBus2Valid) {
+            *outFrameCount = _sidechainFrameCount;
+            *outChannels = _sidechainChannels;
+            return _sidechainMasterBus2;
+        }
+        return NULL;
+    }
+
+    if ([key hasPrefix:@"session:"]) {
+        NSUInteger session = (NSUInteger)[[key substringFromIndex:8] integerValue];
+        for (int si = 0; si < MK_SIDECHAIN_MAX_SESSIONS; si++) {
+            if (_sidechainUserSlots[si].valid && _sidechainUserSlots[si].session == session) {
+                *outFrameCount = _sidechainFrameCount;
+                *outChannels = _sidechainChannels;
+                return _sidechainUserSlots[si].buffer;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+- (void) setSidechainInputBuffer:(const float *)buffer frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels {
+    _sidechainInputBuffer = buffer;
+    _sidechainInputFrameCount = frameCount;
+    _sidechainInputChannels = channels;
 }
 
 @end
