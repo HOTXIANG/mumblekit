@@ -139,6 +139,7 @@ final class MKAudioRemoteTrackRack: NSObject {
             // Sidechain path: connect second source to AU bus 1 if AU supports it and source is configured
             if let scKey = sidechainSourceKey, !scKey.isEmpty, auAudioUnit.inputBusses.count > 1 {
                 let scBus = auAudioUnit.inputBusses[1]
+
                 // Try to set sidechain format (same as main input, fallback to mono)
                 let scFormat: AVAudioFormat
                 do {
@@ -166,6 +167,29 @@ final class MKAudioRemoteTrackRack: NSObject {
                     engine.attach(sidechainSourceNode!)
                     engine.connect(sidechainSourceNode!, to: audioUnit, fromBus: 0, toBus: 1, format: scFormat)
                     print("[Sidechain] AU '\(audioUnit.auAudioUnit.componentName ?? "Unknown")' configured with sidechain source='\(scKey)', bus1 format=\(scFormat.channelCount)ch @ \(Int(scFormat.sampleRate))Hz")
+
+                    // Scan AU parameters for sidechain-related controls and log them
+                    if let parameterTree = auAudioUnit.parameterTree {
+                        var foundSidechainParam = false
+                        for param in parameterTree.allParameters {
+                            // AUParameter doesn't have 'name' in Swift, use KVC to get parameter info
+                            let paramName = (param.value(forKey: "name") as? String ?? "unknown_\(param.address)").lowercased()
+                            if paramName.contains("sidechain") || paramName.contains("sc") || paramName.contains("external") {
+                                let displayString = (param.value(forKey: "name") as? String) ?? "Param_\(param.address)"
+                                print("[Sidechain] Found parameter: '\(displayString)' (address=\(param.address)) = \(param.value) (range: \(param.minValue)-\(param.maxValue))")
+                                foundSidechainParam = true
+                                // For plugins that need explicit "External" sidechain mode, set to max value
+                                if paramName.contains("source") || paramName.contains("mode") || paramName.contains("select") {
+                                    // Try setting to max value (often means "External" or "1")
+                                    param.value = param.maxValue
+                                    print("[Sidechain] Set '\(displayString)' to \(param.maxValue) (external mode)")
+                                }
+                            }
+                        }
+                        if !foundSidechainParam {
+                            print("[Sidechain] No sidechain-related parameters found in AU parameter tree")
+                        }
+                    }
                 }
             } else {
                 if let scKey = sidechainSourceKey, !scKey.isEmpty {
