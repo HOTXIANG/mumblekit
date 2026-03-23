@@ -1351,19 +1351,30 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 }
 
 - (void) setRemoteTrackAudioUnitChain:(NSArray *)audioUnits forSession:(NSUInteger)session {
-    MKLogDebug(Audio, @"setRemoteTrackAudioUnitChain: session=%lu count=%lu", (unsigned long)session, (unsigned long)[audioUnits count]);
+    MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain: session=%lu count=%lu", (unsigned long)session, (unsigned long)[audioUnits count]);
     dispatch_async(_accessQueue, ^{
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu starting...", (unsigned long)session);
+
         MKAudioRemoteTrackRackBridge *bridge = [self remoteTrackRackBridgeForSessionLocked:session createIfNeeded:YES];
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu bridge=%p", (unsigned long)session, bridge);
+
         NSUInteger sampleRate = [self currentOutputProcessingSampleRateLocked];
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu sampleRate=%lu", (unsigned long)session, (unsigned long)sampleRate);
+
         [bridge updateSampleRate:sampleRate];
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu calling updateAudioUnitChain...", (unsigned long)session);
+
         [bridge updateAudioUnitChain:audioUnits sampleRate:sampleRate];
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu updateAudioUnitChain returned", (unsigned long)session);
 
         if (_audioOutput != nil) {
             [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess context:bridge forSession:session];
-            MKLogDebug(Audio, @"setRemoteTrackAudioUnitChain: registered processor for session=%lu bridge=%p", (unsigned long)session, bridge);
+            MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu registered processor", (unsigned long)session);
         } else {
-            MKLogWarning(Audio, @"setRemoteTrackAudioUnitChain: _audioOutput is nil, cannot register processor for session=%lu", (unsigned long)session);
+            MKLogWarning(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu _audioOutput is nil", (unsigned long)session);
         }
+
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu completed", (unsigned long)session);
     });
 }
 
