@@ -4,6 +4,9 @@ import AVFoundation
 @objc(MKAudioRemoteBusRack)
 @objcMembers
 final class MKAudioRemoteBusRack: NSObject {
+    // Sidechain provider callback type
+    public typealias SidechainProvider = (_ key: String) -> (UnsafePointer<Float>, Int, Int)?
+
     private final class StageHost {
         let audioUnit: AVAudioUnit
         let auAudioUnit: AUAudioUnit
@@ -19,15 +22,26 @@ final class MKAudioRemoteBusRack: NSObject {
         private var inputBuffer: AVAudioPCMBuffer
         private var outputBuffer: AVAudioPCMBuffer!
 
+        // Sidechain properties
+        var sidechainSourceKey: String?
+        var sidechainProvider: SidechainProvider?
+        private var sidechainSourceNode: AVAudioSourceNode?
+        private var sidechainBuffer: AVAudioPCMBuffer?
+        private var sidechainPullOffset: Int = 0
+
         init(audioUnit: AVAudioUnit,
              wetDryMix: Float,
              preferredChannels: AVAudioChannelCount,
              sampleRate: Double,
-             hostBufferFrames: Int) throws {
+             hostBufferFrames: Int,
+             sidechainSourceKey: String? = nil,
+             sidechainProvider: SidechainProvider? = nil) throws {
             self.audioUnit = audioUnit
             self.auAudioUnit = audioUnit.auAudioUnit
             self.wetDryMix = min(max(wetDryMix, 0.0), 1.0)
             self.engine = AVAudioEngine()
+            self.sidechainSourceKey = sidechainSourceKey
+            self.sidechainProvider = sidechainProvider
 
             let selectedFormats = try StageHost.configureFormats(
                 for: audioUnit.auAudioUnit,
@@ -49,6 +63,9 @@ final class MKAudioRemoteBusRack: NSObject {
         }
 
         deinit {
+            // Clear sidechain references
+            sidechainSourceNode = nil
+            sidechainBuffer = nil
             engine.stop()
             engine.disableManualRenderingMode()
             if auAudioUnit.renderResourcesAllocated {
@@ -127,7 +144,8 @@ final class MKAudioRemoteBusRack: NSObject {
             let outLayout = configuredOutputFormat.isInterleaved ? "i" : "ni"
             let manualFormat = engine.manualRenderingFormat
             let manualLayout = manualFormat.isInterleaved ? "i" : "ni"
-            return "in=\(configuredInputFormat.channelCount)ch@\(Int(configuredInputFormat.sampleRate))/\(inLayout) out=\(configuredOutputFormat.channelCount)ch@\(Int(configuredOutputFormat.sampleRate))/\(outLayout) manual=\(manualFormat.channelCount)ch@\(Int(manualFormat.sampleRate))/\(manualLayout) max=\(maximumFramesToRender)"
+            let scInfo = sidechainSourceKey.map { " sc=\($0)" } ?? ""
+            return "in=\(configuredInputFormat.channelCount)ch@\(Int(configuredInputFormat.sampleRate))/\(inLayout) out=\(configuredOutputFormat.channelCount)ch@\(Int(configuredOutputFormat.sampleRate))/\(outLayout) manual=\(manualFormat.channelCount)ch@\(Int(manualFormat.sampleRate))/\(manualLayout) max=\(maximumFramesToRender)\(scInfo)"
         }
 
         private func configureEngine() throws {
@@ -144,6 +162,39 @@ final class MKAudioRemoteBusRack: NSObject {
             engine.attach(audioUnit)
             engine.connect(sourceNode, to: audioUnit, format: configuredInputFormat)
             engine.connect(audioUnit, to: engine.mainMixerNode, format: configuredOutputFormat)
+
+            // Sidechain path: connect second source to AU bus 1 if AU supports it and source is configured
+            if let scKey = sidechainSourceKey, !scKey.isEmpty, auAudioUnit.inputBusses.count > 1 {
+                let scBus = auAudioUnit.inputBusses[1]
+                // Try to set sidechain format (same as main input, fallback to mono)
+                let scFormat: AVAudioFormat
+                do {
+                    try scBus.setFormat(configuredInputFormat)
+                    scFormat = scBus.format
+                } catch {
+                    let monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                                    sampleRate: configuredInputFormat.sampleRate,
+                                                    channels: 1, interleaved: true)!
+                    do {
+                        try scBus.setFormat(monoFormat)
+                        scFormat = scBus.format
+                    } catch {
+                        scFormat = scBus.format // use whatever the AU defaults to
+                    }
+                }
+
+                if let scInputBuf = AVAudioPCMBuffer(pcmFormat: scFormat, frameCapacity: maximumFramesToRender) {
+                    sidechainBuffer = scInputBuf
+
+                    sidechainSourceNode = AVAudioSourceNode { [unowned self] _, _, frameCount, audioBufferList -> OSStatus in
+                        self.pullSidechainData(frameCount: Int(frameCount), into: audioBufferList)
+                        return noErr
+                    }
+                    engine.attach(sidechainSourceNode!)
+                    engine.connect(sidechainSourceNode!, to: audioUnit, fromBus: 0, toBus: 1, format: scFormat)
+                }
+            }
+
             try engine.enableManualRenderingMode(.offline,
                                                  format: configuredOutputFormat,
                                                  maximumFrameCount: maximumFramesToRender)
@@ -296,6 +347,64 @@ final class MKAudioRemoteBusRack: NSObject {
                     memset(targetData.advanced(by: copyBytes), 0, totalBytes - copyBytes)
                 }
                 targetBuffers[bufferIndex].mDataByteSize = UInt32(totalBytes)
+            }
+        }
+
+        private func pullSidechainData(frameCount: Int, into audioBufferList: UnsafeMutablePointer<AudioBufferList>) {
+            let targetBuffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
+            guard let scKey = sidechainSourceKey,
+                  let provider = sidechainProvider,
+                  let (srcPtr, srcFrames, srcChannels) = provider(scKey) else {
+                // No source available — fill with silence
+                for bufIdx in 0..<targetBuffers.count {
+                    guard let data = targetBuffers[bufIdx].mData else { continue }
+                    memset(data, 0, Int(targetBuffers[bufIdx].mDataByteSize))
+                }
+                return
+            }
+
+            // Copy source data into sidechain buffer, handling channel mismatch
+            guard let scBuf = sidechainBuffer else {
+                for bufIdx in 0..<targetBuffers.count {
+                    guard let data = targetBuffers[bufIdx].mData else { continue }
+                    memset(data, 0, Int(targetBuffers[bufIdx].mDataByteSize))
+                }
+                return
+            }
+
+            let framesToCopy = min(frameCount, srcFrames)
+            let scChannels = Int(scBuf.format.channelCount)
+            let bytesPerFrame = MemoryLayout<Float>.size
+
+            if scBuf.format.isInterleaved {
+                guard let targetData = targetBuffers[0].mData else { return }
+                let dst = targetData.assumingMemoryBound(to: Float.self)
+                for f in 0..<framesToCopy {
+                    for c in 0..<scChannels {
+                        let srcCh = min(c, srcChannels - 1)
+                        dst[f * scChannels + c] = srcPtr[f * srcChannels + srcCh]
+                    }
+                }
+                // Zero remaining
+                if framesToCopy < frameCount {
+                    memset(targetData.advanced(by: framesToCopy * scChannels * bytesPerFrame), 0,
+                           (frameCount - framesToCopy) * scChannels * bytesPerFrame)
+                }
+                targetBuffers[0].mDataByteSize = UInt32(frameCount * scChannels * bytesPerFrame)
+            } else {
+                for bufIdx in 0..<targetBuffers.count {
+                    guard let data = targetBuffers[bufIdx].mData else { continue }
+                    let dst = data.assumingMemoryBound(to: Float.self)
+                    let srcCh = min(bufIdx, srcChannels - 1)
+                    for f in 0..<framesToCopy {
+                        dst[f] = srcPtr[f * srcChannels + srcCh]
+                    }
+                    if framesToCopy < frameCount {
+                        memset(data.advanced(by: framesToCopy * bytesPerFrame), 0,
+                               (frameCount - framesToCopy) * bytesPerFrame)
+                    }
+                    targetBuffers[bufIdx].mDataByteSize = UInt32(frameCount * bytesPerFrame)
+                }
             }
         }
 
@@ -482,6 +591,7 @@ final class MKAudioRemoteBusRack: NSObject {
     private struct StageConfiguration {
         let processor: StageProcessor
         let wetDryMix: Float
+        let sidechainSourceKey: String?
     }
 
     private let stateLock = NSLock()
@@ -493,6 +603,9 @@ final class MKAudioRemoteBusRack: NSObject {
     private var configuredSampleRate: Double = 48000.0
     private var inputPeak: Float = 0.0
     private var outputPeak: Float = 0.0
+
+    // Sidechain provider callback
+    public var sidechainProvider: SidechainProvider? = nil
 
     func setPreviewGain(_ gain: Float, enabled: Bool) {
         stateLock.lock()
@@ -653,23 +766,26 @@ final class MKAudioRemoteBusRack: NSObject {
         var normalized: [StageConfiguration] = []
         for element in stages {
             if let audioUnit = element as? AVAudioUnit {
-                normalized.append(StageConfiguration(processor: .audioUnit(audioUnit), wetDryMix: 1.0))
+                normalized.append(StageConfiguration(processor: .audioUnit(audioUnit), wetDryMix: 1.0, sidechainSourceKey: nil))
                 continue
             }
             if let vst3Host = element as? MKVST3PluginHost {
-                normalized.append(StageConfiguration(processor: .vst3(vst3Host), wetDryMix: 1.0))
+                normalized.append(StageConfiguration(processor: .vst3(vst3Host), wetDryMix: 1.0, sidechainSourceKey: nil))
                 continue
             }
             guard let dictionary = element as? NSDictionary else {
                 continue
             }
             let wetDryMix = (dictionary["mix"] as? NSNumber)?.floatValue ?? 1.0
+            let sidechainSource = dictionary["sidechainSource"] as? String
             if let audioUnit = dictionary["audioUnit"] as? AVAudioUnit {
                 normalized.append(StageConfiguration(processor: .audioUnit(audioUnit),
-                                                     wetDryMix: min(max(wetDryMix, 0.0), 1.0)))
+                                                     wetDryMix: min(max(wetDryMix, 0.0), 1.0),
+                                                     sidechainSourceKey: sidechainSource))
             } else if let vst3Host = dictionary["vst3Host"] as? MKVST3PluginHost {
                 normalized.append(StageConfiguration(processor: .vst3(vst3Host),
-                                                     wetDryMix: min(max(wetDryMix, 0.0), 1.0)))
+                                                     wetDryMix: min(max(wetDryMix, 0.0), 1.0),
+                                                     sidechainSourceKey: sidechainSource))
             }
         }
         return normalized
@@ -687,7 +803,9 @@ final class MKAudioRemoteBusRack: NSObject {
                                              wetDryMix: configuration.wetDryMix,
                                              preferredChannels: 2,
                                              sampleRate: sampleRate,
-                                             hostBufferFrames: hostBufferFrames)
+                                             hostBufferFrames: hostBufferFrames,
+                                             sidechainSourceKey: configuration.sidechainSourceKey,
+                                             sidechainProvider: sidechainProvider)
                     hosts.append(.audioUnit(host))
                 case .vst3(let vst3Host):
                     let host = try VST3StageHost(pluginHost: vst3Host,
