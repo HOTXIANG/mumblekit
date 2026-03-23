@@ -80,6 +80,13 @@ typedef struct _MKAudioPreviewGainProcessorState {
     
     // P0 修复：使用串行队列替代 @synchronized，提升性能
     dispatch_queue_t         _accessQueue;
+
+    // Input sidechain ping-pong buffer (written by input thread, read by output thread)
+    float    *_sidechainInputPingPong[2];  // two pre-allocated buffers
+    volatile int32_t _sidechainInputWriteIndex;  // 0 or 1, atomically swapped
+    NSUInteger _sidechainInputPPFrameCount;
+    NSUInteger _sidechainInputPPChannels;
+    NSUInteger _sidechainInputPPSampleRate;
 }
 #if TARGET_OS_OSX == 1
 - (void)startObservingDefaultInputDeviceChanges;
@@ -302,7 +309,15 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         _remoteBus2PreviewState.enabled = NO;
         _remoteTrackPreviewStates = [[NSMutableDictionary alloc] init];
         _remoteTrackRackBridges = [[NSMutableDictionary alloc] init];
-        
+
+        // Input sidechain ping-pong buffer allocation
+        _sidechainInputPingPong[0] = calloc(MK_SIDECHAIN_MAX_FRAMES * 2, sizeof(float));
+        _sidechainInputPingPong[1] = calloc(MK_SIDECHAIN_MAX_FRAMES * 2, sizeof(float));
+        _sidechainInputWriteIndex = 0;
+        _sidechainInputPPFrameCount = 0;
+        _sidechainInputPPChannels = 0;
+        _sidechainInputPPSampleRate = 0;
+
 #if TARGET_OS_IOS
         // 注册通知监听 (替代旧的 C 回调)
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -356,7 +371,11 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     _remoteBusRackBridge2 = nil;
     [_remoteTrackRackBridges release];
     _remoteTrackRackBridges = nil;
-    
+
+    // Input sidechain ping-pong buffer free
+    free(_sidechainInputPingPong[0]);
+    free(_sidechainInputPingPong[1]);
+
     [super dealloc];
 }
 
@@ -1405,6 +1424,28 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         }
     });
     return status;
+}
+
+#pragma mark - Input Sidechain Ping-Pong Buffer
+
+- (void) writeSidechainInputSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels {
+    if (samples == NULL || frameCount == 0 || frameCount > MK_SIDECHAIN_MAX_FRAMES) return;
+    int32_t writeIdx = _sidechainInputWriteIndex;
+    memcpy(_sidechainInputPingPong[writeIdx], samples, frameCount * channels * sizeof(float));
+    _sidechainInputPPFrameCount = frameCount;
+    _sidechainInputPPChannels = channels;
+    _sidechainInputPPSampleRate = SAMPLE_RATE;
+    // Atomic swap: readers now see the freshly written buffer
+    OSAtomicCompareAndSwap32(writeIdx, 1 - writeIdx, &_sidechainInputWriteIndex);
+}
+
+- (const float *) readSidechainInputBufferWithFrameCount:(NSUInteger *)outFrameCount channels:(NSUInteger *)outChannels {
+    if (_sidechainInputPPFrameCount == 0) return NULL;
+    // Read from the buffer NOT currently being written to
+    int32_t readIdx = 1 - _sidechainInputWriteIndex;
+    *outFrameCount = _sidechainInputPPFrameCount;
+    *outChannels = _sidechainInputPPChannels;
+    return _sidechainInputPingPong[readIdx];
 }
 
 @end

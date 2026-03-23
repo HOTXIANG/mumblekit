@@ -296,4 +296,11 @@ typedef struct _MKAudioSettings {
 /// DSP Observability - Query per-session DSP status and I/O levels.
 - (NSDictionary *)copyDSPStatus:(NSUInteger)session;
 
+/// Input sidechain ping-pong buffer API
+/// Called by MKAudioInput on input thread to write mic signal for sidechain use
+- (void) writeSidechainInputSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels;
+
+/// Called by MKAudioOutput on output thread to get the latest input sidechain buffer
+- (const float *) readSidechainInputBufferWithFrameCount:(NSUInteger *)outFrameCount channels:(NSUInteger *)outChannels;
+
 @end

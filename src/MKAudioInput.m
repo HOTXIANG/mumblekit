@@ -5,8 +5,10 @@
 #import <MumbleKit/MKServerModel.h>
 #import <MumbleKit/MKVersion.h>
 #import <MumbleKit/MKConnection.h>
+#import <MumbleKit/MKAudio.h>
 #import "MKPacketDataStream.h"
 #import "MKAudioInput.h"
+#import "MKAudioOutput.h"
 #import "MKAudioOutputSidetone.h"
 #import "MKAudioDevice.h"
 #import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
@@ -503,7 +505,20 @@
             frame[i] = (short)val;
         }
     }
-    
+
+    // Capture pre-AU mic signal for sidechain (convert Int16 → Float)
+    {
+        MKAudio *audio = [MKAudio sharedAudio];
+        if (audio != nil) {
+            float scBuf[MK_SIDECHAIN_MAX_FRAMES * 2];
+            NSUInteger scCount = MIN((NSUInteger)frameSize, (NSUInteger)MK_SIDECHAIN_MAX_FRAMES);
+            for (NSUInteger si = 0; si < scCount * encodeChannels; si++) {
+                scBuf[si] = (float)frame[si] / 32768.0f;
+            }
+            [audio writeSidechainInputSamples:scBuf frameCount:scCount channels:encodeChannels];
+        }
+    }
+
     if (_inputTrackProcessor != NULL) {
         _inputTrackProcessor(frame, (NSUInteger)frameSize, (NSUInteger)encodeChannels, (NSUInteger)sampleRate, _inputTrackProcessorContext);
     }

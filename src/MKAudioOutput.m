@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file.
 
 #import "MKUtils.h"
+#import <MumbleKit/MKAudio.h>
 #import "MKAudioOutput.h"
 #import "MKAudioOutputSpeech.h"
 #import "MKAudioOutputUser.h"
@@ -210,6 +211,16 @@ typedef struct {
     _sidechainMasterBus2Valid = NO;
     _sidechainFrameCount = nsamp;
     _sidechainChannels = _numChannels;
+
+    // Update input sidechain from ping-pong buffer
+    {
+        MKAudio *audio = [MKAudio sharedAudio];
+        if (audio != nil) {
+            NSUInteger scFrames = 0, scChannels = 0;
+            const float *scBuf = [audio readSidechainInputBufferWithFrameCount:&scFrames channels:&scChannels];
+            [self setSidechainInputBuffer:scBuf frameCount:scFrames channels:scChannels];
+        }
+    }
 
     NSMutableArray *mix = [[NSMutableArray alloc] init];
     NSMutableArray *sidetoneMix = [[NSMutableArray alloc] init];
