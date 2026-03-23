@@ -255,11 +255,19 @@ typedef struct _MKAudioSettings {
 /// in order after preview gain and before encode/transmit.
 - (void) setInputTrackAudioUnitChain:(NSArray *)audioUnits;
 
-/// Configure true Audio Unit DSP chain for remote bus processing.
+/// Configure true Audio Unit DSP chain for remote bus 1 processing.
 /// Each entry may be an AVAudioUnit or a stage descriptor dictionary with
 /// keys @"audioUnit" and @"mix" (0.0 dry to 1.0 wet). Stages are applied
 /// in order after remote mix and before output quantization.
 - (void) setRemoteBusAudioUnitChain:(NSArray *)audioUnits;
+
+/// Configure true Audio Unit DSP chain for remote bus 2 processing.
+- (void) setRemoteBus2AudioUnitChain:(NSArray *)audioUnits;
+- (void) setRemoteBus2PreviewGain:(float)gain enabled:(BOOL)enabled;
+
+/// 设置用户输出路由到哪个总线（0=Bus1 默认, 1=Bus2）
+- (void) setBusAssignment:(NSUInteger)busIndex forSession:(NSUInteger)session;
+- (NSUInteger) busAssignmentForSession:(NSUInteger)session;
 
 /// Configure true Audio Unit DSP chain for a specific remote session.
 /// Each entry may be an AVAudioUnit or a stage descriptor dictionary with

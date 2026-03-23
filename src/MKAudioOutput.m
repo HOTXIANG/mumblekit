@@ -50,6 +50,9 @@ typedef struct {
     NSMutableDictionary  *_remoteTrackProcessorContexts;
     MKAudioOutputFloatProcessCallback _remoteBusProcessor;
     void                 *_remoteBusProcessorContext;
+    MKAudioOutputFloatProcessCallback _remoteBus2Processor;
+    void                 *_remoteBus2ProcessorContext;
+    NSMutableDictionary  *_sessionBusAssignment;  // session -> NSNumber(0 or 1)
 
     // DSP observability - per-session status
     NSMutableDictionary  *_sessionDSPStatuses;
@@ -75,6 +78,9 @@ typedef struct {
         _remoteTrackProcessorContexts = [[NSMutableDictionary alloc] init];
         _remoteBusProcessor = NULL;
         _remoteBusProcessorContext = NULL;
+        _remoteBus2Processor = NULL;
+        _remoteBus2ProcessorContext = NULL;
+        _sessionBusAssignment = [[NSMutableDictionary alloc] init];
         _sessionDSPStatuses = [[NSMutableDictionary alloc] init];
 
         _mixerFrequency = [_device outputSampleRate];
@@ -131,6 +137,7 @@ typedef struct {
     [_remoteSessionOrder release];
     [_remoteTrackProcessors release];
     [_remoteTrackProcessorContexts release];
+    [_sessionBusAssignment release];
     [_sessionDSPStatuses release];
     [super dealloc];
 }
@@ -235,8 +242,11 @@ typedef struct {
         [_mixerInfoLock unlock];
     }
     
-    float *mixBuffer = alloca(sizeof(float)*_numChannels*nsamp);
-    memset(mixBuffer, 0, sizeof(float)*_numChannels*nsamp);
+    const size_t bufferBytes = sizeof(float) * _numChannels * nsamp;
+    float *mixBuffer1 = alloca(bufferBytes);
+    float *mixBuffer2 = alloca(bufferBytes);
+    memset(mixBuffer1, 0, bufferBytes);
+    memset(mixBuffer2, 0, bufferBytes);
 
     if ([mix count] > 0 || [sidetoneMix count] > 0) {
         for (MKAudioOutputUser *ou in mix) {
@@ -270,11 +280,15 @@ typedef struct {
                 trackProcessor(userBuffer, (NSUInteger)nsamp, sourceChannels, (NSUInteger)_mixerFrequency, trackContext);
             }
 
+            // 根据 busAssignment 路由到 mixBuffer1 或 mixBuffer2
+            NSNumber *busAssign = [_sessionBusAssignment objectForKey:sessionKey];
+            float *targetBuffer = (busAssign != nil && [busAssign unsignedIntegerValue] == 1) ? mixBuffer2 : mixBuffer1;
+
             for (s = 0; s < nchan; ++s) {
                 const float str = _speakerVolume[s] * volMultiplier * globalVolume;
                 NSUInteger sourceChannelIndex = sourceChannels > 1 ? MIN((NSUInteger)s, sourceChannels - 1) : 0;
 
-                float * restrict o = (float *)mixBuffer + s;
+                float * restrict o = targetBuffer + s;
                 for (i = 0; i < nsamp; ++i) {
                     float sample = userBuffer[i * sourceChannels + sourceChannelIndex];
                     if (nchan == 1 && sourceChannels > 1) {
@@ -285,8 +299,12 @@ typedef struct {
             }
         }
 
+        // 分别对两个总线应用各自的处理器
         if (_remoteBusProcessor != NULL && [mix count] > 0) {
-            _remoteBusProcessor(mixBuffer, (NSUInteger)nsamp, (NSUInteger)_numChannels, (NSUInteger)_mixerFrequency, _remoteBusProcessorContext);
+            _remoteBusProcessor(mixBuffer1, (NSUInteger)nsamp, (NSUInteger)_numChannels, (NSUInteger)_mixerFrequency, _remoteBusProcessorContext);
+        }
+        if (_remoteBus2Processor != NULL && [mix count] > 0) {
+            _remoteBus2Processor(mixBuffer2, (NSUInteger)nsamp, (NSUInteger)_numChannels, (NSUInteger)_mixerFrequency, _remoteBus2ProcessorContext);
         }
 
         for (MKAudioOutputUser *ou in sidetoneMix) {
@@ -295,7 +313,7 @@ typedef struct {
             for (s = 0; s < nchan; ++s) {
                 const float str = _speakerVolume[s] * globalVolume;
                 NSUInteger sourceChannelIndex = sourceChannels > 1 ? MIN((NSUInteger)s, sourceChannels - 1) : 0;
-                float * restrict o = (float *)mixBuffer + s;
+                float * restrict o = mixBuffer1 + s;
                 for (i = 0; i < nsamp; ++i) {
                     float sample = userBuffer[i * sourceChannels + sourceChannelIndex];
                     if (nchan == 1 && sourceChannels > 1) {
@@ -306,14 +324,16 @@ typedef struct {
             }
         }
 
+        // 合并两个总线到最终输出
         short *outputBuffer = (short *)frames;
         for (i = 0; i < nsamp * _numChannels; ++i) {
-            if (mixBuffer[i] >= 1.0f) {
+            float combined = mixBuffer1[i] + mixBuffer2[i];
+            if (combined >= 1.0f) {
                 outputBuffer[i] = 32767;
-            } else if (mixBuffer[i] < -1.0f) {
+            } else if (combined < -1.0f) {
                 outputBuffer[i] = -32768;
             } else {
-                outputBuffer[i] = mixBuffer[i] * 32768.0f;
+                outputBuffer[i] = combined * 32768.0f;
             }
         }
     } else {
@@ -365,10 +385,10 @@ typedef struct {
         [_outputLock lock];
         [_outputs removeObjectForKey:sessionKey];
         [_remoteSessionOrder removeObject:sessionKey];
-        [_remoteTrackProcessors removeObjectForKey:sessionKey];
-        [_remoteTrackProcessorContexts removeObjectForKey:sessionKey];
-        [_sessionVolumes removeObjectForKey:sessionKey];
-        [_sessionMutes removeObjectForKey:sessionKey];
+        // 注意：不清除 _remoteTrackProcessors / _remoteTrackProcessorContexts /
+        // _sessionVolumes / _sessionMutes —— 这些是用户级持久设置，
+        // 应在 VAD 静默→重新说话周期间保留。
+        // 它们由 MKAudio 层显式管理（setRemoteTrackAudioUnitChain / clearRemoteTrack 等）。
         [_outputLock unlock];
     }
 }
@@ -469,6 +489,35 @@ typedef struct {
     _remoteBusProcessor = NULL;
     _remoteBusProcessorContext = NULL;
     [_outputLock unlock];
+}
+
+- (void) setRemoteBus2Processor:(MKAudioOutputFloatProcessCallback)processor context:(void *)context {
+    [_outputLock lock];
+    _remoteBus2Processor = processor;
+    _remoteBus2ProcessorContext = context;
+    [_outputLock unlock];
+}
+
+- (void) clearRemoteBus2Processor {
+    [_outputLock lock];
+    _remoteBus2Processor = NULL;
+    _remoteBus2ProcessorContext = NULL;
+    [_outputLock unlock];
+}
+
+- (void) setBusAssignment:(NSUInteger)busIndex forSession:(NSUInteger)session {
+    NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
+    [_outputLock lock];
+    [_sessionBusAssignment setObject:[NSNumber numberWithUnsignedInteger:busIndex] forKey:sessionKey];
+    [_outputLock unlock];
+}
+
+- (NSUInteger) busAssignmentForSession:(NSUInteger)session {
+    NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
+    [_outputLock lock];
+    NSNumber *assignment = [_sessionBusAssignment objectForKey:sessionKey];
+    [_outputLock unlock];
+    return assignment ? [assignment unsignedIntegerValue] : 0;
 }
 
 - (NSArray *) copyRemoteSessionOrder {

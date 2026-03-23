@@ -65,6 +65,8 @@ typedef struct _MKAudioPreviewGainProcessorState {
     MKAudioPreviewGainProcessorState _remoteBusPreviewState;
     MKAudioInputRackBridge *_inputTrackRackBridge;
     MKAudioRemoteBusRackBridge *_remoteBusRackBridge;
+    MKAudioRemoteBusRackBridge *_remoteBusRackBridge2;
+    MKAudioPreviewGainProcessorState _remoteBus2PreviewState;
     NSMutableDictionary      *_remoteTrackPreviewStates;
     NSMutableDictionary      *_remoteTrackRackBridges;
     NSUInteger               _pluginHostBufferFrames;
@@ -295,6 +297,9 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         _pluginHostBufferFrames = 256;
         _inputTrackRackBridge = [[MKAudioInputRackBridge alloc] init];
         _remoteBusRackBridge = [[MKAudioRemoteBusRackBridge alloc] init];
+        _remoteBusRackBridge2 = [[MKAudioRemoteBusRackBridge alloc] init];
+        _remoteBus2PreviewState.gain = 1.0f;
+        _remoteBus2PreviewState.enabled = NO;
         _remoteTrackPreviewStates = [[NSMutableDictionary alloc] init];
         _remoteTrackRackBridges = [[NSMutableDictionary alloc] init];
         
@@ -347,6 +352,8 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     _inputTrackRackBridge = nil;
     [_remoteBusRackBridge release];
     _remoteBusRackBridge = nil;
+    [_remoteBusRackBridge2 release];
+    _remoteBusRackBridge2 = nil;
     [_remoteTrackRackBridges release];
     _remoteTrackRackBridges = nil;
     
@@ -806,6 +813,10 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         [_remoteBusRackBridge updatePreviewGain:_remoteBusPreviewState.gain enabled:_remoteBusPreviewState.enabled];
         [_remoteBusRackBridge updateSampleRate:[_audioOutput outputSampleRate]];
         [_audioOutput setRemoteBusProcessor:MKAudioRemoteBusRackBridgeProcess context:_remoteBusRackBridge];
+        [_remoteBusRackBridge2 updateHostBufferFrames:_pluginHostBufferFrames];
+        [_remoteBusRackBridge2 updatePreviewGain:_remoteBus2PreviewState.gain enabled:_remoteBus2PreviewState.enabled];
+        [_remoteBusRackBridge2 updateSampleRate:[_audioOutput outputSampleRate]];
+        [_audioOutput setRemoteBus2Processor:MKAudioRemoteBusRackBridgeProcess context:_remoteBusRackBridge2];
         [self rebindRemoteTrackProcessorsToOutputLocked];
         
         if (settingsSnapshot.enableSideTone) {
@@ -1006,6 +1017,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         _pluginHostBufferFrames = normalized;
         [_inputTrackRackBridge updateHostBufferFrames:normalized];
         [_remoteBusRackBridge updateHostBufferFrames:normalized];
+        [_remoteBusRackBridge2 updateHostBufferFrames:normalized];
         for (MKAudioRemoteTrackRackBridge *bridge in [_remoteTrackRackBridges allValues]) {
             [bridge updateHostBufferFrames:normalized];
         }
@@ -1183,6 +1195,53 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     });
 }
 
+- (void) setRemoteBus2AudioUnitChain:(NSArray *)audioUnits {
+    dispatch_async(_accessQueue, ^{
+        NSUInteger sampleRate = SAMPLE_RATE;
+        if (_audioOutput != nil) {
+            NSUInteger outputSampleRate = [_audioOutput outputSampleRate];
+            if (outputSampleRate > 0) {
+                sampleRate = outputSampleRate;
+            }
+        } else if (_audioDevice != nil) {
+            int outputSampleRate = [_audioDevice outputSampleRate];
+            if (outputSampleRate > 0) {
+                sampleRate = (NSUInteger)outputSampleRate;
+            }
+        }
+        [_remoteBusRackBridge2 updateAudioUnitChain:audioUnits sampleRate:sampleRate];
+    });
+}
+
+- (void) setRemoteBus2PreviewGain:(float)gain enabled:(BOOL)enabled {
+    if (gain < 0.0f) {
+        gain = 0.0f;
+    }
+    dispatch_async(_accessQueue, ^{
+        _remoteBus2PreviewState.gain = gain;
+        _remoteBus2PreviewState.enabled = enabled;
+        [_remoteBusRackBridge2 updatePreviewGain:gain enabled:enabled];
+    });
+}
+
+- (void) setBusAssignment:(NSUInteger)busIndex forSession:(NSUInteger)session {
+    dispatch_async(_accessQueue, ^{
+        if (_audioOutput != nil) {
+            [_audioOutput setBusAssignment:busIndex forSession:session];
+        }
+    });
+}
+
+- (NSUInteger) busAssignmentForSession:(NSUInteger)session {
+    __block NSUInteger result = 0;
+    dispatch_sync(_accessQueue, ^{
+        if (_audioOutput != nil) {
+            result = [_audioOutput busAssignmentForSession:session];
+        }
+    });
+    return result;
+}
+
 - (void) setRemoteTrackPreviewGain:(float)gain enabled:(BOOL)enabled forSession:(NSUInteger)session {
     if (gain < 0.0f) {
         gain = 0.0f;
@@ -1257,6 +1316,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 }
 
 - (void) setRemoteTrackAudioUnitChain:(NSArray *)audioUnits forSession:(NSUInteger)session {
+    MKLogDebug(Audio, @"setRemoteTrackAudioUnitChain: session=%lu count=%lu", (unsigned long)session, (unsigned long)[audioUnits count]);
     dispatch_async(_accessQueue, ^{
         MKAudioRemoteTrackRackBridge *bridge = [self remoteTrackRackBridgeForSessionLocked:session createIfNeeded:YES];
         NSUInteger sampleRate = [self currentOutputProcessingSampleRateLocked];
@@ -1265,6 +1325,9 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
         if (_audioOutput != nil) {
             [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess context:bridge forSession:session];
+            MKLogDebug(Audio, @"setRemoteTrackAudioUnitChain: registered processor for session=%lu bridge=%p", (unsigned long)session, bridge);
+        } else {
+            MKLogWarning(Audio, @"setRemoteTrackAudioUnitChain: _audioOutput is nil, cannot register processor for session=%lu", (unsigned long)session);
         }
     });
 }

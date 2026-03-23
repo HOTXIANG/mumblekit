@@ -33,6 +33,13 @@ typedef void (*MKAudioOutputFloatProcessCallback)(float *samples, NSUInteger fra
 - (void) setRemoteBusProcessor:(MKAudioOutputFloatProcessCallback)processor context:(void *)context;
 - (void) clearRemoteBusProcessor;
 
+- (void) setRemoteBus2Processor:(MKAudioOutputFloatProcessCallback)processor context:(void *)context;
+- (void) clearRemoteBus2Processor;
+
+/// 设置用户输出到哪个总线（0=Bus1 默认, 1=Bus2）
+- (void) setBusAssignment:(NSUInteger)busIndex forSession:(NSUInteger)session;
+- (NSUInteger) busAssignmentForSession:(NSUInteger)session;
+
 - (NSArray *) copyRemoteSessionOrder;
 - (NSUInteger) outputSampleRate;
 

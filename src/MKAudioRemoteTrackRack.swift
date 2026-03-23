@@ -9,63 +9,68 @@ final class MKAudioRemoteTrackRack: NSObject {
         let auAudioUnit: AUAudioUnit
         let wetDryMix: Float
         let renderLock = NSLock()
+
         private(set) var configuredInputFormat: AVAudioFormat
         private(set) var configuredOutputFormat: AVAudioFormat
         private(set) var maximumFramesToRender: AUAudioFrameCount
+        private let engine: AVAudioEngine
+        private var sourceNode: AVAudioSourceNode!
+        private var pullOffset: Int = 0
         private var inputBuffer: AVAudioPCMBuffer
-        private var outputBuffer: AVAudioPCMBuffer
+        private var outputBuffer: AVAudioPCMBuffer!
 
         init(audioUnit: AVAudioUnit, wetDryMix: Float, preferredChannels: AVAudioChannelCount, sampleRate: Double, hostBufferFrames: Int) throws {
             self.audioUnit = audioUnit
             self.auAudioUnit = audioUnit.auAudioUnit
             self.wetDryMix = min(max(wetDryMix, 0.0), 1.0)
+            self.engine = AVAudioEngine()
+
             let selectedFormats = try StageHost.configureFormats(for: audioUnit.auAudioUnit, preferredChannels: preferredChannels, sampleRate: sampleRate)
             configuredInputFormat = selectedFormats.input
             configuredOutputFormat = selectedFormats.output
             let requiredMaximumFrames = max(hostBufferFrames, Int(audioUnit.auAudioUnit.maximumFramesToRender), 4096)
             audioUnit.auAudioUnit.maximumFramesToRender = AUAudioFrameCount(requiredMaximumFrames)
             maximumFramesToRender = audioUnit.auAudioUnit.maximumFramesToRender
-            if audioUnit.auAudioUnit.renderResourcesAllocated {
-                audioUnit.auAudioUnit.deallocateRenderResources()
-            }
-            try audioUnit.auAudioUnit.allocateRenderResources()
-            guard let createdInputBuffer = AVAudioPCMBuffer(pcmFormat: configuredInputFormat, frameCapacity: maximumFramesToRender),
-                  let createdOutputBuffer = AVAudioPCMBuffer(pcmFormat: configuredOutputFormat, frameCapacity: maximumFramesToRender) else {
+
+            guard let createdInputBuffer = AVAudioPCMBuffer(pcmFormat: configuredInputFormat, frameCapacity: maximumFramesToRender) else {
                 throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudio_ParamError))
             }
             inputBuffer = createdInputBuffer
-            outputBuffer = createdOutputBuffer
+            try configureEngine()
         }
 
         deinit {
-            if auAudioUnit.renderResourcesAllocated { auAudioUnit.deallocateRenderResources() }
+            engine.stop()
+            engine.disableManualRenderingMode()
+            if auAudioUnit.renderResourcesAllocated {
+                auAudioUnit.deallocateRenderResources()
+            }
         }
 
         func process(samples: UnsafeMutablePointer<Float>, frameCount: Int, hostChannels: Int) {
             if frameCount <= 0 || hostChannels <= 0 { return }
             renderLock.lock()
             defer { renderLock.unlock() }
-            if frameCount > Int(maximumFramesToRender) || !auAudioUnit.renderResourcesAllocated { return }
+            if frameCount > Int(maximumFramesToRender) || !engine.isRunning { return }
             inputBuffer.frameLength = AVAudioFrameCount(frameCount)
             outputBuffer.frameLength = AVAudioFrameCount(frameCount)
             StageHost.writeInterleaved(samples, frameCount: frameCount, sourceChannels: hostChannels, to: inputBuffer)
             StageHost.zero(buffer: outputBuffer, frameCount: frameCount)
-            var pullOffset = 0
-            var flags = AudioUnitRenderActionFlags()
-            var timestamp = AudioTimeStamp()
-            timestamp.mFlags = .sampleTimeValid
-            timestamp.mSampleTime = 0
-            let status = auAudioUnit.renderBlock(&flags, &timestamp, AUAudioFrameCount(frameCount), 0, outputBuffer.mutableAudioBufferList, { _, _, requestedFrameCount, _, inputData in
-                let requested = Int(requestedFrameCount)
-                StageHost.copyInputChunk(from: self.inputBuffer, offset: pullOffset, frameCount: requested, into: inputData)
-                pullOffset += requested
-                return noErr
-            })
-            if status != noErr {
+            pullOffset = 0
+
+            do {
+                let status = try engine.renderOffline(AVAudioFrameCount(frameCount), to: outputBuffer)
+                if status != .success {
+                    let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
+                    print("MKAudioRack: Remote Track stage render incomplete \(componentName) (\(status.rawValue))")
+                    return
+                }
+            } catch {
                 let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
-                print("MKAudioRack: Remote Track stage render failed \(componentName) (\(status))")
+                print("MKAudioRack: Remote Track stage render failed \(componentName): \(error)")
                 return
             }
+
             if wetDryMix <= 0.0001 { return }
             if wetDryMix >= 0.9999 {
                 StageHost.readInterleaved(from: outputBuffer, frameCount: frameCount, targetChannels: hostChannels, into: samples)
@@ -88,7 +93,36 @@ final class MKAudioRemoteTrackRack: NSObject {
         var probeSummary: String {
             let inLayout = configuredInputFormat.isInterleaved ? "i" : "ni"
             let outLayout = configuredOutputFormat.isInterleaved ? "i" : "ni"
-            return "in=\(configuredInputFormat.channelCount)ch@\(Int(configuredInputFormat.sampleRate))/\(inLayout) out=\(configuredOutputFormat.channelCount)ch@\(Int(configuredOutputFormat.sampleRate))/\(outLayout) max=\(maximumFramesToRender)"
+            let manualFormat = engine.manualRenderingFormat
+            let manualLayout = manualFormat.isInterleaved ? "i" : "ni"
+            return "in=\(configuredInputFormat.channelCount)ch@\(Int(configuredInputFormat.sampleRate))/\(inLayout) out=\(configuredOutputFormat.channelCount)ch@\(Int(configuredOutputFormat.sampleRate))/\(outLayout) manual=\(manualFormat.channelCount)ch@\(Int(manualFormat.sampleRate))/\(manualLayout) max=\(maximumFramesToRender)"
+        }
+
+        private func configureEngine() throws {
+            sourceNode = AVAudioSourceNode { [unowned self] _, _, frameCount, audioBufferList -> OSStatus in
+                StageHost.copyInputChunk(from: self.inputBuffer,
+                                         offset: self.pullOffset,
+                                         frameCount: Int(frameCount),
+                                         into: audioBufferList)
+                self.pullOffset += Int(frameCount)
+                return noErr
+            }
+
+            engine.attach(sourceNode)
+            engine.attach(audioUnit)
+            engine.connect(sourceNode, to: audioUnit, format: configuredInputFormat)
+            engine.connect(audioUnit, to: engine.mainMixerNode, format: configuredOutputFormat)
+            try engine.enableManualRenderingMode(.offline,
+                                                 format: configuredOutputFormat,
+                                                 maximumFrameCount: maximumFramesToRender)
+            engine.prepare()
+            try engine.start()
+
+            guard let createdOutputBuffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
+                                                             frameCapacity: maximumFramesToRender) else {
+                throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudio_ParamError))
+            }
+            outputBuffer = createdOutputBuffer
         }
 
         private static func configureFormats(for auAudioUnit: AUAudioUnit, preferredChannels: AVAudioChannelCount, sampleRate: Double) throws -> (input: AVAudioFormat, output: AVAudioFormat) {
@@ -363,7 +397,17 @@ final class MKAudioRemoteTrackRack: NSObject {
         stateLock.lock()
         stageConfigurations = normalized
         configuredSampleRate = sampleRate > 0 ? Double(sampleRate) : configuredSampleRate
-        stageHosts = buildStageHosts(from: normalized, sampleRate: configuredSampleRate, hostBufferFrames: hostBufferFrames)
+        let rebuildSampleRate = configuredSampleRate
+        let rebuildBufferFrames = hostBufferFrames
+        let oldHosts = stageHosts
+        stageHosts = []
+        stateLock.unlock()
+
+        withExtendedLifetime(oldHosts) {}
+        let newHosts = buildStageHosts(from: normalized, sampleRate: rebuildSampleRate, hostBufferFrames: rebuildBufferFrames)
+
+        stateLock.lock()
+        stageHosts = newHosts
         stateLock.unlock()
     }
 
@@ -376,7 +420,20 @@ final class MKAudioRemoteTrackRack: NSObject {
         stateLock.lock()
         if hostBufferFrames != normalizedFrames {
             hostBufferFrames = normalizedFrames
-            stageHosts = buildStageHosts(from: stageConfigurations, sampleRate: configuredSampleRate, hostBufferFrames: hostBufferFrames)
+            let rebuildConfigurations = stageConfigurations
+            let rebuildSampleRate = configuredSampleRate
+            let rebuildBufferFrames = hostBufferFrames
+            let oldHosts = stageHosts
+            stageHosts = []
+            stateLock.unlock()
+
+            withExtendedLifetime(oldHosts) {}
+            let newHosts = buildStageHosts(from: rebuildConfigurations,
+                                           sampleRate: rebuildSampleRate,
+                                           hostBufferFrames: rebuildBufferFrames)
+
+            stateLock.lock()
+            stageHosts = newHosts
         }
         stateLock.unlock()
     }
@@ -387,7 +444,20 @@ final class MKAudioRemoteTrackRack: NSObject {
         let targetRate = Double(sampleRate)
         if abs(configuredSampleRate - targetRate) > 0.5 {
             configuredSampleRate = targetRate
-            stageHosts = buildStageHosts(from: stageConfigurations, sampleRate: configuredSampleRate, hostBufferFrames: hostBufferFrames)
+            let rebuildConfigurations = stageConfigurations
+            let rebuildSampleRate = configuredSampleRate
+            let rebuildBufferFrames = hostBufferFrames
+            let oldHosts = stageHosts
+            stageHosts = []
+            stateLock.unlock()
+
+            withExtendedLifetime(oldHosts) {}
+            let newHosts = buildStageHosts(from: rebuildConfigurations,
+                                           sampleRate: rebuildSampleRate,
+                                           hostBufferFrames: rebuildBufferFrames)
+
+            stateLock.lock()
+            stageHosts = newHosts
         }
         stateLock.unlock()
     }
@@ -401,7 +471,20 @@ final class MKAudioRemoteTrackRack: NSObject {
             let targetRate = Double(sampleRate)
             if abs(configuredSampleRate - targetRate) > 0.5 {
                 configuredSampleRate = targetRate
-                stageHosts = buildStageHosts(from: stageConfigurations, sampleRate: configuredSampleRate, hostBufferFrames: hostBufferFrames)
+                let rebuildConfigurations = stageConfigurations
+                let rebuildSampleRate = configuredSampleRate
+                let rebuildBufferFrames = hostBufferFrames
+                let oldHosts = stageHosts
+                stageHosts = []
+                stateLock.unlock()
+
+                withExtendedLifetime(oldHosts) {}
+                let newHosts = buildStageHosts(from: rebuildConfigurations,
+                                               sampleRate: rebuildSampleRate,
+                                               hostBufferFrames: rebuildBufferFrames)
+
+                stateLock.lock()
+                stageHosts = newHosts
             }
         }
         let hosts = stageHosts
