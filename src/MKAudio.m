@@ -713,6 +713,15 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #if TARGET_OS_OSX == 1
         _lastDeviceWasVPIO = [_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
 #endif
+        // Clear sidechain references before tearing down audio output
+        [_inputTrackRackBridge setSidechainAudioOutput:nil];
+        [_remoteBusRackBridge setSidechainAudioOutput:nil];
+        [_remoteBusRackBridge2 setSidechainAudioOutput:nil];
+        for (NSNumber *sessionKey in _remoteTrackRackBridges) {
+            MKAudioRemoteTrackRackBridge *bridge = [_remoteTrackRackBridges objectForKey:sessionKey];
+            [bridge setSidechainAudioOutput:nil];
+        }
+
         [_audioInput release];
         _audioInput = nil;
         [_audioOutput release];
@@ -836,6 +845,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         [_remoteBusRackBridge2 updatePreviewGain:_remoteBus2PreviewState.gain enabled:_remoteBus2PreviewState.enabled];
         [_remoteBusRackBridge2 updateSampleRate:[_audioOutput outputSampleRate]];
         [_audioOutput setRemoteBus2Processor:MKAudioRemoteBusRackBridgeProcess context:_remoteBusRackBridge2];
+
+        // Wire sidechain buffer pool to all rack bridges
+        [_inputTrackRackBridge setSidechainAudioOutput:_audioOutput];
+        [_remoteBusRackBridge setSidechainAudioOutput:_audioOutput];
+        [_remoteBusRackBridge2 setSidechainAudioOutput:_audioOutput];
+
         [self rebindRemoteTrackProcessorsToOutputLocked];
         
         if (settingsSnapshot.enableSideTone) {
@@ -1160,6 +1175,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         }
         [bridge updateHostBufferFrames:_pluginHostBufferFrames];
         [bridge updateSampleRate:sampleRate];
+        [bridge setSidechainAudioOutput:_audioOutput];
         [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess
                                       context:bridge
                                    forSession:[sessionKey unsignedIntegerValue]];
