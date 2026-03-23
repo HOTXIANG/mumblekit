@@ -165,6 +165,11 @@ final class MKAudioRemoteTrackRack: NSObject {
                     }
                     engine.attach(sidechainSourceNode!)
                     engine.connect(sidechainSourceNode!, to: audioUnit, fromBus: 0, toBus: 1, format: scFormat)
+                    print("[Sidechain] AU '\(audioUnit.auAudioUnit.componentName ?? "Unknown")' configured with sidechain source='\(scKey)', bus1 format=\(scFormat.channelCount)ch @ \(Int(scFormat.sampleRate))Hz")
+                }
+            } else {
+                if let scKey = sidechainSourceKey, !scKey.isEmpty {
+                    print("[Sidechain] AU '\(audioUnit.auAudioUnit.componentName ?? "Unknown")' has sidechain source='\(scKey)' but AU only has \(auAudioUnit.inputBusses.count) input bus(es)")
                 }
             }
 
@@ -298,9 +303,18 @@ final class MKAudioRemoteTrackRack: NSObject {
                 return
             }
 
-            let framesToCopy = min(frameCount, srcFrames - sidechainPullOffset)
+            // Boundary check: ensure we have frames to copy
+            let availableFrames = max(0, srcFrames - sidechainPullOffset)
+            let framesToCopy = min(frameCount, availableFrames)
             let scChannels = Int(scBuf.format.channelCount)
             let bytesPerFrame = MemoryLayout<Float>.size
+
+            // Log sidechain data pull for debugging
+            if framesToCopy == 0 {
+                print("[Sidechain] AU '\(audioUnit.auAudioUnit.componentName ?? "Unknown")' sidechain='\(scKey)' no data available (offset=\(sidechainPullOffset), srcFrames=\(srcFrames))")
+            } else if framesToCopy < frameCount {
+                print("[Sidechain] AU '\(audioUnit.auAudioUnit.componentName ?? "Unknown")' sidechain='\(scKey)' partial data (\(framesToCopy)/\(frameCount) frames)")
+            }
 
             // Start reading from srcPtr at sidechainPullOffset
             let srcOffsetPtr = srcPtr.advanced(by: sidechainPullOffset * srcChannels)

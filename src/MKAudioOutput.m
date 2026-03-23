@@ -9,6 +9,7 @@
 #import "MKAudioOutputUser.h"
 #import "MKAudioOutputSidetone.h"
 #import "MKAudioDevice.h"
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #import <AudioUnit/AudioUnit.h>
 #import <AudioUnit/AUComponent.h>
@@ -350,6 +351,7 @@ typedef struct {
             _sidechainMasterBus1Valid = YES;
             memcpy(_sidechainMasterBus2, mixBuffer2, bufferBytes);
             _sidechainMasterBus2Valid = YES;
+            MKLogInfo(Audio, @"MKAudioOutput: Captured sidechain buffers for masterBus1/masterBus2 (%u frames, %u channels)", (unsigned)nsamp, (unsigned)_numChannels);
         }
 
         // 分别对两个总线应用各自的处理器
