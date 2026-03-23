@@ -122,6 +122,9 @@ final class MKAudioRemoteTrackRack: NSObject {
         }
 
         private func configureEngine() throws {
+            let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
+            print("[StageHost] configureEngine: '\(componentName)', sidechain='\(sidechainSourceKey ?? "nil")'")
+
             sourceNode = AVAudioSourceNode { [unowned self] _, _, frameCount, audioBufferList -> OSStatus in
                 StageHost.copyInputChunk(from: self.inputBuffer,
                                          offset: self.pullOffset,
@@ -135,10 +138,12 @@ final class MKAudioRemoteTrackRack: NSObject {
             engine.attach(audioUnit)
             engine.connect(sourceNode, to: audioUnit, format: configuredInputFormat)
             engine.connect(audioUnit, to: engine.mainMixerNode, format: configuredOutputFormat)
+            print("[StageHost] '\(componentName)' main signal path connected")
 
             // Sidechain path: connect second source to AU bus 1 if AU supports it and source is configured
             if let scKey = sidechainSourceKey, !scKey.isEmpty, auAudioUnit.inputBusses.count > 1 {
                 let scBus = auAudioUnit.inputBusses[1]
+                print("[StageHost] '\(componentName)' configuring sidechain bus for source='\(scKey)'")
 
                 // Try to set sidechain format (same as main input, fallback to mono)
                 let scFormat: AVAudioFormat
@@ -166,10 +171,11 @@ final class MKAudioRemoteTrackRack: NSObject {
                     }
                     engine.attach(sidechainSourceNode!)
                     engine.connect(sidechainSourceNode!, to: audioUnit, fromBus: 0, toBus: 1, format: scFormat)
-                    print("[Sidechain] AU '\(audioUnit.auAudioUnit.componentName ?? "Unknown")' configured with sidechain source='\(scKey)', bus1 format=\(scFormat.channelCount)ch @ \(Int(scFormat.sampleRate))Hz")
+                    print("[Sidechain] AU '\(componentName)' configured with sidechain source='\(scKey)', bus1 format=\(scFormat.channelCount)ch @ \(Int(scFormat.sampleRate))Hz")
 
                     // Scan AU parameters for sidechain-related controls and log them
                     if let parameterTree = auAudioUnit.parameterTree {
+                        print("[StageHost] '\(componentName)' scanning parameter tree (\(parameterTree.allParameters.count) parameters)...")
                         var foundSidechainParam = false
                         for param in parameterTree.allParameters {
                             // AUParameter doesn't have 'name' in Swift, use KVC to get parameter info
@@ -187,27 +193,34 @@ final class MKAudioRemoteTrackRack: NSObject {
                             }
                         }
                         if !foundSidechainParam {
-                            print("[Sidechain] No sidechain-related parameters found in AU parameter tree")
+                            print("[Sidechain] No sidechain-related parameters found in AU parameter tree for '\(componentName)'")
                         }
+                    } else {
+                        print("[StageHost] '\(componentName)' has no parameterTree")
                     }
                 }
             } else {
                 if let scKey = sidechainSourceKey, !scKey.isEmpty {
-                    print("[Sidechain] AU '\(audioUnit.auAudioUnit.componentName ?? "Unknown")' has sidechain source='\(scKey)' but AU only has \(auAudioUnit.inputBusses.count) input bus(es)")
+                    print("[Sidechain] AU '\(componentName)' has sidechain source='\(scKey)' but AU only has \(auAudioUnit.inputBusses.count) input bus(es)")
                 }
             }
 
+            print("[StageHost] '\(componentName)' enabling manual rendering mode...")
             try engine.enableManualRenderingMode(.offline,
                                                  format: configuredOutputFormat,
                                                  maximumFrameCount: maximumFramesToRender)
+            print("[StageHost] '\(componentName)' preparing engine...")
             engine.prepare()
+            print("[StageHost] '\(componentName)' starting engine...")
             try engine.start()
+            print("[StageHost] '\(componentName)' engine started")
 
             guard let createdOutputBuffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
                                                              frameCapacity: maximumFramesToRender) else {
                 throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudio_ParamError))
             }
             outputBuffer = createdOutputBuffer
+            print("[StageHost] '\(componentName)' configuration completed")
         }
 
         private static func configureFormats(for auAudioUnit: AUAudioUnit, preferredChannels: AVAudioChannelCount, sampleRate: Double) throws -> (input: AVAudioFormat, output: AVAudioFormat) {
@@ -571,7 +584,9 @@ final class MKAudioRemoteTrackRack: NSObject {
     }
 
     func updateAudioUnitChain(_ stages: NSArray?, sampleRate: UInt) {
+        print("[RemoteTrackRack] updateAudioUnitChain: stages=\(stages?.count ?? 0), sampleRate=\(sampleRate)")
         let normalized = normalizeStages(stages)
+        print("[RemoteTrackRack] Normalized stages: \(normalized.count) configurations")
         stateLock.lock()
         stageConfigurations = normalized
         configuredSampleRate = sampleRate > 0 ? Double(sampleRate) : configuredSampleRate
@@ -582,7 +597,9 @@ final class MKAudioRemoteTrackRack: NSObject {
         stateLock.unlock()
 
         withExtendedLifetime(oldHosts) {}
+        print("[RemoteTrackRack] Building stage hosts...")
         let newHosts = buildStageHosts(from: normalized, sampleRate: rebuildSampleRate, hostBufferFrames: rebuildBufferFrames)
+        print("[RemoteTrackRack] Built \(newHosts.count) stage hosts")
 
         stateLock.lock()
         stageHosts = newHosts
@@ -734,11 +751,15 @@ final class MKAudioRemoteTrackRack: NSObject {
     }
 
     private func buildStageHosts(from configurations: [StageConfiguration], sampleRate: Double, hostBufferFrames: Int) -> [AnyStageHost] {
+        print("[RemoteTrackRack] buildStageHosts: \(configurations.count) configurations, sampleRate=\(sampleRate), hostBufferFrames=\(hostBufferFrames)")
         var hosts: [AnyStageHost] = []
-        for configuration in configurations {
+        for (index, configuration) in configurations.enumerated() {
+            print("[RemoteTrackRack] Building stage \(index + 1)/\(configurations.count)...")
             do {
                 switch configuration.processor {
                 case .audioUnit(let audioUnit):
+                    let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
+                    print("[RemoteTrackRack] Creating AU StageHost: '\(componentName)', sidechain=\(configuration.sidechainSourceKey ?? "nil")")
                     let host = try StageHost(audioUnit: audioUnit,
                                              wetDryMix: configuration.wetDryMix,
                                              preferredChannels: 2,
@@ -746,6 +767,7 @@ final class MKAudioRemoteTrackRack: NSObject {
                                              hostBufferFrames: hostBufferFrames,
                                              sidechainSourceKey: configuration.sidechainSourceKey,
                                              sidechainProvider: sidechainProvider)
+                    print("[RemoteTrackRack] Created AU StageHost: '\(componentName)' OK")
                     hosts.append(.audioUnit(host))
                 case .vst3(let vst3Host):
                     let host = try VST3StageHost(pluginHost: vst3Host,
@@ -766,6 +788,7 @@ final class MKAudioRemoteTrackRack: NSObject {
                 print("MKAudioRack: Failed to configure Remote Track stage \(componentName): \(error)")
             }
         }
+        print("[RemoteTrackRack] buildStageHosts completed: \(hosts.count) hosts")
         return hosts
     }
 
