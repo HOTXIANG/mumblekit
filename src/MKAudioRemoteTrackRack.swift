@@ -502,6 +502,23 @@ final class MKAudioRemoteTrackRack: NSObject {
     // Sidechain provider callback
     public var sidechainProvider: SidechainProvider? = nil
 
+    func setSidechainProvider(_ provider: Any?) {
+        guard let block = provider as? (String) -> NSDictionary? else {
+            sidechainProvider = nil
+            return
+        }
+        sidechainProvider = { key in
+            guard let dict = block(key),
+                  let ptrValue = dict["ptr"] as? NSValue,
+                  let frames = dict["frames"] as? Int,
+                  let channels = dict["channels"] as? Int else {
+                return nil
+            }
+            let ptr = ptrValue.pointerValue!.assumingMemoryBound(to: Float.self)
+            return (UnsafePointer(ptr), frames, channels)
+        }
+    }
+
     func setPreviewGain(_ gain: Float, enabled: Bool) {
         stateLock.lock()
         previewGain = max(gain, 0.0)
