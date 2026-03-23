@@ -78,6 +78,7 @@ final class MKAudioRemoteTrackRack: NSObject {
             StageHost.writeInterleaved(samples, frameCount: frameCount, sourceChannels: hostChannels, to: inputBuffer)
             StageHost.zero(buffer: outputBuffer, frameCount: frameCount)
             pullOffset = 0
+            sidechainPullOffset = 0  // Reset sidechain pull offset for this render cycle
 
             do {
                 let status = try engine.renderOffline(AVAudioFrameCount(frameCount), to: outputBuffer)
@@ -288,7 +289,7 @@ final class MKAudioRemoteTrackRack: NSObject {
                 return
             }
 
-            // Copy source data into sidechain buffer, handling channel mismatch
+            // Copy source data into sidechain bus, handling channel mismatch and offset
             guard let scBuf = sidechainBuffer else {
                 for bufIdx in 0..<targetBuffers.count {
                     guard let data = targetBuffers[bufIdx].mData else { continue }
@@ -297,9 +298,12 @@ final class MKAudioRemoteTrackRack: NSObject {
                 return
             }
 
-            let framesToCopy = min(frameCount, srcFrames)
+            let framesToCopy = min(frameCount, srcFrames - sidechainPullOffset)
             let scChannels = Int(scBuf.format.channelCount)
             let bytesPerFrame = MemoryLayout<Float>.size
+
+            // Start reading from srcPtr at sidechainPullOffset
+            let srcOffsetPtr = srcPtr.advanced(by: sidechainPullOffset * srcChannels)
 
             if scBuf.format.isInterleaved {
                 guard let targetData = targetBuffers[0].mData else { return }
@@ -307,7 +311,7 @@ final class MKAudioRemoteTrackRack: NSObject {
                 for f in 0..<framesToCopy {
                     for c in 0..<scChannels {
                         let srcCh = min(c, srcChannels - 1)
-                        dst[f * scChannels + c] = srcPtr[f * srcChannels + srcCh]
+                        dst[f * scChannels + c] = srcOffsetPtr[f * srcChannels + srcCh]
                     }
                 }
                 // Zero remaining
@@ -322,7 +326,7 @@ final class MKAudioRemoteTrackRack: NSObject {
                     let dst = data.assumingMemoryBound(to: Float.self)
                     let srcCh = min(bufIdx, srcChannels - 1)
                     for f in 0..<framesToCopy {
-                        dst[f] = srcPtr[f * srcChannels + srcCh]
+                        dst[f] = srcOffsetPtr[f * srcChannels + srcCh]
                     }
                     if framesToCopy < frameCount {
                         memset(data.advanced(by: framesToCopy * bytesPerFrame), 0,
@@ -331,6 +335,8 @@ final class MKAudioRemoteTrackRack: NSObject {
                     targetBuffers[bufIdx].mDataByteSize = UInt32(frameCount * bytesPerFrame)
                 }
             }
+
+            sidechainPullOffset += framesToCopy
         }
 
         private static func readInterleaved(from buffer: AVAudioPCMBuffer, frameCount: Int, targetChannels: Int, into target: UnsafeMutablePointer<Float>) {
