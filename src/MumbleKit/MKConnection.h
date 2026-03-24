@@ -472,4 +472,29 @@ typedef enum {
 /// Returns whether ot not the connected client should use the Opus codec.
 - (BOOL) shouldUseOpus;
 
+///----------------------------------------
+/// @name Network Quality Metrics (网络质量指标)
+///----------------------------------------
+
+/// Get mean UDP ping latency in milliseconds.
+- (double) udpPingMeanMs;
+
+/// Get variance of UDP ping latency.
+- (double) udpPingVarianceMs;
+
+/// Get number of UDP ping samples collected.
+- (uint32_t) udpPingSamples;
+
+/// Get last good packet count for packet loss calculation.
+- (uint32_t) lastGood;
+
+/// Get last late packet count for packet loss calculation.
+- (uint32_t) lastLate;
+
+/// Get last lost packet count for packet loss calculation.
+- (uint32_t) lastLost;
+
+/// Get current UDP transport state.
+- (MKUDPTransportState) udpTransportState;
+
 @end

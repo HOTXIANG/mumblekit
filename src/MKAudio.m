@@ -29,6 +29,9 @@
 
 #if TARGET_OS_OSX == 1
 #import <CoreAudio/CoreAudio.h>
+#import <libkern/OSAtomic.h>
+#elif TARGET_OS_IPHONE
+#import <libkern/OSAtomic.h>
 #endif
 
 #if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
@@ -87,6 +90,13 @@ typedef struct _MKAudioPreviewGainProcessorState {
     NSUInteger _sidechainInputPPFrameCount;
     NSUInteger _sidechainInputPPChannels;
     NSUInteger _sidechainInputPPSampleRate;
+
+    // Weak Network Mode state (弱网模式状态)
+    BOOL                     _weakNetworkModeEnabled;
+    NSDictionary             *_weakNetworkStatistics;
+    NSNumber                 *_weakNetworkLastBitrate;
+    NSNumber                 *_weakNetworkLastLatency;
+    NSNumber                 *_weakNetworkLastPacketLoss;
 }
 #if TARGET_OS_OSX == 1
 - (void)startObservingDefaultInputDeviceChanges;
@@ -1208,6 +1218,10 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     dispatch_async(_accessQueue, ^{
         NSUInteger sampleRate = MKAudioInputProcessingSampleRateForSettings(&_audioSettings);
         [_inputTrackRackBridge updateSampleRate:sampleRate];
+        // Set sidechain audio output reference for input track (captures mic signal for sidechain)
+        if (self->_audioOutput != nil) {
+            [_inputTrackRackBridge setSidechainAudioOutput:self->_audioOutput];
+        }
         [_inputTrackRackBridge updateAudioUnitChain:audioUnits sampleRate:sampleRate];
     });
 }
@@ -1226,6 +1240,8 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                 sampleRate = (NSUInteger)outputSampleRate;
             }
         }
+        // Set sidechain audio output reference for remote bus (captures mixed audio for sidechain)
+        [_remoteBusRackBridge setSidechainAudioOutput:_audioOutput];
         [_remoteBusRackBridge updateAudioUnitChain:audioUnits sampleRate:sampleRate];
     });
 }
@@ -1244,6 +1260,8 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                 sampleRate = (NSUInteger)outputSampleRate;
             }
         }
+        // Set sidechain audio output reference for remote bus 2 (captures mixed audio for sidechain)
+        [_remoteBusRackBridge2 setSidechainAudioOutput:_audioOutput];
         [_remoteBusRackBridge2 updateAudioUnitChain:audioUnits sampleRate:sampleRate];
     });
 }
@@ -1368,6 +1386,10 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu updateAudioUnitChain returned", (unsigned long)session);
 
         if (_audioOutput != nil) {
+            // Set sidechain audio output reference for this bridge (critical for sidechain routing)
+            [bridge setSidechainAudioOutput:_audioOutput];
+            MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu set sidechain output", (unsigned long)session);
+
             [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess context:bridge forSession:session];
             MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu registered processor", (unsigned long)session);
         } else {
@@ -1473,6 +1495,108 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     *outFrameCount = _sidechainInputPPFrameCount;
     *outChannels = _sidechainInputPPChannels;
     return _sidechainInputPingPong[readIdx];
+}
+
+#pragma mark - Weak Network Mode (弱网模式)
+
+- (void) setWeakNetworkModeEnabled:(BOOL)enabled {
+    _weakNetworkModeEnabled = enabled;
+
+    // 更新音频设置
+    MKAudioSettings settings = _audioSettings;
+    settings.enableWeakNetworkMode = enabled;
+
+    if (enabled) {
+        // 应用弱网默认配置
+        if (settings.weakNetworkJitterBufferMs <= 0)
+            settings.weakNetworkJitterBufferMs = 100;
+        if (settings.weakNetworkExpectedLoss <= 0)
+            settings.weakNetworkExpectedLoss = 20;
+        if (settings.weakNetworkMinBitrate <= 0)
+            settings.weakNetworkMinBitrate = 16000;
+        if (settings.weakNetworkMaxBitrate <= 0)
+            settings.weakNetworkMaxBitrate = 64000;
+        settings.weakNetworkAdaptiveBitrate = YES;
+        settings.weakNetworkEnhancedPLC = YES;
+    }
+
+    [self updateAudioSettings:&settings];
+
+    MKLogInfo(Audio, @"Weak Network Mode %@", enabled ? @"enabled" : @"disabled");
+}
+
+- (BOOL) isWeakNetworkModeEnabled {
+    return _weakNetworkModeEnabled;
+}
+
+- (NSDictionary *) copyNetworkQualityMetrics {
+    NSMutableDictionary *metrics = [NSMutableDictionary dictionary];
+
+    // 从连接获取网络指标
+    MKConnection *conn = _connection;
+    if (conn) {
+        double udpPingMean = [conn udpPingMeanMs];
+        double udpPingVariance = [conn udpPingVarianceMs];
+        uint32_t udpPingSamples = [conn udpPingSamples];
+        uint32_t lastGood = [conn lastGood];
+        uint32_t lastLate = [conn lastLate];
+        uint32_t lastLost = [conn lastLost];
+
+        metrics[@"udpPingMeanMs"] = @(udpPingMean);
+        metrics[@"udpPingVarianceMs"] = @(udpPingVariance);
+        metrics[@"udpPingSamples"] = @(udpPingSamples);
+        metrics[@"udpTransportState"] = (int)[conn udpTransportState];
+
+        // 计算丢包率
+        uint32_t totalPackets = lastGood + lastLate + lastLost;
+        if (totalPackets > 0) {
+            double lossRate = (double)(lastLate + lastLost) / (double)totalPackets * 100.0;
+            metrics[@"packetLossPercent"] = @(lossRate);
+        }
+
+        // 计算有效延迟 (mean + stddev)
+        double stddev = sqrt(udpPingVariance);
+        double effectiveLatency = udpPingMean + stddev;
+        metrics[@"effectiveLatencyMs"] = @(effectiveLatency);
+
+        // 网络质量评分 (0-100, 越高越好)
+        double qualityScore = 100.0;
+        if (udpPingSamples >= 5) {
+            if (effectiveLatency > 300) qualityScore -= 40;
+            else if (effectiveLatency > 150) qualityScore -= 20;
+            else if (effectiveLatency > 80) qualityScore -= 10;
+
+            if (totalPackets > 10) {
+                double lossRate = (double)(lastLate + lastLost) / (double)totalPackets;
+                qualityScore -= MIN(40, lossRate * 80);
+            }
+        }
+        metrics[@"qualityScore"] = @(MAX(0, qualityScore));
+    }
+
+    return [metrics copy];
+}
+
+- (NSDictionary *) copyWeakNetworkStatistics {
+    return @{
+        @"weakNetworkModeEnabled": @(_weakNetworkModeEnabled),
+        @"lastBitrate": _weakNetworkLastBitrate ?: @(0),
+        @"lastLatency": _weakNetworkLastLatency ?: @(0),
+        @"lastPacketLoss": _weakNetworkLastPacketLoss ?: @(0),
+    };
+}
+
+- (void) resetWeakNetworkStatistics {
+    _weakNetworkLastBitrate = @(0);
+    _weakNetworkLastLatency = @(0);
+    _weakNetworkLastPacketLoss = @(0);
+    MKLogInfo(Audio, @"Weak network statistics reset");
+}
+
+- (void) updateWeakNetworkStatisticsWithBitrate:(int)bitrate latency:(double)latency packetLoss:(double)packetLoss {
+    _weakNetworkLastBitrate = @(bitrate);
+    _weakNetworkLastLatency = @(latency);
+    _weakNetworkLastPacketLoss = @(packetLoss);
 }
 
 @end

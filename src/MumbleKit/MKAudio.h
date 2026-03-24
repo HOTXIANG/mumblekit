@@ -62,6 +62,15 @@ typedef struct _MKAudioSettings {
     BOOL            preferReceiverOverSpeaker;
     BOOL            opusForceCELTMode;
     BOOL            audioMixerDebug;
+
+    // Weak Network Optimization Settings (弱网优化配置)
+    BOOL            enableWeakNetworkMode;      // 弱网模式总开关
+    int             weakNetworkJitterBufferMs;  // 自定义抖动缓冲 (ms), 默认 100ms
+    int             weakNetworkExpectedLoss;    // 期望丢包率 (0-100), 用于 FEC
+    BOOL            weakNetworkAdaptiveBitrate; // 自适应码率
+    BOOL            weakNetworkEnhancedPLC;     // 增强丢包隐藏
+    int             weakNetworkMinBitrate;      // 最低码率底线 (bps), 默认 16000
+    int             weakNetworkMaxBitrate;      // 最高码率上限 (bps), 默认 64000
 } MKAudioSettings;
 
 /// @protocol MKAudioDelegate MKAudio.h MumbleKit/MKAudio.h
@@ -302,5 +311,22 @@ typedef struct _MKAudioSettings {
 
 /// Called by MKAudioOutput on output thread to get the latest input sidechain buffer
 - (const float *) readSidechainInputBufferWithFrameCount:(NSUInteger *)outFrameCount channels:(NSUInteger *)outChannels;
+
+///-----------------------------------
+/// @name Weak Network Optimization (弱网优化)
+///-----------------------------------
+
+/// Get current network quality metrics (返回当前网络质量指标)
+- (NSDictionary *) copyNetworkQualityMetrics;
+
+/// Manually trigger weak network mode (手动触发弱网模式)
+- (void) setWeakNetworkModeEnabled:(BOOL)enabled;
+- (BOOL) isWeakNetworkModeEnabled;
+
+/// Get weak network statistics (获取弱网优化统计)
+- (NSDictionary *) copyWeakNetworkStatistics;
+
+/// Reset weak network statistics (重置弱网优化统计)
+- (void) resetWeakNetworkStatistics;
 
 @end

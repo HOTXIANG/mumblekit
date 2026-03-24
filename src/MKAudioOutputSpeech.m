@@ -57,6 +57,11 @@
     float                 _averageAvailable;
     
     MKTalkState           _talkState;
+
+    // Adaptive jitter buffer state (自适应抖动缓冲状态)
+    NSInteger             _lastJitterMarginMs;
+    NSTimeInterval        _jitterMarginUpdateTime;
+    NSUInteger            _consecutiveMissCount;
 }
 @end
 
@@ -118,9 +123,14 @@
 
         _jitterLock = [[NSLock alloc] init];
         _jitter = jitter_buffer_init((int)_frameSize);
-    
-        int margin = /* g.s.iJitterBufferSize */ 10 * (int)_frameSize;
+
+        // 初始 margin 设置为弱网模式配置值 (默认 100ms)
+        int initialMarginMs = 100;  // 默认 100ms 适用于弱网
+        int margin = initialMarginMs * (int)_frameSize / 10;  // 假设每帧 10ms
         jitter_buffer_ctl(_jitter, JITTER_BUFFER_SET_MARGIN, &margin);
+
+        _lastJitterMarginMs = initialMarginMs;
+        _jitterMarginUpdateTime = 0;
 
         _fadeIn = malloc(sizeof(float) * _frameSize);
         _fadeOut = malloc(sizeof(float) * _frameSize);
@@ -423,7 +433,11 @@
                 }
             } else {
                 if (_msgType == UDPVoiceOpusMessage) {
+                    // 使用 Opus 内置 PLC (Packet Loss Concealment)
                     decodedSamples = opus_decode_float(_opusDecoder, NULL, 0, output, (int)_frameSize, 0);
+
+                    // 应用增强 PLC 处理
+                    [self applyEnhancedPLCIfNeeded:output channels:channels];
                 } else if (_msgType == UDPVoiceSpeexMessage) {
                     speex_decode(_speexDecoder, NULL, output);
                     for (unsigned int i = 0; i < _frameSize; i++)
@@ -432,6 +446,9 @@
                     decodedSamples = (int)_frameSize;
                     memset(output, 0, _frameSize * channels * sizeof(float));
                 }
+
+                // 跟踪连续丢包计数用于自适应 jitter buffer
+                _consecutiveMissCount++;
             }
 
             if (! nextAlive) {
@@ -507,6 +524,83 @@ nextframe:
     BOOL tmp = _lastAlive;
     _lastAlive = nextAlive;
     return tmp;
+}
+
+#pragma mark - Adaptive Jitter Buffer (自适应抖动缓冲)
+
+- (void) updateJitterBufferMarginIfNeeded {
+    // 限制更新频率：最多每 5 秒更新一次
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (now - _jitterMarginUpdateTime < 5.0) {
+        return;
+    }
+
+    int targetMarginMs = [self calculateTargetJitterMargin];
+
+    // 如果变化超过 20ms 才更新，避免频繁调整
+    if (abs(targetMarginMs - _lastJitterMarginMs) >= 20) {
+        [_jitterLock lock];
+        int marginFrames = targetMarginMs / 10;  // 假设每帧 10ms
+        marginFrames = MAX(3, MIN(50, marginFrames));  // 限制 30ms-500ms
+        int margin = marginFrames * (int)_frameSize;
+        jitter_buffer_ctl(_jitter, JITTER_BUFFER_SET_MARGIN, &margin);
+        _lastJitterMarginMs = targetMarginMs;
+        _jitterMarginUpdateTime = now;
+        [_jitterLock unlock];
+
+        MKLogDebug(Audio, @"Jitter buffer margin adjusted to %dms (miss=%lu)",
+                  targetMarginMs, (unsigned long)_consecutiveMissCount);
+    }
+}
+
+- (int) calculateTargetJitterMargin {
+    // 基础 margin: 100ms 适用于一般弱网
+    int baseMarginMs = 100;
+
+    // 根据连续丢包数增加 margin
+    if (_consecutiveMissCount > 20) {
+        baseMarginMs += 150;  // 极高丢包：+150ms
+    } else if (_consecutiveMissCount > 10) {
+        baseMarginMs += 100;  // 高丢包：+100ms
+    } else if (_consecutiveMissCount > 5) {
+        baseMarginMs += 50;   // 中等丢包：+50ms
+    }
+
+    return baseMarginMs;
+}
+
+#pragma mark - Enhanced Packet Loss Concealment (增强丢包隐藏)
+
+- (void) applyEnhancedPLCIfNeeded:(float *)output channels:(NSUInteger)channels {
+    if (_missCount > 3 && _missCount <= 10) {
+        // 中度丢包：使用 Opus 内置 PLC，已经通过 opus_decode_float(NULL, ...) 调用
+        // 这里可以添加额外的平滑处理
+        [self applyPLCSmoothingToBuffer:output channels:channels];
+    } else if (_missCount > 10) {
+        // 严重丢包：淡出静音，避免刺耳噪音
+        [self applyFadeOutToBuffer:output channels:channels];
+    }
+}
+
+- (void) applyPLCSmoothingToBuffer:(float *)output channels:(NSUInteger)channels {
+    // 简单的低通平滑滤波，减少 PLC 生成信号的突兀感
+    float smoothingFactor = 0.3f;
+    static float lastOutput[2] = {0, 0};  // 支持立体声
+
+    for (NSUInteger i = 0; i < _frameSize * channels; i++) {
+        NSUInteger c = i % channels;
+        output[i] = output[i] * (1.0f - smoothingFactor) + lastOutput[c] * smoothingFactor;
+        lastOutput[c] = output[i];
+    }
+}
+
+- (void) applyFadeOutToBuffer:(float *)output channels:(NSUInteger)channels {
+    // 使用预计算的淡出曲线
+    for (NSUInteger i = 0; i < _frameSize; i++) {
+        for (NSUInteger c = 0; c < channels; ++c) {
+            output[i * channels + c] *= _fadeOut[i];
+        }
+    }
 }
 
 @end

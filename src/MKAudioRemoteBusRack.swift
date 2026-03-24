@@ -206,17 +206,16 @@ final class MKAudioRemoteBusRack: NSObject {
                         print("[StageHost] '\(componentName)' scanning parameter tree (\(parameterTree.allParameters.count) parameters)...")
                         var foundSidechainParam = false
                         for param in parameterTree.allParameters {
-                            // AUParameter doesn't have 'name' in Swift, use KVC to get parameter info
-                            let paramName = (param.value(forKey: "name") as? String ?? "unknown_\(param.address)").lowercased()
+                            // Use displayName property (native Swift API, not KVC)
+                            let paramName = param.displayName.lowercased()
                             if paramName.contains("sidechain") || paramName.contains("sc") || paramName.contains("external") {
-                                let displayString = (param.value(forKey: "name") as? String) ?? "Param_\(param.address)"
-                                print("[Sidechain] Found parameter: '\(displayString)' (address=\(param.address)) = \(param.value) (range: \(param.minValue)-\(param.maxValue))")
+                                print("[Sidechain] Found parameter: '\(param.displayName)' (address=\(param.address)) = \(param.value) (range: \(param.minValue)-\(param.maxValue))")
                                 foundSidechainParam = true
                                 // For plugins that need explicit "External" sidechain mode, set to max value
                                 if paramName.contains("source") || paramName.contains("mode") || paramName.contains("select") {
                                     // Try setting to max value (often means "External" or "1")
                                     param.value = param.maxValue
-                                    print("[Sidechain] Set '\(displayString)' to \(param.maxValue) (external mode)")
+                                    print("[Sidechain] Set '\(param.displayName)' to \(param.maxValue) (external mode)")
                                 }
                             }
                         }
