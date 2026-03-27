@@ -55,6 +55,9 @@ typedef struct {
     MKAudioOutputFloatProcessCallback _remoteBus2Processor;
     void                 *_remoteBus2ProcessorContext;
     NSMutableDictionary  *_sessionBusAssignment;  // session -> NSNumber(0 or 1)
+    NSMutableDictionary  *_sessionUsesTrackSendRouting; // session -> NSNumber(BOOL)
+    NSMutableDictionary  *_sessionTrackSendBusMasks; // session -> NSNumber(bitmask)
+    NSUInteger            _inputTrackSendBusMask; // bitmask for master bus1/bus2
 
     // DSP observability - per-session status
     NSMutableDictionary  *_sessionDSPStatuses;
@@ -63,13 +66,19 @@ typedef struct {
     struct MKSidechainSlot _sidechainUserSlots[MK_SIDECHAIN_MAX_SESSIONS];
     float    _sidechainMasterBus1[MK_SIDECHAIN_MAX_FRAMES * 2];
     float    _sidechainMasterBus2[MK_SIDECHAIN_MAX_FRAMES * 2];
+    float    _sidechainInput[MK_SIDECHAIN_MAX_FRAMES * 2];
+    float    _sidechainSidetone[MK_SIDECHAIN_MAX_FRAMES * 2];
     BOOL     _sidechainMasterBus1Valid;
     BOOL     _sidechainMasterBus2Valid;
-    const float *_sidechainInputBuffer;
+    BOOL     _sidechainInputValid;
+    BOOL     _sidechainSidetoneValid;
     NSUInteger   _sidechainInputFrameCount;
     NSUInteger   _sidechainInputChannels;
+    NSUInteger   _sidechainSidetoneFrameCount;
+    NSUInteger   _sidechainSidetoneChannels;
     NSUInteger   _sidechainFrameCount;
     NSUInteger   _sidechainChannels;
+    NSUInteger   _inputMonitorLastSequence;
 }
 @end
 
@@ -95,6 +104,9 @@ typedef struct {
         _remoteBus2Processor = NULL;
         _remoteBus2ProcessorContext = NULL;
         _sessionBusAssignment = [[NSMutableDictionary alloc] init];
+        _sessionUsesTrackSendRouting = [[NSMutableDictionary alloc] init];
+        _sessionTrackSendBusMasks = [[NSMutableDictionary alloc] init];
+        _inputTrackSendBusMask = 0;
         _sessionDSPStatuses = [[NSMutableDictionary alloc] init];
 
         _mixerFrequency = [_device outputSampleRate];
@@ -152,6 +164,8 @@ typedef struct {
     [_remoteTrackProcessors release];
     [_remoteTrackProcessorContexts release];
     [_sessionBusAssignment release];
+    [_sessionUsesTrackSendRouting release];
+    [_sessionTrackSendBusMasks release];
     [_sessionDSPStatuses release];
     [super dealloc];
 }
@@ -210,21 +224,46 @@ typedef struct {
     }
     _sidechainMasterBus1Valid = NO;
     _sidechainMasterBus2Valid = NO;
+    _sidechainInputValid = NO;
+    _sidechainSidetoneValid = NO;
     _sidechainFrameCount = nsamp;
     _sidechainChannels = _numChannels;
+    _sidechainInputFrameCount = 0;
+    _sidechainInputChannels = 0;
+    _sidechainSidetoneFrameCount = 0;
+    _sidechainSidetoneChannels = 0;
 
-    // Update input sidechain from ping-pong buffer
+    // Update post-input-track and post-sidetone-track sidechain snapshots from ping-pong buffers.
     {
         MKAudio *audio = [MKAudio sharedAudio];
         if (audio != nil) {
             NSUInteger scFrames = 0, scChannels = 0;
-            const float *scBuf = [audio readSidechainInputBufferWithFrameCount:&scFrames channels:&scChannels];
+            const float *scBuf = [audio readSidechainInputBufferWithMaxFrameCount:(NSUInteger)nsamp
+                                                                     outFrameCount:&scFrames
+                                                                          channels:&scChannels];
             [self setSidechainInputBuffer:scBuf frameCount:scFrames channels:scChannels];
+            NSUInteger sidetoneFrames = 0, sidetoneChannels = 0;
+            const float *sidetoneBuf = [audio readSidetoneSidechainBufferWithMaxFrameCount:(NSUInteger)nsamp
+                                                                              outFrameCount:&sidetoneFrames
+                                                                                   channels:&sidetoneChannels];
+            [self setSidetoneTrackSidechainBuffer:sidetoneBuf frameCount:sidetoneFrames channels:sidetoneChannels];
+        }
+    }
+
+    NSUInteger inputMonitorFrameCount = 0, inputMonitorChannels = 0;
+    const float *inputMonitorBuffer = NULL;
+    BOOL hasInputMonitorFrame = NO;
+    {
+        MKAudio *audio = [MKAudio sharedAudio];
+        if (audio != nil && _settings.enableSideTone && _settings.sidetoneVolume > 0.0001f) {
+            inputMonitorBuffer = [audio readInputMonitorBufferWithMaxFrameCount:(NSUInteger)nsamp
+                                                                  outFrameCount:&inputMonitorFrameCount
+                                                                       channels:&inputMonitorChannels];
+            hasInputMonitorFrame = (inputMonitorBuffer != NULL);
         }
     }
 
     NSMutableArray *mix = [[NSMutableArray alloc] init];
-    NSMutableArray *sidetoneMix = [[NSMutableArray alloc] init];
     NSMutableArray *del = [[NSMutableArray alloc] init];
     unsigned int nchan = _numChannels;
 
@@ -241,13 +280,6 @@ typedef struct {
         }
     }
     
-    if (_settings.enableSideTone) {
-        MKAudioOutputSidetone *sidetone = [[MKAudio sharedAudio] sidetoneOutput];
-        if ([sidetone needSamples:nsamp]) {
-            [sidetoneMix addObject:[[MKAudio sharedAudio] sidetoneOutput]];
-        }
-    }
-    
     if (_settings.audioMixerDebug) {
         NSMutableDictionary *mixerInfo = [[[NSMutableDictionary alloc] init] autorelease];
         NSMutableArray *sources = [[[NSMutableArray alloc] init] autorelease];
@@ -256,12 +288,8 @@ typedef struct {
         for (id ou in mix) {
             [sources addObject:[self audioOutputDebugDescription:ou]];
         }
-        for (id ou in sidetoneMix) {
-            [sources addObject:[self audioOutputDebugDescription:ou]];
-        }
-    
         for (id ou in del) {
-            [sources addObject:[self audioOutputDebugDescription:ou]];
+            [removed addObject:[self audioOutputDebugDescription:ou]];
         }
 
     
@@ -278,121 +306,162 @@ typedef struct {
     const size_t bufferBytes = sizeof(float) * _numChannels * nsamp;
     float *mixBuffer1 = alloca(bufferBytes);
     float *mixBuffer2 = alloca(bufferBytes);
+    float *sidetoneBuffer = alloca(bufferBytes);
     memset(mixBuffer1, 0, bufferBytes);
     memset(mixBuffer2, 0, bufferBytes);
+    memset(sidetoneBuffer, 0, bufferBytes);
 
-    if ([mix count] > 0 || [sidetoneMix count] > 0) {
-        for (MKAudioOutputUser *ou in mix) {
-            NSUInteger sessionID = [(MKAudioOutputSpeech *)ou userSession];
-            NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:sessionID];
+    for (MKAudioOutputUser *ou in mix) {
+        NSUInteger sessionID = [(MKAudioOutputSpeech *)ou userSession];
+        NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:sessionID];
 
-            if ([[_sessionMutes objectForKey:sessionKey] boolValue]) {
+        if ([[_sessionMutes objectForKey:sessionKey] boolValue]) {
+            continue;
+        }
+
+        float volMultiplier = 1.0f;
+        NSNumber *customVol = [_sessionVolumes objectForKey:sessionKey];
+        if (customVol) {
+            volMultiplier = [customVol floatValue];
+        }
+
+        MKAudioOutputFloatProcessCallback trackProcessor = NULL;
+        void *trackContext = NULL;
+        NSValue *processorValue = [_remoteTrackProcessors objectForKey:sessionKey];
+        NSValue *contextValue = [_remoteTrackProcessorContexts objectForKey:sessionKey];
+        if (processorValue != nil) {
+            trackProcessor = (MKAudioOutputFloatProcessCallback)[processorValue pointerValue];
+            if (contextValue != nil) {
+                trackContext = [contextValue pointerValue];
+            }
+        }
+
+        float *userBuffer = [ou buffer];
+        NSUInteger sourceChannels = MAX((NSUInteger)1, [ou outputChannels]);
+
+        if (trackProcessor != NULL) {
+            trackProcessor(userBuffer, (NSUInteger)nsamp, sourceChannels, (NSUInteger)_mixerFrequency, trackContext);
+        }
+
+        // Sidechain: capture post-track per-user audio so multiple destinations can reuse it.
+        if (nsamp <= MK_SIDECHAIN_MAX_FRAMES) {
+            for (int si = 0; si < MK_SIDECHAIN_MAX_SESSIONS; si++) {
+                if (!_sidechainUserSlots[si].valid) {
+                    _sidechainUserSlots[si].session = sessionID;
+                    _sidechainUserSlots[si].frameCount = nsamp;
+                    _sidechainUserSlots[si].channels = sourceChannels;
+                    _sidechainUserSlots[si].valid = YES;
+                    memcpy(_sidechainUserSlots[si].buffer, userBuffer, sizeof(float) * nsamp * sourceChannels);
+                    break;
+                }
+            }
+        }
+
+        BOOL usesTrackSendRouting = [[_sessionUsesTrackSendRouting objectForKey:sessionKey] boolValue];
+        NSUInteger sendBusMask = [[_sessionTrackSendBusMasks objectForKey:sessionKey] unsignedIntegerValue];
+        NSUInteger directBusMask = 0;
+        if (usesTrackSendRouting) {
+            directBusMask = sendBusMask & 0x3;
+        } else {
+            NSNumber *busAssign = [_sessionBusAssignment objectForKey:sessionKey];
+            directBusMask = (busAssign != nil && [busAssign unsignedIntegerValue] == 1) ? 0x2 : 0x1;
+        }
+
+        if (directBusMask != 0) {
+            for (NSUInteger busIndex = 0; busIndex < 2; busIndex++) {
+                if ((directBusMask & (1u << busIndex)) == 0) {
+                    continue;
+                }
+                float *targetBuffer = (busIndex == 0) ? mixBuffer1 : mixBuffer2;
+                for (s = 0; s < nchan; ++s) {
+                    const float str = _speakerVolume[s] * volMultiplier * globalVolume;
+                    NSUInteger sourceChannelIndex = sourceChannels > 1 ? MIN((NSUInteger)s, sourceChannels - 1) : 0;
+
+                    float * restrict o = targetBuffer + s;
+                    for (i = 0; i < nsamp; ++i) {
+                        float sample = userBuffer[i * sourceChannels + sourceChannelIndex];
+                        if (nchan == 1 && sourceChannels > 1) {
+                            sample = 0.5f * (userBuffer[i * sourceChannels] + userBuffer[i * sourceChannels + 1]);
+                        }
+                        o[i*nchan] += sample * str;
+                    }
+                }
+            }
+        }
+    }
+
+    if (hasInputMonitorFrame) {
+        NSUInteger framesToMix = MIN((NSUInteger)nsamp, inputMonitorFrameCount);
+        NSUInteger sourceChannels = MAX((NSUInteger)1, inputMonitorChannels);
+        for (s = 0; s < nchan; ++s) {
+            const float str = _speakerVolume[s] * _settings.sidetoneVolume * globalVolume;
+            NSUInteger sourceChannelIndex = sourceChannels > 1 ? MIN((NSUInteger)s, sourceChannels - 1) : 0;
+            float * restrict o = sidetoneBuffer + s;
+            for (i = 0; i < framesToMix; ++i) {
+                float sample = inputMonitorBuffer[i * sourceChannels + sourceChannelIndex];
+                if (nchan == 1 && sourceChannels > 1) {
+                    sample = 0.5f * (inputMonitorBuffer[i * sourceChannels] + inputMonitorBuffer[i * sourceChannels + 1]);
+                }
+                o[i*nchan] += sample * str;
+            }
+        }
+    }
+
+    if (_sidechainInputValid && _sidechainInputFrameCount > 0 && (_inputTrackSendBusMask & 0x3) != 0) {
+        NSUInteger framesToMix = MIN((NSUInteger)nsamp, _sidechainInputFrameCount);
+        NSUInteger sourceChannels = MAX((NSUInteger)1, _sidechainInputChannels);
+        for (NSUInteger busIndex = 0; busIndex < 2; busIndex++) {
+            if ((_inputTrackSendBusMask & (1u << busIndex)) == 0) {
                 continue;
             }
-
-            float volMultiplier = 1.0f;
-            NSNumber *customVol = [_sessionVolumes objectForKey:sessionKey];
-            if (customVol) {
-                volMultiplier = [customVol floatValue];
-            }
-
-            MKAudioOutputFloatProcessCallback trackProcessor = NULL;
-            void *trackContext = NULL;
-            NSValue *processorValue = [_remoteTrackProcessors objectForKey:sessionKey];
-            NSValue *contextValue = [_remoteTrackProcessorContexts objectForKey:sessionKey];
-            if (processorValue != nil) {
-                trackProcessor = (MKAudioOutputFloatProcessCallback)[processorValue pointerValue];
-                if (contextValue != nil) {
-                    trackContext = [contextValue pointerValue];
-                }
-            }
-
-            float *userBuffer = [ou buffer];
-            NSUInteger sourceChannels = MAX((NSUInteger)1, [ou outputChannels]);
-
-            // Sidechain: capture pre-fader per-user audio
-            if (nsamp <= MK_SIDECHAIN_MAX_FRAMES) {
-                for (int si = 0; si < MK_SIDECHAIN_MAX_SESSIONS; si++) {
-                    if (!_sidechainUserSlots[si].valid) {
-                        _sidechainUserSlots[si].session = sessionID;
-                        _sidechainUserSlots[si].valid = YES;
-                        memcpy(_sidechainUserSlots[si].buffer, userBuffer, sizeof(float) * nsamp * sourceChannels);
-                        break;
-                    }
-                }
-            }
-
-            if (trackProcessor != NULL) {
-                trackProcessor(userBuffer, (NSUInteger)nsamp, sourceChannels, (NSUInteger)_mixerFrequency, trackContext);
-            }
-
-            // 根据 busAssignment 路由到 mixBuffer1 或 mixBuffer2
-            NSNumber *busAssign = [_sessionBusAssignment objectForKey:sessionKey];
-            float *targetBuffer = (busAssign != nil && [busAssign unsignedIntegerValue] == 1) ? mixBuffer2 : mixBuffer1;
-
-            for (s = 0; s < nchan; ++s) {
-                const float str = _speakerVolume[s] * volMultiplier * globalVolume;
-                NSUInteger sourceChannelIndex = sourceChannels > 1 ? MIN((NSUInteger)s, sourceChannels - 1) : 0;
-
-                float * restrict o = targetBuffer + s;
-                for (i = 0; i < nsamp; ++i) {
-                    float sample = userBuffer[i * sourceChannels + sourceChannelIndex];
-                    if (nchan == 1 && sourceChannels > 1) {
-                        sample = 0.5f * (userBuffer[i * sourceChannels] + userBuffer[i * sourceChannels + 1]);
-                    }
-                    o[i*nchan] += sample * str;
-                }
-            }
-        }
-
-        // Sidechain: capture pre-processor master bus audio
-        if (nsamp <= MK_SIDECHAIN_MAX_FRAMES) {
-            memcpy(_sidechainMasterBus1, mixBuffer1, bufferBytes);
-            _sidechainMasterBus1Valid = YES;
-            memcpy(_sidechainMasterBus2, mixBuffer2, bufferBytes);
-            _sidechainMasterBus2Valid = YES;
-            MKLogInfo(Audio, @"MKAudioOutput: Captured sidechain buffers for masterBus1/masterBus2 (%u frames, %u channels)", (unsigned)nsamp, (unsigned)_numChannels);
-        }
-
-        // 分别对两个总线应用各自的处理器
-        if (_remoteBusProcessor != NULL && [mix count] > 0) {
-            _remoteBusProcessor(mixBuffer1, (NSUInteger)nsamp, (NSUInteger)_numChannels, (NSUInteger)_mixerFrequency, _remoteBusProcessorContext);
-        }
-        if (_remoteBus2Processor != NULL && [mix count] > 0) {
-            _remoteBus2Processor(mixBuffer2, (NSUInteger)nsamp, (NSUInteger)_numChannels, (NSUInteger)_mixerFrequency, _remoteBus2ProcessorContext);
-        }
-
-        for (MKAudioOutputUser *ou in sidetoneMix) {
-            const float * restrict userBuffer = [ou buffer];
-            NSUInteger sourceChannels = MAX((NSUInteger)1, [ou outputChannels]);
+            float *targetBuffer = (busIndex == 0) ? mixBuffer1 : mixBuffer2;
             for (s = 0; s < nchan; ++s) {
                 const float str = _speakerVolume[s] * globalVolume;
                 NSUInteger sourceChannelIndex = sourceChannels > 1 ? MIN((NSUInteger)s, sourceChannels - 1) : 0;
-                float * restrict o = mixBuffer1 + s;
-                for (i = 0; i < nsamp; ++i) {
-                    float sample = userBuffer[i * sourceChannels + sourceChannelIndex];
+                float * restrict o = targetBuffer + s;
+                for (i = 0; i < framesToMix; ++i) {
+                    float sample = _sidechainInput[i * sourceChannels + sourceChannelIndex];
                     if (nchan == 1 && sourceChannels > 1) {
-                        sample = 0.5f * (userBuffer[i * sourceChannels] + userBuffer[i * sourceChannels + 1]);
+                        sample = 0.5f * (_sidechainInput[i * sourceChannels] + _sidechainInput[i * sourceChannels + 1]);
                     }
                     o[i*nchan] += sample * str;
                 }
             }
         }
+    }
 
-        // 合并两个总线到最终输出
-        short *outputBuffer = (short *)frames;
-        for (i = 0; i < nsamp * _numChannels; ++i) {
-            float combined = mixBuffer1[i] + mixBuffer2[i];
-            if (combined >= 1.0f) {
-                outputBuffer[i] = 32767;
-            } else if (combined < -1.0f) {
-                outputBuffer[i] = -32768;
-            } else {
-                outputBuffer[i] = combined * 32768.0f;
-            }
+    // 允许总线在没有远端用户时也渲染，这样轨道 send 可以直接进 master 轨。
+    if (_remoteBusProcessor != NULL) {
+        _remoteBusProcessor(mixBuffer1, (NSUInteger)nsamp, (NSUInteger)_numChannels, (NSUInteger)_mixerFrequency, _remoteBusProcessorContext);
+    }
+    if (_remoteBus2Processor != NULL) {
+        _remoteBus2Processor(mixBuffer2, (NSUInteger)nsamp, (NSUInteger)_numChannels, (NSUInteger)_mixerFrequency, _remoteBus2ProcessorContext);
+    }
+
+    // Sidechain: capture post-track/post-bus signals after their plugins have run.
+    if (nsamp <= MK_SIDECHAIN_MAX_FRAMES) {
+        memcpy(_sidechainMasterBus1, mixBuffer1, bufferBytes);
+        _sidechainMasterBus1Valid = YES;
+        memcpy(_sidechainMasterBus2, mixBuffer2, bufferBytes);
+        _sidechainMasterBus2Valid = YES;
+        MKLogInfo(Audio, @"MKAudioOutput: Captured post-track sidechain buffers for masterBus1/masterBus2/input/sidetone (%u frames, %u channels)", (unsigned)nsamp, (unsigned)_numChannels);
+    }
+
+    // 合并两个总线到最终输出，并用最终结果决定是否需要 CNG。
+    short *outputBuffer = (short *)frames;
+    retVal = NO;
+    for (i = 0; i < nsamp * _numChannels; ++i) {
+        float combined = mixBuffer1[i] + mixBuffer2[i] + sidetoneBuffer[i];
+        if (combined > 0.00001f || combined < -0.00001f) {
+            retVal = YES;
         }
-    } else {
-        memset((short *)frames, 0, nsamp * _numChannels * sizeof(short));
+        if (combined >= 1.0f) {
+            outputBuffer[i] = 32767;
+        } else if (combined < -1.0f) {
+            outputBuffer[i] = -32768;
+        } else {
+            outputBuffer[i] = combined * 32768.0f;
+        }
     }
     [_outputLock unlock];
 
@@ -400,10 +469,9 @@ typedef struct {
         [self removeBuffer:ou];
     }
 
-    retVal = [mix count] > 0 || [sidetoneMix count] > 0;
+    retVal = retVal || hasInputMonitorFrame;
 
     [mix release];
-    [sidetoneMix release];
     [del release];
 
     if(!retVal && _cngEnabled) {
@@ -560,6 +628,16 @@ typedef struct {
     [_outputLock unlock];
 }
 
+- (void) setInputMonitorEnabled:(BOOL)enabled gain:(float)gain {
+    [_outputLock lock];
+    _settings.enableSideTone = enabled;
+    _settings.sidetoneVolume = gain < 0.0f ? 0.0f : gain;
+    if (!enabled) {
+        _inputMonitorLastSequence = 0;
+    }
+    [_outputLock unlock];
+}
+
 - (void) setBusAssignment:(NSUInteger)busIndex forSession:(NSUInteger)session {
     NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
     [_outputLock lock];
@@ -573,6 +651,34 @@ typedef struct {
     NSNumber *assignment = [_sessionBusAssignment objectForKey:sessionKey];
     [_outputLock unlock];
     return assignment ? [assignment unsignedIntegerValue] : 0;
+}
+
+- (void) setUsesTrackSendRouting:(BOOL)enabled forSession:(NSUInteger)session {
+    NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
+    [_outputLock lock];
+    if (enabled) {
+        [_sessionUsesTrackSendRouting setObject:[NSNumber numberWithBool:YES] forKey:sessionKey];
+    } else {
+        [_sessionUsesTrackSendRouting removeObjectForKey:sessionKey];
+    }
+    [_outputLock unlock];
+}
+
+- (void) setTrackSendBusMask:(NSUInteger)busMask forSession:(NSUInteger)session {
+    NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
+    [_outputLock lock];
+    if ((busMask & 0x3) != 0) {
+        [_sessionTrackSendBusMasks setObject:[NSNumber numberWithUnsignedInteger:(busMask & 0x3)] forKey:sessionKey];
+    } else {
+        [_sessionTrackSendBusMasks removeObjectForKey:sessionKey];
+    }
+    [_outputLock unlock];
+}
+
+- (void) setInputTrackSendBusMask:(NSUInteger)busMask {
+    [_outputLock lock];
+    _inputTrackSendBusMask = (busMask & 0x3);
+    [_outputLock unlock];
 }
 
 - (NSArray *) copyRemoteSessionOrder {
@@ -624,10 +730,10 @@ typedef struct {
     if (key == nil) return NULL;
 
     if ([key isEqualToString:@"input"]) {
-        if (_sidechainInputBuffer != NULL && _sidechainInputFrameCount > 0) {
+        if (_sidechainInputValid && _sidechainInputFrameCount > 0) {
             *outFrameCount = _sidechainInputFrameCount;
             *outChannels = _sidechainInputChannels;
-            return _sidechainInputBuffer;
+            return _sidechainInput;
         }
         return NULL;
     }
@@ -650,12 +756,21 @@ typedef struct {
         return NULL;
     }
 
+    if ([key isEqualToString:@"sidetone"]) {
+        if (_sidechainSidetoneValid) {
+            *outFrameCount = _sidechainSidetoneFrameCount;
+            *outChannels = _sidechainSidetoneChannels;
+            return _sidechainSidetone;
+        }
+        return NULL;
+    }
+
     if ([key hasPrefix:@"session:"]) {
         NSUInteger session = (NSUInteger)[[key substringFromIndex:8] integerValue];
         for (int si = 0; si < MK_SIDECHAIN_MAX_SESSIONS; si++) {
             if (_sidechainUserSlots[si].valid && _sidechainUserSlots[si].session == session) {
-                *outFrameCount = _sidechainFrameCount;
-                *outChannels = _sidechainChannels;
+                *outFrameCount = _sidechainUserSlots[si].frameCount;
+                *outChannels = _sidechainUserSlots[si].channels;
                 return _sidechainUserSlots[si].buffer;
             }
         }
@@ -665,9 +780,29 @@ typedef struct {
 }
 
 - (void) setSidechainInputBuffer:(const float *)buffer frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels {
-    _sidechainInputBuffer = buffer;
+    if (buffer == NULL || frameCount == 0 || channels == 0 || channels > 2 || frameCount > MK_SIDECHAIN_MAX_FRAMES) {
+        _sidechainInputValid = NO;
+        _sidechainInputFrameCount = 0;
+        _sidechainInputChannels = 0;
+        return;
+    }
+    memcpy(_sidechainInput, buffer, frameCount * channels * sizeof(float));
+    _sidechainInputValid = YES;
     _sidechainInputFrameCount = frameCount;
     _sidechainInputChannels = channels;
+}
+
+- (void) setSidetoneTrackSidechainBuffer:(const float *)buffer frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels {
+    if (buffer == NULL || frameCount == 0 || channels == 0 || channels > 2 || frameCount > MK_SIDECHAIN_MAX_FRAMES) {
+        _sidechainSidetoneValid = NO;
+        _sidechainSidetoneFrameCount = 0;
+        _sidechainSidetoneChannels = 0;
+        return;
+    }
+    memcpy(_sidechainSidetone, buffer, frameCount * channels * sizeof(float));
+    _sidechainSidetoneFrameCount = frameCount;
+    _sidechainSidetoneChannels = channels;
+    _sidechainSidetoneValid = YES;
 }
 
 @end

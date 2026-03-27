@@ -78,6 +78,8 @@
     NSMutableData          *_opusBuffer;
     MKAudioInputInt16ProcessCallback _inputTrackProcessor;
     void                   *_inputTrackProcessorContext;
+    MKAudioInputInt16ProcessCallback _sidetoneTrackProcessor;
+    void                   *_sidetoneTrackProcessorContext;
     
     MKConnection           *_connection;
 }
@@ -107,6 +109,8 @@
     _vadOpenLastTime = [[NSDate date] timeIntervalSince1970];
     _inputTrackProcessor = NULL;
     _inputTrackProcessorContext = NULL;
+    _sidetoneTrackProcessor = NULL;
+    _sidetoneTrackProcessorContext = NULL;
 
     micFrequency = [_device inputSampleRate];
     numMicChannels = MAX(1, [_device numberOfInputChannels]);
@@ -359,21 +363,42 @@
     }
 }
 
-- (void) processSidetone {
-    // Limit sidetone processing to when we have a 48KHz mic sampling rate.
-    // For newer iOS versions, we're always given 48KHz, but for OS X, we can't
-    // be certain. So this most certainly mutes the sidetone on OS X for many audio
-    // devices.
-    //
-    // When resampling from the internal 48KHz sampling rate to 32KHz for Speex UWB, this
-    // sidetone code path will be adding non-preprocessed frames to the sidetone output.
-    // This is a deliberate choice for now, because it allows us to avoid resampling a
-    // perhaps already resampled signal.
-    if (micFrequency == 48000) {
-        NSData *data = [[NSData alloc] initWithBytes:psMic length:micLength * encodeChannels * sizeof(short)];
-        [[[MKAudio sharedAudio] sidetoneOutput] addFrame:data];
-        [data release];
+- (void) updateInputMonitorSendForFrame:(short *)frame
+                             frameCount:(NSUInteger)frameCount
+                               channels:(NSUInteger)channels
+                             sampleRate:(NSUInteger)processingSampleRate
+                                 active:(BOOL)active {
+    MKAudio *audio = [MKAudio sharedAudio];
+    if (audio == nil) {
+        return;
     }
+
+    if (!active || frame == NULL || frameCount == 0 || channels == 0 || channels > 2 || processingSampleRate != SAMPLE_RATE) {
+        [audio writeSidetoneSidechainSamples:NULL frameCount:0 channels:0];
+        [audio writeInputMonitorSamples:NULL frameCount:0 channels:0 sampleRate:processingSampleRate];
+        return;
+    }
+
+    NSUInteger sampleCount = frameCount * channels;
+    short sidetoneFrame[sampleCount];
+    // Sidetone is a dedicated output bus fed by the post-input-track signal.
+    // Start from the current input-track frame, then let the sidetone rack
+    // apply its own plugin chain on top.
+    memcpy(sidetoneFrame, frame, sampleCount * sizeof(short));
+    if (_sidetoneTrackProcessor != NULL) {
+        _sidetoneTrackProcessor(sidetoneFrame,
+                                frameCount,
+                                channels,
+                                processingSampleRate,
+                                _sidetoneTrackProcessorContext);
+    }
+
+    float monitorBuffer[sampleCount];
+    for (NSUInteger sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++) {
+        monitorBuffer[sampleIndex] = (float)sidetoneFrame[sampleIndex] / 32768.0f;
+    }
+    [audio writeSidetoneSidechainSamples:monitorBuffer frameCount:frameCount channels:channels];
+    [audio writeInputMonitorSamples:monitorBuffer frameCount:frameCount channels:channels sampleRate:processingSampleRate];
 }
 
 - (void) resetPreprocessor {
@@ -510,6 +535,7 @@
     short *frame = resampled ? psOut : psMic;
     int frameSamples = frameSize * encodeChannels;
     short monoFrame[frameSize];
+
     if (_settings.enablePreprocessor) {
         if (encodeChannels > 1) {
             int i;
@@ -546,21 +572,22 @@
         }
     }
 
-    // Capture pre-AU mic signal for sidechain (convert Int16 → Float)
+    // Publish post-input-track signal for sidechain sends.
     {
         MKAudio *audio = [MKAudio sharedAudio];
         if (audio != nil) {
             float scBuf[MK_SIDECHAIN_MAX_FRAMES * 2];
             NSUInteger scCount = MIN((NSUInteger)frameSize, (NSUInteger)MK_SIDECHAIN_MAX_FRAMES);
+            if (_inputTrackProcessor != NULL) {
+                _inputTrackProcessor(frame, (NSUInteger)frameSize, (NSUInteger)encodeChannels, (NSUInteger)sampleRate, _inputTrackProcessorContext);
+            }
             for (NSUInteger si = 0; si < scCount * encodeChannels; si++) {
                 scBuf[si] = (float)frame[si] / 32768.0f;
             }
             [audio writeSidechainInputSamples:scBuf frameCount:scCount channels:encodeChannels];
+        } else if (_inputTrackProcessor != NULL) {
+            _inputTrackProcessor(frame, (NSUInteger)frameSize, (NSUInteger)encodeChannels, (NSUInteger)sampleRate, _inputTrackProcessorContext);
         }
-    }
-
-    if (_inputTrackProcessor != NULL) {
-        _inputTrackProcessor(frame, (NSUInteger)frameSize, (NSUInteger)encodeChannels, (NSUInteger)sampleRate, _inputTrackProcessorContext);
     }
 
     float sum = 1.0f;
@@ -630,9 +657,11 @@
     if (_muted)
         _doTransmit = NO;
     
-    if (_settings.enableSideTone && (_doTransmit || _lastTransmit)) {
-        [self processSidetone];
-    }
+    [self updateInputMonitorSendForFrame:frame
+                              frameCount:(NSUInteger)frameSize
+                                channels:(NSUInteger)encodeChannels
+                              sampleRate:(NSUInteger)sampleRate
+                                  active:_settings.enableSideTone];
     
     if (_lastTransmit != _doTransmit) {
         // fixme(mkrautz): Handle more talkstates
@@ -760,6 +789,24 @@
         _inputTrackProcessor = NULL;
         _inputTrackProcessorContext = NULL;
     }
+}
+
+- (void) setSidetoneTrackProcessor:(MKAudioInputInt16ProcessCallback)processor context:(void *)context {
+    @synchronized(self) {
+        _sidetoneTrackProcessor = processor;
+        _sidetoneTrackProcessorContext = context;
+    }
+}
+
+- (void) clearSidetoneTrackProcessor {
+    @synchronized(self) {
+        _sidetoneTrackProcessor = NULL;
+        _sidetoneTrackProcessorContext = NULL;
+    }
+}
+
+- (void) setInputMonitorEnabled:(BOOL)enabled {
+    _settings.enableSideTone = enabled;
 }
 
 #pragma mark - Weak Network Adaptive Bitrate (弱网自适应码率)

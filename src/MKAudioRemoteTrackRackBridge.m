@@ -4,6 +4,7 @@
 @protocol MKAudioRemoteTrackRackExports <NSObject>
 - (void)setPreviewGain:(float)gain enabled:(BOOL)enabled;
 - (void)updateAudioUnitChain:(NSArray *)stages sampleRate:(NSUInteger)sampleRate;
+- (void)setSendSourceKeys:(NSArray *)sourceKeys;
 - (void)setHostBufferFrames:(NSUInteger)frames;
 - (void)updateProcessingSampleRate:(NSUInteger)sampleRate;
 - (NSDictionary *)currentStatus;
@@ -44,6 +45,10 @@
 
 - (void)updateAudioUnitChain:(NSArray *)stages sampleRate:(NSUInteger)sampleRate {
     [_rack updateAudioUnitChain:stages sampleRate:sampleRate];
+}
+
+- (void)setSendSourceKeys:(NSArray *)sourceKeys {
+    [_rack setSendSourceKeys:sourceKeys];
 }
 
 - (void)updateHostBufferFrames:(NSUInteger)frames {

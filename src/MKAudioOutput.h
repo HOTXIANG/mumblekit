@@ -14,6 +14,8 @@
 struct MKSidechainSlot {
     float      buffer[MK_SIDECHAIN_MAX_FRAMES * 2];
     unsigned long session;
+    NSUInteger frameCount;
+    NSUInteger channels;
     int        valid;
 };
 
@@ -44,10 +46,14 @@ typedef void (*MKAudioOutputFloatProcessCallback)(float *samples, NSUInteger fra
 
 - (void) setRemoteBus2Processor:(MKAudioOutputFloatProcessCallback)processor context:(void *)context;
 - (void) clearRemoteBus2Processor;
+- (void) setInputMonitorEnabled:(BOOL)enabled gain:(float)gain;
 
 /// 设置用户输出到哪个总线（0=Bus1 默认, 1=Bus2）
 - (void) setBusAssignment:(NSUInteger)busIndex forSession:(NSUInteger)session;
 - (NSUInteger) busAssignmentForSession:(NSUInteger)session;
+- (void) setUsesTrackSendRouting:(BOOL)enabled forSession:(NSUInteger)session;
+- (void) setTrackSendBusMask:(NSUInteger)busMask forSession:(NSUInteger)session;
+- (void) setInputTrackSendBusMask:(NSUInteger)busMask;
 
 - (NSArray *) copyRemoteSessionOrder;
 - (NSUInteger) outputSampleRate;
@@ -55,12 +61,13 @@ typedef void (*MKAudioOutputFloatProcessCallback)(float *samples, NSUInteger fra
 /// DSP Observability - Query per-track DSP status and I/O levels
 - (NSDictionary *) copyDSPStatusForSession:(NSUInteger)session;
 
-/// Sidechain buffer pool - retrieve pre-fader audio snapshot by source key
-/// Keys: @"session:NNN" (per-user), @"masterBus1", @"masterBus2", @"input"
+/// Sidechain buffer pool - retrieve post-track snapshots by source key
+/// Keys: @"session:NNN" (per-user), @"masterBus1", @"masterBus2", @"sidetone", @"input"
 - (const float *) sidechainBufferForSourceKey:(NSString *)key
                                    frameCount:(NSUInteger *)outFrameCount
                                      channels:(NSUInteger *)outChannels;
 
 /// Set the input track sidechain buffer (called externally by MKAudio)
 - (void) setSidechainInputBuffer:(const float *)buffer frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels;
+- (void) setSidetoneTrackSidechainBuffer:(const float *)buffer frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels;
 @end

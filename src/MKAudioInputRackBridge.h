@@ -11,6 +11,7 @@
 
 - (void)updatePreviewGain:(float)gain enabled:(BOOL)enabled;
 - (void)updateAudioUnitChain:(NSArray *)stages sampleRate:(NSUInteger)sampleRate;
+- (void)setSendSourceKeys:(NSArray *)sourceKeys;
 - (void)updateHostBufferFrames:(NSUInteger)frames;
 - (void)updateSampleRate:(NSUInteger)sampleRate;
 - (NSDictionary *)copyStatus;

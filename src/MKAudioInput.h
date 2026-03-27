@@ -23,6 +23,9 @@ typedef void (*MKAudioInputInt16ProcessCallback)(short *samples, NSUInteger fram
 
 - (void) setInputTrackProcessor:(MKAudioInputInt16ProcessCallback)processor context:(void *)context;
 - (void) clearInputTrackProcessor;
+- (void) setSidetoneTrackProcessor:(MKAudioInputInt16ProcessCallback)processor context:(void *)context;
+- (void) clearSidetoneTrackProcessor;
+- (void) setInputMonitorEnabled:(BOOL)enabled;
 
 - (void) setForceTransmit:(BOOL)flag;
 - (BOOL) forceTransmit;

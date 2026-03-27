@@ -33,6 +33,7 @@
 #elif TARGET_OS_IPHONE
 #import <libkern/OSAtomic.h>
 #endif
+#import <os/lock.h>
 
 #if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
 #import <UIKit/UIKit.h>
@@ -67,6 +68,7 @@ typedef struct _MKAudioPreviewGainProcessorState {
     MKAudioPreviewGainProcessorState _inputTrackPreviewState;
     MKAudioPreviewGainProcessorState _remoteBusPreviewState;
     MKAudioInputRackBridge *_inputTrackRackBridge;
+    MKAudioInputRackBridge *_sidetoneRackBridge;
     MKAudioRemoteBusRackBridge *_remoteBusRackBridge;
     MKAudioRemoteBusRackBridge *_remoteBusRackBridge2;
     MKAudioPreviewGainProcessorState _remoteBus2PreviewState;
@@ -84,12 +86,38 @@ typedef struct _MKAudioPreviewGainProcessorState {
     // P0 修复：使用串行队列替代 @synchronized，提升性能
     dispatch_queue_t         _accessQueue;
 
-    // Input sidechain ping-pong buffer (written by input thread, read by output thread)
-    float    *_sidechainInputPingPong[2];  // two pre-allocated buffers
-    volatile int32_t _sidechainInputWriteIndex;  // 0 or 1, atomically swapped
-    NSUInteger _sidechainInputPPFrameCount;
+    // Input track sidechain FIFO (written by input thread, consumed in render-aligned blocks)
+    os_unfair_lock _sidechainInputLock;
+    float    *_sidechainInputRingBuffer;
+    float    *_sidechainInputReadBuffer;
+    NSUInteger _sidechainInputRingCapacityFrames;
+    NSUInteger _sidechainInputReadPos;
+    NSUInteger _sidechainInputWritePos;
+    NSUInteger _sidechainInputBufferedFrames;
     NSUInteger _sidechainInputPPChannels;
     NSUInteger _sidechainInputPPSampleRate;
+
+    // Sidetone track sidechain FIFO (written by input thread, consumed in render-aligned blocks)
+    os_unfair_lock _sidechainSidetoneLock;
+    float    *_sidechainSidetoneRingBuffer;
+    float    *_sidechainSidetoneReadBuffer;
+    NSUInteger _sidechainSidetoneRingCapacityFrames;
+    NSUInteger _sidechainSidetoneReadPos;
+    NSUInteger _sidechainSidetoneWritePos;
+    NSUInteger _sidechainSidetoneBufferedFrames;
+    NSUInteger _sidechainSidetonePPChannels;
+    NSUInteger _sidechainSidetonePPSampleRate;
+
+    // Input monitor FIFO (post-sidetone-track DSP, consumed continuously by output)
+    os_unfair_lock _inputMonitorLock;
+    float    *_inputMonitorRingBuffer;
+    float    *_inputMonitorReadBuffer;
+    NSUInteger _inputMonitorRingCapacityFrames;
+    NSUInteger _inputMonitorReadPos;
+    NSUInteger _inputMonitorWritePos;
+    NSUInteger _inputMonitorBufferedFrames;
+    NSUInteger _inputMonitorPPChannels;
+    NSUInteger _inputMonitorPPSampleRate;
 
     // Weak Network Mode state (弱网模式状态)
     BOOL                     _weakNetworkModeEnabled;
@@ -313,6 +341,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         _remoteBusPreviewState.enabled = NO;
         _pluginHostBufferFrames = 256;
         _inputTrackRackBridge = [[MKAudioInputRackBridge alloc] init];
+        _sidetoneRackBridge = [[MKAudioInputRackBridge alloc] init];
         _remoteBusRackBridge = [[MKAudioRemoteBusRackBridge alloc] init];
         _remoteBusRackBridge2 = [[MKAudioRemoteBusRackBridge alloc] init];
         _remoteBus2PreviewState.gain = 1.0f;
@@ -320,13 +349,33 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         _remoteTrackPreviewStates = [[NSMutableDictionary alloc] init];
         _remoteTrackRackBridges = [[NSMutableDictionary alloc] init];
 
-        // Input sidechain ping-pong buffer allocation
-        _sidechainInputPingPong[0] = calloc(MK_SIDECHAIN_MAX_FRAMES * 2, sizeof(float));
-        _sidechainInputPingPong[1] = calloc(MK_SIDECHAIN_MAX_FRAMES * 2, sizeof(float));
-        _sidechainInputWriteIndex = 0;
-        _sidechainInputPPFrameCount = 0;
+        _sidechainInputLock = OS_UNFAIR_LOCK_INIT;
+        _sidechainInputRingCapacityFrames = MK_SIDECHAIN_MAX_FRAMES * 8;
+        _sidechainInputRingBuffer = calloc(_sidechainInputRingCapacityFrames * 2, sizeof(float));
+        _sidechainInputReadBuffer = calloc(MK_SIDECHAIN_MAX_FRAMES * 2, sizeof(float));
+        _sidechainInputReadPos = 0;
+        _sidechainInputWritePos = 0;
+        _sidechainInputBufferedFrames = 0;
         _sidechainInputPPChannels = 0;
         _sidechainInputPPSampleRate = 0;
+        _sidechainSidetoneLock = OS_UNFAIR_LOCK_INIT;
+        _sidechainSidetoneRingCapacityFrames = MK_SIDECHAIN_MAX_FRAMES * 8;
+        _sidechainSidetoneRingBuffer = calloc(_sidechainSidetoneRingCapacityFrames * 2, sizeof(float));
+        _sidechainSidetoneReadBuffer = calloc(MK_SIDECHAIN_MAX_FRAMES * 2, sizeof(float));
+        _sidechainSidetoneReadPos = 0;
+        _sidechainSidetoneWritePos = 0;
+        _sidechainSidetoneBufferedFrames = 0;
+        _sidechainSidetonePPChannels = 0;
+        _sidechainSidetonePPSampleRate = 0;
+        _inputMonitorLock = OS_UNFAIR_LOCK_INIT;
+        _inputMonitorRingCapacityFrames = MK_SIDECHAIN_MAX_FRAMES * 8;
+        _inputMonitorRingBuffer = calloc(_inputMonitorRingCapacityFrames * 2, sizeof(float));
+        _inputMonitorReadBuffer = calloc(MK_SIDECHAIN_MAX_FRAMES * 2, sizeof(float));
+        _inputMonitorReadPos = 0;
+        _inputMonitorWritePos = 0;
+        _inputMonitorBufferedFrames = 0;
+        _inputMonitorPPChannels = 0;
+        _inputMonitorPPSampleRate = 0;
 
 #if TARGET_OS_IOS
         // 注册通知监听 (替代旧的 C 回调)
@@ -375,6 +424,8 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     
     [_inputTrackRackBridge release];
     _inputTrackRackBridge = nil;
+    [_sidetoneRackBridge release];
+    _sidetoneRackBridge = nil;
     [_remoteBusRackBridge release];
     _remoteBusRackBridge = nil;
     [_remoteBusRackBridge2 release];
@@ -382,9 +433,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     [_remoteTrackRackBridges release];
     _remoteTrackRackBridges = nil;
 
-    // Input sidechain ping-pong buffer free
-    free(_sidechainInputPingPong[0]);
-    free(_sidechainInputPingPong[1]);
+    free(_sidechainInputRingBuffer);
+    free(_sidechainInputReadBuffer);
+    free(_sidechainSidetoneRingBuffer);
+    free(_sidechainSidetoneReadBuffer);
+    free(_inputMonitorRingBuffer);
+    free(_inputMonitorReadBuffer);
 
     [super dealloc];
 }
@@ -725,6 +779,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #endif
         // Clear sidechain references before tearing down audio output
         [_inputTrackRackBridge setSidechainAudioOutput:nil];
+        [_sidetoneRackBridge setSidechainAudioOutput:nil];
         [_remoteBusRackBridge setSidechainAudioOutput:nil];
         [_remoteBusRackBridge2 setSidechainAudioOutput:nil];
         for (NSNumber *sessionKey in _remoteTrackRackBridges) {
@@ -741,6 +796,27 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         _audioDevice = nil;
         [_sidetoneOutput release];
         _sidetoneOutput = nil;
+        os_unfair_lock_lock(&_sidechainInputLock);
+        _sidechainInputReadPos = 0;
+        _sidechainInputWritePos = 0;
+        _sidechainInputBufferedFrames = 0;
+        _sidechainInputPPChannels = 0;
+        _sidechainInputPPSampleRate = 0;
+        os_unfair_lock_unlock(&_sidechainInputLock);
+        os_unfair_lock_lock(&_sidechainSidetoneLock);
+        _sidechainSidetoneReadPos = 0;
+        _sidechainSidetoneWritePos = 0;
+        _sidechainSidetoneBufferedFrames = 0;
+        _sidechainSidetonePPChannels = 0;
+        _sidechainSidetonePPSampleRate = 0;
+        os_unfair_lock_unlock(&_sidechainSidetoneLock);
+        os_unfair_lock_lock(&_inputMonitorLock);
+        _inputMonitorReadPos = 0;
+        _inputMonitorWritePos = 0;
+        _inputMonitorBufferedFrames = 0;
+        _inputMonitorPPChannels = 0;
+        _inputMonitorPPSampleRate = 0;
+        os_unfair_lock_unlock(&_inputMonitorLock);
         _running = NO;
     }
     
@@ -841,6 +917,10 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         [_inputTrackRackBridge updatePreviewGain:_inputTrackPreviewState.gain enabled:_inputTrackPreviewState.enabled];
         [_inputTrackRackBridge updateSampleRate:MKAudioInputProcessingSampleRateForSettings(&settingsSnapshot)];
         [_audioInput setInputTrackProcessor:MKAudioInputRackBridgeProcess context:_inputTrackRackBridge];
+        [_sidetoneRackBridge updateHostBufferFrames:_pluginHostBufferFrames];
+        [_sidetoneRackBridge updatePreviewGain:1.0f enabled:NO];
+        [_sidetoneRackBridge updateSampleRate:MKAudioInputProcessingSampleRateForSettings(&settingsSnapshot)];
+        [_audioInput setSidetoneTrackProcessor:MKAudioInputRackBridgeProcess context:_sidetoneRackBridge];
         
         [_audioInput setSelfMuted:_cachedSelfMuted];
         [_audioInput setSuppressed:_cachedSuppressed];
@@ -858,14 +938,11 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
         // Wire sidechain buffer pool to all rack bridges
         [_inputTrackRackBridge setSidechainAudioOutput:_audioOutput];
+        [_sidetoneRackBridge setSidechainAudioOutput:_audioOutput];
         [_remoteBusRackBridge setSidechainAudioOutput:_audioOutput];
         [_remoteBusRackBridge2 setSidechainAudioOutput:_audioOutput];
 
         [self rebindRemoteTrackProcessorsToOutputLocked];
-        
-        if (settingsSnapshot.enableSideTone) {
-            _sidetoneOutput = [[MKAudioOutputSidetone alloc] initWithSettings:&settingsSnapshot];
-        }
         
         _running = YES;
     }
@@ -933,8 +1010,13 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     
     dispatch_async(_accessQueue, ^{
         memcpy(&_audioSettings, &settingsCopy, sizeof(MKAudioSettings));
+        [_audioInput setInputMonitorEnabled:settingsCopy.enableSideTone];
         if (_audioOutput != nil) {
             [_audioOutput setMasterVolume:settingsCopy.volume];
+            [_audioOutput setInputMonitorEnabled:settingsCopy.enableSideTone gain:settingsCopy.sidetoneVolume];
+        }
+        if (!settingsCopy.enableSideTone) {
+            [self writeInputMonitorSamples:NULL frameCount:0 channels:0 sampleRate:0];
         }
     });
     // 如果设置改变（如切换扬声器），可能需要刷新 Session 配置
@@ -1060,6 +1142,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     dispatch_async(_accessQueue, ^{
         _pluginHostBufferFrames = normalized;
         [_inputTrackRackBridge updateHostBufferFrames:normalized];
+        [_sidetoneRackBridge updateHostBufferFrames:normalized];
         [_remoteBusRackBridge updateHostBufferFrames:normalized];
         [_remoteBusRackBridge2 updateHostBufferFrames:normalized];
         for (MKAudioRemoteTrackRackBridge *bridge in [_remoteTrackRackBridges allValues]) {
@@ -1084,6 +1167,10 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     __block NSUInteger result = SAMPLE_RATE;
     dispatch_sync(_accessQueue, ^{
         if ([trackKey isEqualToString:@"input"]) {
+            result = MKAudioInputProcessingSampleRateForSettings(&_audioSettings);
+            return;
+        }
+        if ([trackKey isEqualToString:@"sidetone"]) {
             result = MKAudioInputProcessingSampleRateForSettings(&_audioSettings);
             return;
         }
@@ -1226,6 +1313,29 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     });
 }
 
+- (void) setInputTrackSendSourceKeys:(NSArray<NSString *> *)trackKeys {
+    dispatch_async(_accessQueue, ^{
+        [_inputTrackRackBridge setSendSourceKeys:trackKeys];
+    });
+}
+
+- (void) setSidetoneAudioUnitChain:(NSArray *)audioUnits {
+    dispatch_async(_accessQueue, ^{
+        NSUInteger sampleRate = MKAudioInputProcessingSampleRateForSettings(&_audioSettings);
+        [_sidetoneRackBridge updateSampleRate:sampleRate];
+        if (self->_audioOutput != nil) {
+            [_sidetoneRackBridge setSidechainAudioOutput:self->_audioOutput];
+        }
+        [_sidetoneRackBridge updateAudioUnitChain:audioUnits sampleRate:sampleRate];
+    });
+}
+
+- (void) setSidetoneTrackSendSourceKeys:(NSArray<NSString *> *)trackKeys {
+    dispatch_async(_accessQueue, ^{
+        [_sidetoneRackBridge setSendSourceKeys:trackKeys];
+    });
+}
+
 - (void) setRemoteBusAudioUnitChain:(NSArray *)audioUnits {
     dispatch_async(_accessQueue, ^{
         NSUInteger sampleRate = SAMPLE_RATE;
@@ -1246,6 +1356,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     });
 }
 
+- (void) setRemoteBusSendSourceKeys:(NSArray<NSString *> *)trackKeys {
+    dispatch_async(_accessQueue, ^{
+        [_remoteBusRackBridge setSendSourceKeys:trackKeys];
+    });
+}
+
 - (void) setRemoteBus2AudioUnitChain:(NSArray *)audioUnits {
     dispatch_async(_accessQueue, ^{
         NSUInteger sampleRate = SAMPLE_RATE;
@@ -1263,6 +1379,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         // Set sidechain audio output reference for remote bus 2 (captures mixed audio for sidechain)
         [_remoteBusRackBridge2 setSidechainAudioOutput:_audioOutput];
         [_remoteBusRackBridge2 updateAudioUnitChain:audioUnits sampleRate:sampleRate];
+    });
+}
+
+- (void) setRemoteBus2SendSourceKeys:(NSArray<NSString *> *)trackKeys {
+    dispatch_async(_accessQueue, ^{
+        [_remoteBusRackBridge2 setSendSourceKeys:trackKeys];
     });
 }
 
@@ -1293,6 +1415,30 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         }
     });
     return result;
+}
+
+- (void) setRemoteTrackUsesSendRouting:(BOOL)enabled forSession:(NSUInteger)session {
+    dispatch_async(_accessQueue, ^{
+        if (_audioOutput != nil) {
+            [_audioOutput setUsesTrackSendRouting:enabled forSession:session];
+        }
+    });
+}
+
+- (void) setRemoteTrackSendBusMask:(NSUInteger)busMask forSession:(NSUInteger)session {
+    dispatch_async(_accessQueue, ^{
+        if (_audioOutput != nil) {
+            [_audioOutput setTrackSendBusMask:busMask forSession:session];
+        }
+    });
+}
+
+- (void) setInputTrackSendBusMask:(NSUInteger)busMask {
+    dispatch_async(_accessQueue, ^{
+        if (_audioOutput != nil) {
+            [_audioOutput setInputTrackSendBusMask:busMask];
+        }
+    });
 }
 
 - (void) setRemoteTrackPreviewGain:(float)gain enabled:(BOOL)enabled forSession:(NSUInteger)session {
@@ -1382,14 +1528,16 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         [bridge updateSampleRate:sampleRate];
         MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu calling updateAudioUnitChain...", (unsigned long)session);
 
-        [bridge updateAudioUnitChain:audioUnits sampleRate:sampleRate];
-        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu updateAudioUnitChain returned", (unsigned long)session);
-
         if (_audioOutput != nil) {
             // Set sidechain audio output reference for this bridge (critical for sidechain routing)
             [bridge setSidechainAudioOutput:_audioOutput];
             MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu set sidechain output", (unsigned long)session);
+        }
 
+        [bridge updateAudioUnitChain:audioUnits sampleRate:sampleRate];
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu updateAudioUnitChain returned", (unsigned long)session);
+
+        if (_audioOutput != nil) {
             [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess context:bridge forSession:session];
             MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu registered processor", (unsigned long)session);
         } else {
@@ -1397,6 +1545,17 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         }
 
         MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu completed", (unsigned long)session);
+    });
+}
+
+- (void) setRemoteTrackSendSourceKeys:(NSArray<NSString *> *)trackKeys forSession:(NSUInteger)session {
+    dispatch_async(_accessQueue, ^{
+        MKAudioRemoteTrackRackBridge *bridge = [self remoteTrackRackBridgeForSessionLocked:session createIfNeeded:YES];
+        [bridge setSendSourceKeys:trackKeys];
+
+        if (_audioOutput != nil) {
+            [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess context:bridge forSession:session];
+        }
     });
 }
 
@@ -1475,26 +1634,251 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     return status;
 }
 
-#pragma mark - Input Sidechain Ping-Pong Buffer
+#pragma mark - Sidechain FIFOs
 
 - (void) writeSidechainInputSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels {
-    if (samples == NULL || frameCount == 0 || frameCount > MK_SIDECHAIN_MAX_FRAMES) return;
-    int32_t writeIdx = _sidechainInputWriteIndex;
-    memcpy(_sidechainInputPingPong[writeIdx], samples, frameCount * channels * sizeof(float));
-    _sidechainInputPPFrameCount = frameCount;
+    os_unfair_lock_lock(&_sidechainInputLock);
+    if (samples == NULL || frameCount == 0 || channels == 0 || channels > 2 || frameCount > MK_SIDECHAIN_MAX_FRAMES) {
+        _sidechainInputReadPos = 0;
+        _sidechainInputWritePos = 0;
+        _sidechainInputBufferedFrames = 0;
+        _sidechainInputPPChannels = 0;
+        _sidechainInputPPSampleRate = 0;
+        os_unfair_lock_unlock(&_sidechainInputLock);
+        return;
+    }
+
+    if (_sidechainInputPPSampleRate != SAMPLE_RATE || _sidechainInputPPChannels != channels) {
+        _sidechainInputReadPos = 0;
+        _sidechainInputWritePos = 0;
+        _sidechainInputBufferedFrames = 0;
+    }
+
+    if (frameCount > _sidechainInputRingCapacityFrames) {
+        samples += (frameCount - _sidechainInputRingCapacityFrames) * channels;
+        frameCount = _sidechainInputRingCapacityFrames;
+    }
+
+    NSUInteger availableSpace = _sidechainInputRingCapacityFrames - _sidechainInputBufferedFrames;
+    if (frameCount > availableSpace) {
+        NSUInteger framesToDrop = frameCount - availableSpace;
+        _sidechainInputReadPos = (_sidechainInputReadPos + framesToDrop) % _sidechainInputRingCapacityFrames;
+        _sidechainInputBufferedFrames -= framesToDrop;
+    }
+
+    NSUInteger framesUntilWrap = _sidechainInputRingCapacityFrames - _sidechainInputWritePos;
+    NSUInteger firstChunk = MIN(frameCount, framesUntilWrap);
+    memcpy(_sidechainInputRingBuffer + (_sidechainInputWritePos * channels),
+           samples,
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < frameCount) {
+        memcpy(_sidechainInputRingBuffer,
+               samples + (firstChunk * channels),
+               (frameCount - firstChunk) * channels * sizeof(float));
+    }
+
+    _sidechainInputWritePos = (_sidechainInputWritePos + frameCount) % _sidechainInputRingCapacityFrames;
+    _sidechainInputBufferedFrames += frameCount;
     _sidechainInputPPChannels = channels;
     _sidechainInputPPSampleRate = SAMPLE_RATE;
-    // Atomic swap: readers now see the freshly written buffer
-    OSAtomicCompareAndSwap32(writeIdx, 1 - writeIdx, &_sidechainInputWriteIndex);
+    os_unfair_lock_unlock(&_sidechainInputLock);
 }
 
-- (const float *) readSidechainInputBufferWithFrameCount:(NSUInteger *)outFrameCount channels:(NSUInteger *)outChannels {
-    if (_sidechainInputPPFrameCount == 0) return NULL;
-    // Read from the buffer NOT currently being written to
-    int32_t readIdx = 1 - _sidechainInputWriteIndex;
-    *outFrameCount = _sidechainInputPPFrameCount;
-    *outChannels = _sidechainInputPPChannels;
-    return _sidechainInputPingPong[readIdx];
+- (const float *) readSidechainInputBufferWithMaxFrameCount:(NSUInteger)maxFrameCount
+                                              outFrameCount:(NSUInteger *)outFrameCount
+                                                   channels:(NSUInteger *)outChannels {
+    os_unfair_lock_lock(&_sidechainInputLock);
+    if (maxFrameCount == 0 || _sidechainInputBufferedFrames == 0 || _sidechainInputPPSampleRate != SAMPLE_RATE || _sidechainInputPPChannels == 0) {
+        os_unfair_lock_unlock(&_sidechainInputLock);
+        return NULL;
+    }
+
+    NSUInteger channels = _sidechainInputPPChannels;
+    NSUInteger framesToRead = MIN(maxFrameCount, _sidechainInputBufferedFrames);
+    NSUInteger framesUntilWrap = _sidechainInputRingCapacityFrames - _sidechainInputReadPos;
+    NSUInteger firstChunk = MIN(framesToRead, framesUntilWrap);
+    memcpy(_sidechainInputReadBuffer,
+           _sidechainInputRingBuffer + (_sidechainInputReadPos * channels),
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < framesToRead) {
+        memcpy(_sidechainInputReadBuffer + (firstChunk * channels),
+               _sidechainInputRingBuffer,
+               (framesToRead - firstChunk) * channels * sizeof(float));
+    }
+
+    _sidechainInputReadPos = (_sidechainInputReadPos + framesToRead) % _sidechainInputRingCapacityFrames;
+    _sidechainInputBufferedFrames -= framesToRead;
+    if (outFrameCount != NULL) {
+        *outFrameCount = framesToRead;
+    }
+    if (outChannels != NULL) {
+        *outChannels = channels;
+    }
+    os_unfair_lock_unlock(&_sidechainInputLock);
+    return _sidechainInputReadBuffer;
+}
+
+- (void) writeSidetoneSidechainSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels {
+    os_unfair_lock_lock(&_sidechainSidetoneLock);
+    if (samples == NULL || frameCount == 0 || channels == 0 || channels > 2 || frameCount > MK_SIDECHAIN_MAX_FRAMES) {
+        _sidechainSidetoneReadPos = 0;
+        _sidechainSidetoneWritePos = 0;
+        _sidechainSidetoneBufferedFrames = 0;
+        _sidechainSidetonePPChannels = 0;
+        _sidechainSidetonePPSampleRate = 0;
+        os_unfair_lock_unlock(&_sidechainSidetoneLock);
+        return;
+    }
+
+    if (_sidechainSidetonePPSampleRate != SAMPLE_RATE || _sidechainSidetonePPChannels != channels) {
+        _sidechainSidetoneReadPos = 0;
+        _sidechainSidetoneWritePos = 0;
+        _sidechainSidetoneBufferedFrames = 0;
+    }
+
+    if (frameCount > _sidechainSidetoneRingCapacityFrames) {
+        samples += (frameCount - _sidechainSidetoneRingCapacityFrames) * channels;
+        frameCount = _sidechainSidetoneRingCapacityFrames;
+    }
+
+    NSUInteger availableSpace = _sidechainSidetoneRingCapacityFrames - _sidechainSidetoneBufferedFrames;
+    if (frameCount > availableSpace) {
+        NSUInteger framesToDrop = frameCount - availableSpace;
+        _sidechainSidetoneReadPos = (_sidechainSidetoneReadPos + framesToDrop) % _sidechainSidetoneRingCapacityFrames;
+        _sidechainSidetoneBufferedFrames -= framesToDrop;
+    }
+
+    NSUInteger framesUntilWrap = _sidechainSidetoneRingCapacityFrames - _sidechainSidetoneWritePos;
+    NSUInteger firstChunk = MIN(frameCount, framesUntilWrap);
+    memcpy(_sidechainSidetoneRingBuffer + (_sidechainSidetoneWritePos * channels),
+           samples,
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < frameCount) {
+        memcpy(_sidechainSidetoneRingBuffer,
+               samples + (firstChunk * channels),
+               (frameCount - firstChunk) * channels * sizeof(float));
+    }
+
+    _sidechainSidetoneWritePos = (_sidechainSidetoneWritePos + frameCount) % _sidechainSidetoneRingCapacityFrames;
+    _sidechainSidetoneBufferedFrames += frameCount;
+    _sidechainSidetonePPChannels = channels;
+    _sidechainSidetonePPSampleRate = SAMPLE_RATE;
+    os_unfair_lock_unlock(&_sidechainSidetoneLock);
+}
+
+- (const float *) readSidetoneSidechainBufferWithMaxFrameCount:(NSUInteger)maxFrameCount
+                                                 outFrameCount:(NSUInteger *)outFrameCount
+                                                      channels:(NSUInteger *)outChannels {
+    os_unfair_lock_lock(&_sidechainSidetoneLock);
+    if (maxFrameCount == 0 || _sidechainSidetoneBufferedFrames == 0 || _sidechainSidetonePPSampleRate != SAMPLE_RATE || _sidechainSidetonePPChannels == 0) {
+        os_unfair_lock_unlock(&_sidechainSidetoneLock);
+        return NULL;
+    }
+
+    NSUInteger channels = _sidechainSidetonePPChannels;
+    NSUInteger framesToRead = MIN(maxFrameCount, _sidechainSidetoneBufferedFrames);
+    NSUInteger framesUntilWrap = _sidechainSidetoneRingCapacityFrames - _sidechainSidetoneReadPos;
+    NSUInteger firstChunk = MIN(framesToRead, framesUntilWrap);
+    memcpy(_sidechainSidetoneReadBuffer,
+           _sidechainSidetoneRingBuffer + (_sidechainSidetoneReadPos * channels),
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < framesToRead) {
+        memcpy(_sidechainSidetoneReadBuffer + (firstChunk * channels),
+               _sidechainSidetoneRingBuffer,
+               (framesToRead - firstChunk) * channels * sizeof(float));
+    }
+
+    _sidechainSidetoneReadPos = (_sidechainSidetoneReadPos + framesToRead) % _sidechainSidetoneRingCapacityFrames;
+    _sidechainSidetoneBufferedFrames -= framesToRead;
+    if (outFrameCount != NULL) {
+        *outFrameCount = framesToRead;
+    }
+    if (outChannels != NULL) {
+        *outChannels = channels;
+    }
+    os_unfair_lock_unlock(&_sidechainSidetoneLock);
+    return _sidechainSidetoneReadBuffer;
+}
+
+- (void) writeInputMonitorSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels sampleRate:(NSUInteger)sampleRate {
+    os_unfair_lock_lock(&_inputMonitorLock);
+    if (samples == NULL || frameCount == 0 || channels == 0 || channels > 2 || frameCount > MK_SIDECHAIN_MAX_FRAMES || sampleRate != SAMPLE_RATE) {
+        _inputMonitorReadPos = 0;
+        _inputMonitorWritePos = 0;
+        _inputMonitorBufferedFrames = 0;
+        _inputMonitorPPChannels = 0;
+        _inputMonitorPPSampleRate = sampleRate;
+        os_unfair_lock_unlock(&_inputMonitorLock);
+        return;
+    }
+
+    if (_inputMonitorPPSampleRate != sampleRate || _inputMonitorPPChannels != channels) {
+        _inputMonitorReadPos = 0;
+        _inputMonitorWritePos = 0;
+        _inputMonitorBufferedFrames = 0;
+    }
+
+    if (frameCount > _inputMonitorRingCapacityFrames) {
+        samples += (frameCount - _inputMonitorRingCapacityFrames) * channels;
+        frameCount = _inputMonitorRingCapacityFrames;
+    }
+
+    NSUInteger availableSpace = _inputMonitorRingCapacityFrames - _inputMonitorBufferedFrames;
+    if (frameCount > availableSpace) {
+        NSUInteger framesToDrop = frameCount - availableSpace;
+        _inputMonitorReadPos = (_inputMonitorReadPos + framesToDrop) % _inputMonitorRingCapacityFrames;
+        _inputMonitorBufferedFrames -= framesToDrop;
+    }
+
+    NSUInteger framesUntilWrap = _inputMonitorRingCapacityFrames - _inputMonitorWritePos;
+    NSUInteger firstChunk = MIN(frameCount, framesUntilWrap);
+    memcpy(_inputMonitorRingBuffer + (_inputMonitorWritePos * channels),
+           samples,
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < frameCount) {
+        memcpy(_inputMonitorRingBuffer,
+               samples + (firstChunk * channels),
+               (frameCount - firstChunk) * channels * sizeof(float));
+    }
+
+    _inputMonitorWritePos = (_inputMonitorWritePos + frameCount) % _inputMonitorRingCapacityFrames;
+    _inputMonitorBufferedFrames += frameCount;
+    _inputMonitorPPChannels = channels;
+    _inputMonitorPPSampleRate = sampleRate;
+    os_unfair_lock_unlock(&_inputMonitorLock);
+}
+
+- (const float *) readInputMonitorBufferWithMaxFrameCount:(NSUInteger)maxFrameCount
+                                           outFrameCount:(NSUInteger *)outFrameCount
+                                                channels:(NSUInteger *)outChannels {
+    os_unfair_lock_lock(&_inputMonitorLock);
+    if (maxFrameCount == 0 || _inputMonitorBufferedFrames < maxFrameCount || _inputMonitorPPSampleRate != SAMPLE_RATE || _inputMonitorPPChannels == 0) {
+        os_unfair_lock_unlock(&_inputMonitorLock);
+        return NULL;
+    }
+
+    NSUInteger channels = _inputMonitorPPChannels;
+    NSUInteger framesUntilWrap = _inputMonitorRingCapacityFrames - _inputMonitorReadPos;
+    NSUInteger firstChunk = MIN(maxFrameCount, framesUntilWrap);
+    memcpy(_inputMonitorReadBuffer,
+           _inputMonitorRingBuffer + (_inputMonitorReadPos * channels),
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < maxFrameCount) {
+        memcpy(_inputMonitorReadBuffer + (firstChunk * channels),
+               _inputMonitorRingBuffer,
+               (maxFrameCount - firstChunk) * channels * sizeof(float));
+    }
+
+    _inputMonitorReadPos = (_inputMonitorReadPos + maxFrameCount) % _inputMonitorRingCapacityFrames;
+    _inputMonitorBufferedFrames -= maxFrameCount;
+    if (outFrameCount != NULL) {
+        *outFrameCount = maxFrameCount;
+    }
+    if (outChannels != NULL) {
+        *outChannels = channels;
+    }
+    os_unfair_lock_unlock(&_inputMonitorLock);
+    return _inputMonitorReadBuffer;
 }
 
 #pragma mark - Weak Network Mode (弱网模式)
