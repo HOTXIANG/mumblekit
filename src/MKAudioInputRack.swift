@@ -278,7 +278,17 @@ final class MKAudioInputRack: NSObject {
                 return
             }
 
+            let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown"
             let scBus = auAudioUnit.inputBusses[1]
+
+            // Enable the sidechain bus — many AUs have bus 1 disabled by default.
+            // Without this, allocateRenderResources() skips the bus and the AU
+            // never pulls sidechain data during rendering.
+            if !scBus.isEnabled {
+                scBus.isEnabled = true
+                print("[Sidechain] AU '\(componentName)' bus 1 was disabled, enabling it")
+            }
+
             let scFormat: AVAudioFormat
             do {
                 try scBus.setFormat(configuredInputFormat)
@@ -300,7 +310,7 @@ final class MKAudioInputRack: NSObject {
                 throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudio_ParamError))
             }
             sidechainBuffer = scInputBuf
-            print("[Sidechain] AU '\(audioUnit.auAudioUnit.componentName ?? "Unknown")' configured with sidechain source='\(scKey)', bus1 format=\(scFormat.channelCount)ch @ \(Int(scFormat.sampleRate))Hz")
+            print("[Sidechain] AU '\(componentName)' configured with sidechain source='\(scKey)', bus1 format=\(scFormat.channelCount)ch @ \(Int(scFormat.sampleRate))Hz interleaved=\(scFormat.isInterleaved)")
         }
 
         private static func configureFormats(for auAudioUnit: AUAudioUnit,
