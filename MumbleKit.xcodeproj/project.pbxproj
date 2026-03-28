@@ -162,8 +162,6 @@
 		F3AA100F2F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10102F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m */; };
 		F3AA10112F45800100A0B123 /* MKAudioRemoteTrackRack.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10122F45800100A0B123 /* MKAudioRemoteTrackRack.swift */; };
 		F3AA10132F45800100A0B123 /* MKAudioRemoteTrackRack.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10122F45800100A0B123 /* MKAudioRemoteTrackRack.swift */; };
-		F3AA10222F45900000A0B123 /* MKVST3PluginHost.mm in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10212F45900000A0B123 /* MKVST3PluginHost.mm */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
-		F3AA10232F45900000A0B123 /* MKVST3PluginHost.mm in Sources */ = {isa = PBXBuildFile; fileRef = F3AA10212F45900000A0B123 /* MKVST3PluginHost.mm */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -498,8 +496,6 @@
 		F3AA10122F45800100A0B123 /* MKAudioRemoteTrackRack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MKAudioRemoteTrackRack.swift; path = src/MKAudioRemoteTrackRack.swift; sourceTree = SOURCE_ROOT; };
 		F3AA10142F45800100A0B123 /* MKAudioInputRackBridge.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = MKAudioInputRackBridge.h; path = src/MKAudioInputRackBridge.h; sourceTree = SOURCE_ROOT; };
 		F3AA10152F45800100A0B123 /* MKAudioRemoteTrackRackBridge.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = MKAudioRemoteTrackRackBridge.h; path = src/MKAudioRemoteTrackRackBridge.h; sourceTree = SOURCE_ROOT; };
-		F3AA10202F45900000A0B123 /* MKVST3PluginHost.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = MKVST3PluginHost.h; path = src/MKVST3PluginHost.h; sourceTree = SOURCE_ROOT; };
-		F3AA10212F45900000A0B123 /* MKVST3PluginHost.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; name = MKVST3PluginHost.mm; path = src/MKVST3PluginHost.mm; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -605,8 +601,6 @@
 				F3AA100C2F45800100A0B123 /* MKAudioInputRack.swift */,
 				F3AA10022F45800100A0B123 /* MKAudioRemoteBusRackBridge.m */,
 				F3AA10032F45800100A0B123 /* MKAudioRemoteBusRack.swift */,
-				F3AA10202F45900000A0B123 /* MKVST3PluginHost.h */,
-				F3AA10212F45900000A0B123 /* MKVST3PluginHost.mm */,
 				F3AA10102F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m */,
 				F3AA10122F45800100A0B123 /* MKAudioRemoteTrackRack.swift */,
 				2845A785132D9C220034D631 /* MKAudioOutputSpeech.m */,
@@ -1168,7 +1162,6 @@
 				F3AA100B2F45800100A0B123 /* MKAudioInputRack.swift in Sources */,
 				F3AA10042F45800100A0B123 /* MKAudioRemoteBusRackBridge.m in Sources */,
 				F3AA10062F45800100A0B123 /* MKAudioRemoteBusRack.swift in Sources */,
-				F3AA10222F45900000A0B123 /* MKVST3PluginHost.mm in Sources */,
 				F3AA100E2F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m in Sources */,
 				F3AA10112F45800100A0B123 /* MKAudioRemoteTrackRack.swift in Sources */,
 				BCD11E0A158F40FA00321E06 /* MKAccessControl.m in Sources */,
@@ -1209,7 +1202,6 @@
 				F3AA100D2F45800100A0B123 /* MKAudioInputRack.swift in Sources */,
 				F3AA10052F45800100A0B123 /* MKAudioRemoteBusRackBridge.m in Sources */,
 				F3AA10072F45800100A0B123 /* MKAudioRemoteBusRack.swift in Sources */,
-				F3AA10232F45900000A0B123 /* MKVST3PluginHost.mm in Sources */,
 				F3AA100F2F45800100A0B123 /* MKAudioRemoteTrackRackBridge.m in Sources */,
 				F3AA10132F45800100A0B123 /* MKAudioRemoteTrackRack.swift in Sources */,
 				BCD11E09158F40FA00321E06 /* MKAccessControl.m in Sources */,
@@ -1286,7 +1278,6 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEFINES_MODULE = YES;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/3rdparty/vst3sdk",
 					"$(SRCROOT)/3rdparty/openssl/include",
 					"$(SRCROOT)/3rdparty/protobuf/src/runtime/Classes",
 					"$(SRCROOT)/proto",
@@ -1313,7 +1304,6 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEFINES_MODULE = YES;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/3rdparty/vst3sdk",
 					"$(SRCROOT)/3rdparty/openssl/include",
 					"$(SRCROOT)/3rdparty/protobuf/src/runtime/Classes",
 					"$(SRCROOT)/proto",
@@ -1343,7 +1333,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/3rdparty/vst3sdk",
 					"$(SRCROOT)/3rdparty/openssl/include",
 					"$(SRCROOT)/3rdparty/protobuf/src/runtime/Classes",
 					"$(SRCROOT)/proto",
@@ -1367,7 +1356,6 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEFINES_MODULE = YES;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/3rdparty/vst3sdk",
 					"$(SRCROOT)/3rdparty/openssl/include",
 					"$(SRCROOT)/3rdparty/protobuf/src/runtime/Classes",
 					"$(SRCROOT)/proto",
@@ -1399,7 +1387,6 @@
 				CLANG_ENABLE_MODULES = YES;
 				DEFINES_MODULE = YES;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/3rdparty/vst3sdk",
 					"$(SRCROOT)/3rdparty/openssl/include",
 					"$(SRCROOT)/3rdparty/protobuf/src/runtime/Classes",
 					"$(SRCROOT)/proto",
@@ -1426,7 +1413,6 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEFINES_MODULE = YES;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/3rdparty/vst3sdk",
 					"$(SRCROOT)/3rdparty/openssl/include",
 					"$(SRCROOT)/3rdparty/protobuf/src/runtime/Classes",
 					"$(SRCROOT)/proto",
@@ -1468,7 +1454,6 @@
 				CLANG_ENABLE_MODULES = YES;
 				DEFINES_MODULE = YES;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/3rdparty/vst3sdk",
 					"$(SRCROOT)/3rdparty/openssl/include",
 					"$(SRCROOT)/3rdparty/protobuf/src/runtime/Classes",
 					"$(SRCROOT)/proto",
@@ -1491,7 +1476,6 @@
 				CLANG_ENABLE_MODULES = YES;
 				DEFINES_MODULE = YES;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/3rdparty/vst3sdk",
 					"$(SRCROOT)/3rdparty/openssl/include",
 					"$(SRCROOT)/3rdparty/protobuf/src/runtime/Classes",
 					"$(SRCROOT)/proto",

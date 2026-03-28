@@ -589,77 +589,12 @@ final class MKAudioInputRack: NSObject {
         }
     }
 
-    private final class VST3StageHost {
-        let pluginHost: MKVST3PluginHost
-        let wetDryMix: Float
-
-        init(pluginHost: MKVST3PluginHost,
-             wetDryMix: Float,
-             preferredChannels: AVAudioChannelCount,
-             sampleRate: Double,
-             hostBufferFrames: Int) throws {
-            self.pluginHost = pluginHost
-            self.wetDryMix = min(max(wetDryMix, 0.0), 1.0)
-            try pluginHost.configure(
-                withInputChannels: UInt(preferredChannels),
-                outputChannels: UInt(preferredChannels),
-                sampleRate: sampleRate > 0 ? sampleRate : 48_000,
-                maximumFramesToRender: UInt(max(hostBufferFrames, 64))
-            )
-        }
-
-        func process(samples: UnsafeMutablePointer<Float>, frameCount: Int, hostChannels: Int) {
-            guard frameCount > 0, hostChannels > 0, wetDryMix > 0.0001 else { return }
-
-            let sampleCount = frameCount * hostChannels
-            let dryCopy: UnsafeMutablePointer<Float>?
-            if wetDryMix >= 0.9999 {
-                dryCopy = nil
-            } else {
-                let allocated = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
-                allocated.initialize(from: samples, count: sampleCount)
-                dryCopy = allocated
-            }
-
-            defer {
-                if let dryCopy {
-                    dryCopy.deinitialize(count: sampleCount)
-                    dryCopy.deallocate()
-                }
-            }
-
-            do {
-                try pluginHost.processInterleaved(inPlace: samples,
-                                                 frameCount: UInt(frameCount),
-                                                 hostChannels: UInt(hostChannels))
-            } catch {
-                print("MKAudioRack: Input Track stage render failed \(pluginHost.displayName): \(error.localizedDescription)")
-                return
-            }
-
-            guard let dryCopy else { return }
-            let dryMix = 1.0 as Float - wetDryMix
-            for index in 0..<sampleCount {
-                samples[index] = (dryCopy[index] * dryMix) + (samples[index] * wetDryMix)
-            }
-        }
-
-        var probeSummary: String {
-            pluginHost.probeSummary()
-        }
-
-        func shutdown() {}
-    }
-
     private enum AnyStageHost {
         case audioUnit(StageHost)
-        case vst3(VST3StageHost)
 
         func process(samples: UnsafeMutablePointer<Float>, frameCount: Int, hostChannels: Int) {
             switch self {
             case .audioUnit(let host):
-                host.process(samples: samples, frameCount: frameCount, hostChannels: hostChannels)
-            case .vst3(let host):
                 host.process(samples: samples, frameCount: frameCount, hostChannels: hostChannels)
             }
         }
@@ -667,8 +602,6 @@ final class MKAudioInputRack: NSObject {
         var probeSummary: String {
             switch self {
             case .audioUnit(let host):
-                return host.probeSummary
-            case .vst3(let host):
                 return host.probeSummary
             }
         }
@@ -677,15 +610,12 @@ final class MKAudioInputRack: NSObject {
             switch self {
             case .audioUnit(let host):
                 host.shutdown()
-            case .vst3(let host):
-                host.shutdown()
             }
         }
     }
 
     private enum StageProcessor {
         case audioUnit(AVAudioUnit)
-        case vst3(MKVST3PluginHost)
     }
 
     private struct StageConfiguration {
@@ -986,10 +916,6 @@ final class MKAudioInputRack: NSObject {
                 normalized.append(StageConfiguration(processor: .audioUnit(audioUnit), wetDryMix: 1.0, sidechainSourceKey: nil))
                 continue
             }
-            if let vst3Host = element as? MKVST3PluginHost {
-                normalized.append(StageConfiguration(processor: .vst3(vst3Host), wetDryMix: 1.0, sidechainSourceKey: nil))
-                continue
-            }
             guard let dictionary = element as? NSDictionary else {
                 continue
             }
@@ -997,8 +923,6 @@ final class MKAudioInputRack: NSObject {
             let sidechainSource = dictionary["sidechainSource"] as? String
             if let audioUnit = dictionary["audioUnit"] as? AVAudioUnit {
                 normalized.append(StageConfiguration(processor: .audioUnit(audioUnit), wetDryMix: min(max(wetDryMix, 0.0), 1.0), sidechainSourceKey: sidechainSource))
-            } else if let vst3Host = dictionary["vst3Host"] as? MKVST3PluginHost {
-                normalized.append(StageConfiguration(processor: .vst3(vst3Host), wetDryMix: min(max(wetDryMix, 0.0), 1.0), sidechainSourceKey: sidechainSource))
             }
         }
         return normalized
@@ -1018,21 +942,12 @@ final class MKAudioInputRack: NSObject {
                                              sidechainSourceKey: configuration.sidechainSourceKey,
                                              sidechainProvider: sidechainProvider)
                     hosts.append(.audioUnit(host))
-                case .vst3(let vst3Host):
-                    let host = try VST3StageHost(pluginHost: vst3Host,
-                                                 wetDryMix: configuration.wetDryMix,
-                                                 preferredChannels: 1,
-                                                 sampleRate: sampleRate,
-                                                 hostBufferFrames: hostBufferFrames)
-                    hosts.append(.vst3(host))
                 }
             } catch {
                 let componentName: String
                 switch configuration.processor {
                 case .audioUnit(let audioUnit):
                     componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
-                case .vst3(let vst3Host):
-                    componentName = vst3Host.displayName
                 }
                 print("MKAudioRack: Failed to configure Input Track stage \(componentName): \(error)")
             }
