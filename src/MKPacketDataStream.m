@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file.
 
 #import "MKPacketDataStream.h"
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 @interface MKPacketDataStream () {
     NSMutableData   *mutableData;
@@ -265,7 +266,7 @@
 }
 
 - (double) getDouble {
-    NSLog(@"PacketDataStream: getDouble not implemented yet.");
+    MKLogWarning(Network, @"PacketDataStream: getDouble not implemented yet.");
     return 0.0f;
 }
 
@@ -275,7 +276,7 @@
         offset += len;
         return db;
     } else {
-        NSLog(@"PacketDataStream: Unable to copyDataBlock. Requsted=%lu, avail=%lu", (unsigned long)len, (unsigned long)[self left]);
+        MKLogWarning(Network, @"PacketDataStream: Unable to copyDataBlock. Requsted=%lu, avail=%lu", (unsigned long)len, (unsigned long)[self left]);
         ok = NO;
         return nil;
     }

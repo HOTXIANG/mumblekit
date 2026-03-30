@@ -9,9 +9,13 @@
 #import "MKUtils.h"
 #import "MKAudioDevice.h"
 #import "MKAudioInput.h"
+#import "MKAudioInputRackBridge.h"
 #import "MKAudioOutput.h"
 #import "MKAudioOutputSidetone.h"
+#import "MKAudioRemoteBusRackBridge.h"
+#import "MKAudioRemoteTrackRackBridge.h"
 #import <MumbleKit/MKConnection.h>
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #import <AVFoundation/AVFoundation.h> // ✅ 必须引入
 
@@ -23,14 +27,13 @@
 # import "MKMacAudioDevice.h"
 #endif
 
-#import <AudioUnit/AudioUnit.h>
-#import <AudioUnit/AUComponent.h>
-#import <AudioToolbox/AudioToolbox.h>
-#include <errno.h>
-#import <os/lock.h>
 #if TARGET_OS_OSX == 1
 #import <CoreAudio/CoreAudio.h>
+#import <libkern/OSAtomic.h>
+#elif TARGET_OS_IPHONE
+#import <libkern/OSAtomic.h>
 #endif
+#import <os/lock.h>
 
 #if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
 #import <UIKit/UIKit.h>
@@ -48,66 +51,6 @@ typedef struct _MKAudioPreviewGainProcessorState {
     BOOL enabled;
 } MKAudioPreviewGainProcessorState;
 
-typedef struct _MKAudioDSPChainProcessorState {
-    os_unfair_lock lock;
-    MKAudioPreviewGainProcessorState preview;
-    NSArray *stages;
-    NSArray *audioUnits;
-    NSArray *mixLevels;
-    NSArray *hosts;
-    NSUInteger preferredChannels;
-    NSUInteger hostBufferFrames;
-    NSUInteger renderSampleRate;
-    BOOL sampleRateRefreshPending;
-    __unsafe_unretained id owner;
-    float inputPeak;
-    float outputPeak;
-    CFAbsoluteTime lastStateProbeLogTime;
-    CFAbsoluteTime lastRenderProbeLogTime;
-    CFAbsoluteTime lastRenderFailureLogTime;
-} MKAudioDSPChainProcessorState;
-
-@interface MKAudioUnitChainHost : NSObject {
-    os_unfair_lock _renderLock;
-    AVAudioEngine *_engine;
-    AVAudioSourceNode *_sourceNode;
-    NSArray *_audioUnits;
-    AVAudioFormat *_inputFormat;
-    AVAudioFormat *_outputFormat;
-    NSArray *_adapterNodes;
-    AVAudioPCMBuffer *_outputBuffer;
-    AVAudioEngineManualRenderingBlock _manualRenderingBlock;
-    AUAudioFrameCount _maximumFramesToRender;
-    NSUInteger _preferredChannels;
-    const float *_currentInputSamples;
-    NSUInteger _currentInputFrameCount;
-    NSUInteger _currentInputChannelCount;
-    NSUInteger _currentInputReadOffset;
-    float *_sourceScratchBuffer;
-    NSUInteger _sourceScratchCapacity;
-    float *_mixScratchBuffer;
-    NSUInteger _mixScratchCapacity;
-}
-
-- (instancetype)initWithAudioUnits:(NSArray *)audioUnits
-                  preferredChannels:(NSUInteger)preferredChannels
-                         sampleRate:(NSUInteger)sampleRate
-                              error:(NSError **)outError;
-- (BOOL)reconfigureWithAudioUnits:(NSArray *)audioUnits
-                preferredChannels:(NSUInteger)preferredChannels
-                        sampleRate:(NSUInteger)sampleRate
-                            error:(NSError **)outError;
-- (BOOL)processInterleavedSamples:(float *)samples
-                       frameCount:(NSUInteger)frameCount
-                         channels:(NSUInteger)channels
-                       sampleRate:(NSUInteger)sampleRate
-                         wetDryMix:(float)wetDryMix
-             manualRenderingStatus:(AVAudioEngineManualRenderingStatus *)outRenderStatus
-                            error:(OSStatus *)outError;
-- (NSString *)probeSummary;
-
-@end
-
 @interface MKAudio () {
     id<MKAudioDelegate>      _delegate;
     MKAudioDevice            *_audioDevice;
@@ -124,10 +67,13 @@ typedef struct _MKAudioDSPChainProcessorState {
     BOOL                     _cachedMuted;
     MKAudioPreviewGainProcessorState _inputTrackPreviewState;
     MKAudioPreviewGainProcessorState _remoteBusPreviewState;
-    MKAudioDSPChainProcessorState _inputTrackDSPState;
-    MKAudioDSPChainProcessorState _remoteBusDSPState;
+    MKAudioInputRackBridge *_inputTrackRackBridge;
+    MKAudioInputRackBridge *_sidetoneRackBridge;
+    MKAudioRemoteBusRackBridge *_remoteBusRackBridge;
+    MKAudioRemoteBusRackBridge *_remoteBusRackBridge2;
+    MKAudioPreviewGainProcessorState _remoteBus2PreviewState;
     NSMutableDictionary      *_remoteTrackPreviewStates;
-    NSMutableDictionary      *_remoteTrackDSPStates;  // Remote Session AU DSP chain states
+    NSMutableDictionary      *_remoteTrackRackBridges;
     NSUInteger               _pluginHostBufferFrames;
 #if TARGET_OS_OSX == 1
     BOOL                     _isObservingDefaultInputDevice;
@@ -139,6 +85,46 @@ typedef struct _MKAudioDSPChainProcessorState {
     
     // P0 修复：使用串行队列替代 @synchronized，提升性能
     dispatch_queue_t         _accessQueue;
+
+    // Input track sidechain FIFO (written by input thread, consumed in render-aligned blocks)
+    os_unfair_lock _sidechainInputLock;
+    float    *_sidechainInputRingBuffer;
+    float    *_sidechainInputReadBuffer;
+    NSUInteger _sidechainInputRingCapacityFrames;
+    NSUInteger _sidechainInputReadPos;
+    NSUInteger _sidechainInputWritePos;
+    NSUInteger _sidechainInputBufferedFrames;
+    NSUInteger _sidechainInputPPChannels;
+    NSUInteger _sidechainInputPPSampleRate;
+
+    // Sidetone track sidechain FIFO (written by input thread, consumed in render-aligned blocks)
+    os_unfair_lock _sidechainSidetoneLock;
+    float    *_sidechainSidetoneRingBuffer;
+    float    *_sidechainSidetoneReadBuffer;
+    NSUInteger _sidechainSidetoneRingCapacityFrames;
+    NSUInteger _sidechainSidetoneReadPos;
+    NSUInteger _sidechainSidetoneWritePos;
+    NSUInteger _sidechainSidetoneBufferedFrames;
+    NSUInteger _sidechainSidetonePPChannels;
+    NSUInteger _sidechainSidetonePPSampleRate;
+
+    // Input monitor FIFO (post-sidetone-track DSP, consumed continuously by output)
+    os_unfair_lock _inputMonitorLock;
+    float    *_inputMonitorRingBuffer;
+    float    *_inputMonitorReadBuffer;
+    NSUInteger _inputMonitorRingCapacityFrames;
+    NSUInteger _inputMonitorReadPos;
+    NSUInteger _inputMonitorWritePos;
+    NSUInteger _inputMonitorBufferedFrames;
+    NSUInteger _inputMonitorPPChannels;
+    NSUInteger _inputMonitorPPSampleRate;
+
+    // Weak Network Mode state (弱网模式状态)
+    BOOL                     _weakNetworkModeEnabled;
+    NSDictionary             *_weakNetworkStatistics;
+    NSNumber                 *_weakNetworkLastBitrate;
+    NSNumber                 *_weakNetworkLastLatency;
+    NSNumber                 *_weakNetworkLastPacketLoss;
 }
 #if TARGET_OS_OSX == 1
 - (void)startObservingDefaultInputDeviceChanges;
@@ -147,7 +133,8 @@ typedef struct _MKAudioDSPChainProcessorState {
 - (void)handleDefaultOutputDeviceChanged;
 #endif
 - (void)rebindRemoteTrackProcessorsToOutputLocked;
-- (void)refreshDSPChainState:(MKAudioDSPChainProcessorState *)state stages:(NSArray *)stages logPrefix:(NSString *)logPrefix;
+- (NSUInteger)currentOutputProcessingSampleRateLocked;
+- (MKAudioRemoteTrackRackBridge *)remoteTrackRackBridgeForSessionLocked:(NSUInteger)session createIfNeeded:(BOOL)create;
 @end
 
 #if TARGET_OS_OSX == 1
@@ -309,1692 +296,6 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     return SAMPLE_RATE;
 }
 
-static void MKAudioInputPreviewGainProcess(short *samples, NSUInteger frameCount, NSUInteger channels, NSUInteger sampleRate, void *context) {
-    (void)sampleRate;
-    MKAudioPreviewGainProcessorState *state = (MKAudioPreviewGainProcessorState *)context;
-    if (state == NULL || !state->enabled) {
-        return;
-    }
-    float gain = state->gain;
-    if (gain == 1.0f) {
-        return;
-    }
-
-    NSUInteger sampleCount = frameCount * channels;
-    for (NSUInteger i = 0; i < sampleCount; i++) {
-        float scaled = ((float)samples[i]) * gain;
-        if (scaled > 32767.0f) {
-            scaled = 32767.0f;
-        } else if (scaled < -32768.0f) {
-            scaled = -32768.0f;
-        }
-        samples[i] = (short)scaled;
-    }
-}
-
-static void MKAudioApplyPreviewGainFloat(float *samples, NSUInteger frameCount, NSUInteger channels, MKAudioPreviewGainProcessorState *state) {
-    if (state == NULL || !state->enabled) {
-        return;
-    }
-
-    float gain = state->gain;
-    if (gain == 1.0f) {
-        return;
-    }
-
-    NSUInteger sampleCount = frameCount * channels;
-    for (NSUInteger i = 0; i < sampleCount; i++) {
-        samples[i] *= gain;
-    }
-}
-
-static float MKAudioAverageInterleavedFrame(const float *samples, NSUInteger frame, NSUInteger channels) {
-    if (samples == NULL || channels == 0) {
-        return 0.0f;
-    }
-
-    float sum = 0.0f;
-    for (NSUInteger channel = 0; channel < channels; channel++) {
-        sum += samples[frame * channels + channel];
-    }
-    return sum / (float)channels;
-}
-
-static NSUInteger MKAudioAudioBufferListChannelCount(const AudioBufferList *bufferList, NSUInteger fallbackChannels) {
-    if (bufferList == NULL) {
-        return fallbackChannels;
-    }
-
-    if (bufferList->mNumberBuffers > 1) {
-        return (NSUInteger)bufferList->mNumberBuffers;
-    }
-
-    if (bufferList->mNumberBuffers == 1 && bufferList->mBuffers[0].mNumberChannels > 0) {
-        return (NSUInteger)bufferList->mBuffers[0].mNumberChannels;
-    }
-
-    return fallbackChannels;
-}
-
-static BOOL MKAudioAudioBufferListIsInterleaved(const AudioBufferList *bufferList, NSUInteger fallbackChannels) {
-    if (bufferList == NULL) {
-        return (fallbackChannels > 1);
-    }
-
-    if (bufferList->mNumberBuffers > 1) {
-        return NO;
-    }
-
-    if (bufferList->mNumberBuffers == 1) {
-        return (bufferList->mBuffers[0].mNumberChannels > 1) || (fallbackChannels > 1);
-    }
-
-    return (fallbackChannels > 1);
-}
-
-static void MKAudioZeroAudioBufferList(AudioBufferList *bufferList,
-                                       BOOL interleaved,
-                                       NSUInteger channelCount,
-                                       NSUInteger startFrame,
-                                       NSUInteger frameCount) {
-    if (bufferList == NULL || frameCount == 0) {
-        return;
-    }
-
-    if (interleaved) {
-        if (bufferList->mNumberBuffers < 1 || bufferList->mBuffers[0].mData == NULL) {
-            return;
-        }
-        float *dest = (float *)bufferList->mBuffers[0].mData;
-        memset(dest + (startFrame * channelCount), 0, frameCount * channelCount * sizeof(float));
-        bufferList->mBuffers[0].mNumberChannels = (UInt32)channelCount;
-        bufferList->mBuffers[0].mDataByteSize = (UInt32)((startFrame + frameCount) * channelCount * sizeof(float));
-        return;
-    }
-
-    UInt32 availableBuffers = bufferList->mNumberBuffers;
-    for (NSUInteger channel = 0; channel < channelCount; channel++) {
-        if (channel >= availableBuffers || bufferList->mBuffers[channel].mData == NULL) {
-            continue;
-        }
-        float *dest = (float *)bufferList->mBuffers[channel].mData;
-        memset(dest + startFrame, 0, frameCount * sizeof(float));
-        bufferList->mBuffers[channel].mNumberChannels = 1;
-        bufferList->mBuffers[channel].mDataByteSize = (UInt32)((startFrame + frameCount) * sizeof(float));
-    }
-}
-
-static BOOL MKAudioEnsureWritableAudioBufferList(AudioBufferList *bufferList,
-                                                 BOOL interleaved,
-                                                 NSUInteger channelCount,
-                                                 NSUInteger frameCapacity,
-                                                 float *scratchBuffer,
-                                                 NSUInteger scratchCapacity) {
-    if (bufferList == NULL || channelCount == 0) {
-        return NO;
-    }
-
-    NSUInteger requiredSamples = frameCapacity * channelCount;
-    if (interleaved) {
-        if (bufferList->mNumberBuffers < 1) {
-            return NO;
-        }
-        if (bufferList->mBuffers[0].mData == NULL) {
-            if (scratchBuffer == NULL || scratchCapacity < requiredSamples) {
-                return NO;
-            }
-            bufferList->mBuffers[0].mData = scratchBuffer;
-        }
-        bufferList->mBuffers[0].mNumberChannels = (UInt32)channelCount;
-        bufferList->mBuffers[0].mDataByteSize = (UInt32)(requiredSamples * sizeof(float));
-        return YES;
-    }
-
-    if (bufferList->mNumberBuffers < channelCount) {
-        return NO;
-    }
-    if (scratchBuffer == NULL || scratchCapacity < requiredSamples) {
-        for (NSUInteger channel = 0; channel < channelCount; channel++) {
-            if (bufferList->mBuffers[channel].mData == NULL) {
-                return NO;
-            }
-        }
-    }
-
-    for (NSUInteger channel = 0; channel < channelCount; channel++) {
-        if (bufferList->mBuffers[channel].mData == NULL) {
-            bufferList->mBuffers[channel].mData = scratchBuffer + (channel * frameCapacity);
-        }
-        bufferList->mBuffers[channel].mNumberChannels = 1;
-        bufferList->mBuffers[channel].mDataByteSize = (UInt32)(frameCapacity * sizeof(float));
-    }
-    return YES;
-}
-
-static void MKAudioCopyHostInterleavedToAudioBufferList(const float *source,
-                                                        NSUInteger sourceChannels,
-                                                        NSUInteger frameCount,
-                                                        AudioBufferList *destination,
-                                                        BOOL destinationInterleaved,
-                                                        NSUInteger destinationChannels) {
-    if (source == NULL || destination == NULL || sourceChannels == 0 || destinationChannels == 0) {
-        return;
-    }
-
-    if (destinationInterleaved) {
-        if (destination->mNumberBuffers < 1 || destination->mBuffers[0].mData == NULL) {
-            return;
-        }
-
-        float *dest = (float *)destination->mBuffers[0].mData;
-        for (NSUInteger frame = 0; frame < frameCount; frame++) {
-            if (destinationChannels == 1) {
-                dest[frame] = MKAudioAverageInterleavedFrame(source, frame, sourceChannels);
-                continue;
-            }
-
-            for (NSUInteger channel = 0; channel < destinationChannels; channel++) {
-                float sample = 0.0f;
-                if (sourceChannels == 1) {
-                    sample = source[frame];
-                } else {
-                    NSUInteger sourceChannel = MIN(channel, sourceChannels - 1);
-                    sample = source[frame * sourceChannels + sourceChannel];
-                }
-                dest[frame * destinationChannels + channel] = sample;
-            }
-        }
-
-        destination->mBuffers[0].mNumberChannels = (UInt32)destinationChannels;
-        destination->mBuffers[0].mDataByteSize = (UInt32)(frameCount * destinationChannels * sizeof(float));
-        return;
-    }
-
-    UInt32 availableBuffers = destination->mNumberBuffers;
-    for (NSUInteger channel = 0; channel < destinationChannels; channel++) {
-        if (channel >= availableBuffers || destination->mBuffers[channel].mData == NULL) {
-            continue;
-        }
-
-        float *dest = (float *)destination->mBuffers[channel].mData;
-        for (NSUInteger frame = 0; frame < frameCount; frame++) {
-            if (destinationChannels == 1) {
-                dest[frame] = MKAudioAverageInterleavedFrame(source, frame, sourceChannels);
-                continue;
-            }
-
-            if (sourceChannels == 1) {
-                dest[frame] = source[frame];
-            } else {
-                NSUInteger sourceChannel = MIN(channel, sourceChannels - 1);
-                dest[frame] = source[frame * sourceChannels + sourceChannel];
-            }
-        }
-
-        destination->mBuffers[channel].mNumberChannels = 1;
-        destination->mBuffers[channel].mDataByteSize = (UInt32)(frameCount * sizeof(float));
-    }
-}
-
-static float MKAudioReadAudioBufferListSample(const AudioBufferList *source,
-                                              BOOL sourceInterleaved,
-                                              NSUInteger sourceChannels,
-                                              NSUInteger frame,
-                                              NSUInteger channel) {
-    if (source == NULL || sourceChannels == 0) {
-        return 0.0f;
-    }
-
-    if (sourceInterleaved) {
-        if (source->mNumberBuffers < 1 || source->mBuffers[0].mData == NULL) {
-            return 0.0f;
-        }
-        float *buffer = (float *)source->mBuffers[0].mData;
-        return buffer[frame * sourceChannels + MIN(channel, sourceChannels - 1)];
-    }
-
-    if (channel >= source->mNumberBuffers || source->mBuffers[channel].mData == NULL) {
-        return 0.0f;
-    }
-    float *buffer = (float *)source->mBuffers[channel].mData;
-    return buffer[frame];
-}
-
-static void MKAudioCopyAudioBufferListToHostInterleaved(const AudioBufferList *source,
-                                                        BOOL sourceInterleaved,
-                                                        NSUInteger sourceChannels,
-                                                        NSUInteger frameCount,
-                                                        float *destination,
-                                                        NSUInteger destinationChannels) {
-    if (source == NULL || destination == NULL || sourceChannels == 0 || destinationChannels == 0) {
-        return;
-    }
-
-    for (NSUInteger frame = 0; frame < frameCount; frame++) {
-        if (destinationChannels == 1) {
-            float sum = 0.0f;
-            for (NSUInteger channel = 0; channel < sourceChannels; channel++) {
-                sum += MKAudioReadAudioBufferListSample(source, sourceInterleaved, sourceChannels, frame, channel);
-            }
-            destination[frame] = sum / (float)sourceChannels;
-            continue;
-        }
-
-        for (NSUInteger channel = 0; channel < destinationChannels; channel++) {
-            float sample = 0.0f;
-            if (sourceChannels == 1) {
-                sample = MKAudioReadAudioBufferListSample(source, sourceInterleaved, sourceChannels, frame, 0);
-            } else {
-                NSUInteger sourceChannel = MIN(channel, sourceChannels - 1);
-                sample = MKAudioReadAudioBufferListSample(source, sourceInterleaved, sourceChannels, frame, sourceChannel);
-            }
-            destination[frame * destinationChannels + channel] = sample;
-        }
-    }
-}
-
-static AVAudioFormat *MKAudioInputFormatForAudioUnit(id audioUnit) {
-    if (audioUnit == nil || ![audioUnit respondsToSelector:@selector(AUAudioUnit)]) {
-        return nil;
-    }
-
-    AUAudioUnit *au = [audioUnit AUAudioUnit];
-    if (au == nil || [au inputBusses] == nil || [[au inputBusses] count] == 0) {
-        return nil;
-    }
-
-    return [[[au inputBusses] objectAtIndexedSubscript:0] format];
-}
-
-static AVAudioFormat *MKAudioOutputFormatForAudioUnit(id audioUnit) {
-    if (audioUnit == nil || ![audioUnit respondsToSelector:@selector(AUAudioUnit)]) {
-        return nil;
-    }
-
-    AUAudioUnit *au = [audioUnit AUAudioUnit];
-    if (au == nil || [au outputBusses] == nil || [[au outputBusses] count] == 0) {
-        return nil;
-    }
-
-    return [[[au outputBusses] objectAtIndexedSubscript:0] format];
-}
-
-static AVAudioFormat *MKAudioFormatWithSampleRateAndChannels(AVAudioFormat *format,
-                                                             double sampleRate,
-                                                             AVAudioChannelCount channels) {
-    if (channels == 0) {
-        return nil;
-    }
-
-    AVAudioCommonFormat commonFormat = AVAudioPCMFormatFloat32;
-    BOOL interleaved = YES;
-    double formatSampleRate = 48000.0;
-    if (format != nil) {
-        formatSampleRate = [format sampleRate];
-        commonFormat = [format commonFormat];
-        interleaved = [format isInterleaved];
-    }
-
-    double effectiveSampleRate = sampleRate > 0.0 ? sampleRate : formatSampleRate;
-    if (commonFormat != AVAudioPCMFormatFloat32) {
-        commonFormat = AVAudioPCMFormatFloat32;
-    }
-
-    if (format != nil
-        && [format commonFormat] == commonFormat
-        && [format sampleRate] == effectiveSampleRate
-        && [format channelCount] == channels
-        && [format isInterleaved] == interleaved) {
-        return format;
-    }
-
-    return [[[AVAudioFormat alloc] initWithCommonFormat:commonFormat
-                                             sampleRate:effectiveSampleRate
-                                               channels:channels
-                                            interleaved:interleaved] autorelease];
-}
-
-static NSString *MKAudioFormatProbeSummary(AVAudioFormat *format) {
-    if (format == nil) {
-        return @"nil";
-    }
-
-    return [NSString stringWithFormat:@"%luch@%.0f/%@",
-            (unsigned long)[format channelCount],
-            [format sampleRate],
-            [format isInterleaved] ? @"i" : @"ni"];
-}
-
-static NSError *MKAudioNSErrorFromException(NSException *exception, OSStatus fallbackCode) {
-    if (exception == nil) {
-        return [NSError errorWithDomain:NSOSStatusErrorDomain code:fallbackCode userInfo:nil];
-    }
-
-    NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
-    if ([exception reason] != nil) {
-        [userInfo setObject:[exception reason] forKey:NSLocalizedDescriptionKey];
-    }
-    if ([exception name] != nil) {
-        [userInfo setObject:[exception name] forKey:@"MKAudioExceptionName"];
-    }
-    return [NSError errorWithDomain:NSOSStatusErrorDomain
-                               code:fallbackCode
-                           userInfo:userInfo];
-}
-
-static BOOL MKAudioAttachNodeSafely(AVAudioEngine *engine, AVAudioNode *node, NSError **outError) {
-    @try {
-        [engine attachNode:node];
-        return YES;
-    }
-    @catch (NSException *exception) {
-        if (outError != NULL) {
-            *outError = MKAudioNSErrorFromException(exception, kAudioUnitErr_InvalidElement);
-        }
-        return NO;
-    }
-}
-
-static BOOL MKAudioConnectNodesSafely(AVAudioEngine *engine,
-                                      AVAudioNode *source,
-                                      AVAudioNode *destination,
-                                      AVAudioFormat *format,
-                                      NSError **outError) {
-    @try {
-        [engine connect:source to:destination format:format];
-        return YES;
-    }
-    @catch (NSException *exception) {
-        if (outError != NULL) {
-            *outError = MKAudioNSErrorFromException(exception, kAudioUnitErr_FormatNotSupported);
-        }
-        return NO;
-    }
-}
-
-static BOOL MKAudioConfigureAudioUnitForFormats(id audioUnit,
-                                                AVAudioFormat *inputFormat,
-                                                AVAudioFormat *outputFormat,
-                                                AUAudioFrameCount maximumFrames,
-                                                NSError **outError) {
-    if (audioUnit == nil || ![audioUnit respondsToSelector:@selector(AUAudioUnit)]) {
-        return YES;
-    }
-
-    AUAudioUnit *au = [audioUnit AUAudioUnit];
-    if (au == nil) {
-        return YES;
-    }
-
-    @try {
-        if ([audioUnit respondsToSelector:@selector(setBypass:)]) {
-            [(id)audioUnit setBypass:NO];
-        }
-        [au setShouldBypassEffect:NO];
-
-        if ([au renderResourcesAllocated]) {
-            [au deallocateRenderResources];
-        }
-
-        if (inputFormat != nil && [au inputBusses] != nil && [[au inputBusses] count] > 0) {
-            [[[au inputBusses] objectAtIndexedSubscript:0] setFormat:inputFormat error:outError];
-            if (outError != NULL && *outError != nil) {
-                return NO;
-            }
-        }
-
-        if (outputFormat != nil && [au outputBusses] != nil && [[au outputBusses] count] > 0) {
-            [[[au outputBusses] objectAtIndexedSubscript:0] setFormat:outputFormat error:outError];
-            if (outError != NULL && *outError != nil) {
-                return NO;
-            }
-        }
-
-        [au setMaximumFramesToRender:MAX([au maximumFramesToRender], maximumFrames)];
-        return YES;
-    }
-    @catch (NSException *exception) {
-        if (outError != NULL) {
-            *outError = MKAudioNSErrorFromException(exception, kAudioUnitErr_FormatNotSupported);
-        }
-        return NO;
-    }
-}
-
-static AUAudioFrameCount MKAudioMaximumFramesForAudioUnits(NSArray *audioUnits) {
-    AUAudioFrameCount maximumFrames = 4096;
-    for (id audioUnit in audioUnits) {
-        if (audioUnit == nil || ![audioUnit respondsToSelector:@selector(AUAudioUnit)]) {
-            continue;
-        }
-        AUAudioUnit *au = [audioUnit AUAudioUnit];
-        if (au == nil) {
-            continue;
-        }
-        AUAudioFrameCount candidate = [au maximumFramesToRender];
-        if (candidate > maximumFrames) {
-            maximumFrames = candidate;
-        }
-    }
-    return maximumFrames;
-}
-
-@implementation MKAudioUnitChainHost
-
-- (instancetype)initWithAudioUnits:(NSArray *)audioUnits
-                  preferredChannels:(NSUInteger)preferredChannels
-                         sampleRate:(NSUInteger)sampleRate
-                              error:(NSError **)outError {
-    self = [super init];
-    if (self == nil) {
-        return nil;
-    }
-
-    _renderLock = OS_UNFAIR_LOCK_INIT;
-    _engine = nil;
-    _sourceNode = nil;
-    _audioUnits = nil;
-    _inputFormat = nil;
-    _outputFormat = nil;
-    _adapterNodes = nil;
-    _outputBuffer = nil;
-    _manualRenderingBlock = nil;
-    _maximumFramesToRender = 0;
-    _preferredChannels = MAX((NSUInteger)1, preferredChannels);
-    _currentInputSamples = NULL;
-    _currentInputFrameCount = 0;
-    _currentInputChannelCount = 0;
-    _currentInputReadOffset = 0;
-    _sourceScratchBuffer = NULL;
-    _sourceScratchCapacity = 0;
-    _mixScratchBuffer = NULL;
-    _mixScratchCapacity = 0;
-
-    if (![self reconfigureWithAudioUnits:audioUnits
-                       preferredChannels:_preferredChannels
-                              sampleRate:sampleRate
-                                   error:outError]) {
-        [self release];
-        return nil;
-    }
-
-    return self;
-}
-
-- (void)dealloc {
-    os_unfair_lock_lock(&_renderLock);
-    _currentInputSamples = NULL;
-    _currentInputFrameCount = 0;
-    _currentInputChannelCount = 0;
-    _currentInputReadOffset = 0;
-    free(_sourceScratchBuffer);
-    _sourceScratchBuffer = NULL;
-    _sourceScratchCapacity = 0;
-    free(_mixScratchBuffer);
-    _mixScratchBuffer = NULL;
-    _mixScratchCapacity = 0;
-    [_manualRenderingBlock release];
-    _manualRenderingBlock = nil;
-    [_outputBuffer release];
-    _outputBuffer = nil;
-    [_sourceNode release];
-    _sourceNode = nil;
-    [_audioUnits release];
-    _audioUnits = nil;
-    [_inputFormat release];
-    _inputFormat = nil;
-    [_outputFormat release];
-    _outputFormat = nil;
-    [_adapterNodes release];
-    _adapterNodes = nil;
-    if (_engine != nil) {
-        [_engine stop];
-        [_engine release];
-        _engine = nil;
-    }
-    os_unfair_lock_unlock(&_renderLock);
-    [super dealloc];
-}
-
-- (BOOL)reconfigureWithAudioUnits:(NSArray *)audioUnits
-                preferredChannels:(NSUInteger)preferredChannels
-                        sampleRate:(NSUInteger)sampleRate
-                            error:(NSError **)outError {
-    NSError *localError = nil;
-    AVAudioEngine *newEngine = nil;
-    AVAudioSourceNode *newSourceNode = nil;
-    NSArray *newAudioUnits = nil;
-    NSArray *newAdapterNodes = nil;
-    AVAudioFormat *newInputFormat = nil;
-    AVAudioFormat *newOutputFormat = nil;
-    AVAudioPCMBuffer *newOutputBuffer = nil;
-    AVAudioEngineManualRenderingBlock newManualRenderingBlock = nil;
-    AUAudioFrameCount newMaximumFrames = 0;
-    float *newSourceScratchBuffer = NULL;
-    NSUInteger newSourceScratchCapacity = 0;
-    float *newMixScratchBuffer = NULL;
-    NSUInteger newMixScratchCapacity = 0;
-    NSUInteger effectivePreferredChannels = MAX((NSUInteger)1, preferredChannels);
-    double effectiveSampleRate = sampleRate > 0 ? (double)sampleRate : 48000.0;
-
-    if (audioUnits != nil && [audioUnits count] > 0) {
-        AVAudioFormat *inputBusFormat = MKAudioInputFormatForAudioUnit([audioUnits objectAtIndexedSubscript:0]);
-        AVAudioFormat *outputBusFormat = MKAudioOutputFormatForAudioUnit([audioUnits lastObject]);
-        AVAudioFormat *inputFormat = nil;
-        AVAudioFormat *renderOutputFormat = nil;
-        if (inputBusFormat == nil) {
-            inputBusFormat = outputBusFormat;
-        }
-        if (outputBusFormat == nil) {
-            outputBusFormat = inputBusFormat;
-        }
-
-        if (inputBusFormat == nil || outputBusFormat == nil) {
-            localError = [NSError errorWithDomain:NSOSStatusErrorDomain code:kAudioUnitErr_FormatNotSupported userInfo:nil];
-            goto commit;
-        }
-
-        if ([inputBusFormat commonFormat] != AVAudioPCMFormatFloat32 || [outputBusFormat commonFormat] != AVAudioPCMFormatFloat32) {
-            localError = [NSError errorWithDomain:NSOSStatusErrorDomain code:kAudioUnitErr_FormatNotSupported userInfo:nil];
-            goto commit;
-        }
-
-        inputFormat = MKAudioFormatWithSampleRateAndChannels(inputBusFormat,
-                                                             effectiveSampleRate,
-                                                             [inputBusFormat channelCount]);
-        renderOutputFormat = MKAudioFormatWithSampleRateAndChannels(outputBusFormat,
-                                                                    effectiveSampleRate,
-                                                                    (AVAudioChannelCount)effectivePreferredChannels);
-        if (inputFormat == nil || renderOutputFormat == nil) {
-            localError = [NSError errorWithDomain:NSOSStatusErrorDomain code:kAudioUnitErr_FormatNotSupported userInfo:nil];
-            goto commit;
-        }
-
-        newMaximumFrames = MKAudioMaximumFramesForAudioUnits(audioUnits);
-        newEngine = [[AVAudioEngine alloc] init];
-        if (newEngine == nil) {
-            localError = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil];
-            goto commit;
-        }
-
-        if (![newEngine enableManualRenderingMode:AVAudioEngineManualRenderingModeRealtime
-                                           format:renderOutputFormat
-                                maximumFrameCount:newMaximumFrames
-                                            error:&localError]) {
-            goto commit;
-        }
-
-        __unsafe_unretained MKAudioUnitChainHost *unsafeSelf = self;
-        NSMutableArray *adapterNodes = [NSMutableArray array];
-        newSourceNode = [[AVAudioSourceNode alloc] initWithFormat:inputFormat
-                                                      renderBlock:^OSStatus(BOOL * _Nonnull isSilence,
-                                                                            const AudioTimeStamp * _Nonnull timestamp,
-                                                                            AVAudioFrameCount inNumberOfFrames,
-                                                                            AudioBufferList * _Nonnull outputData) {
-            (void)timestamp;
-            NSUInteger availableFrames = 0;
-            if (unsafeSelf->_currentInputFrameCount > unsafeSelf->_currentInputReadOffset) {
-                availableFrames = unsafeSelf->_currentInputFrameCount - unsafeSelf->_currentInputReadOffset;
-            }
-            NSUInteger framesToCopy = MIN((NSUInteger)inNumberOfFrames, availableFrames);
-            NSUInteger outputChannels = MKAudioAudioBufferListChannelCount(outputData, [inputFormat channelCount]);
-            BOOL outputInterleaved = MKAudioAudioBufferListIsInterleaved(outputData, outputChannels);
-            if (outputData == NULL) {
-                return kAudio_ParamError;
-            }
-            if (!MKAudioEnsureWritableAudioBufferList(outputData,
-                                                     outputInterleaved,
-                                                     outputChannels,
-                                                     (NSUInteger)inNumberOfFrames,
-                                                     unsafeSelf->_sourceScratchBuffer,
-                                                     unsafeSelf->_sourceScratchCapacity)) {
-                return kAudio_MemFullError;
-            }
-
-            if (unsafeSelf->_currentInputSamples == NULL || unsafeSelf->_currentInputChannelCount == 0) {
-                MKAudioZeroAudioBufferList(outputData,
-                                           outputInterleaved,
-                                           outputChannels,
-                                           0,
-                                           inNumberOfFrames);
-                if (isSilence != NULL) {
-                    *isSilence = YES;
-                }
-                return noErr;
-            }
-
-            MKAudioCopyHostInterleavedToAudioBufferList(unsafeSelf->_currentInputSamples + (unsafeSelf->_currentInputReadOffset * unsafeSelf->_currentInputChannelCount),
-                                                        unsafeSelf->_currentInputChannelCount,
-                                                        framesToCopy,
-                                                        outputData,
-                                                        outputInterleaved,
-                                                        outputChannels);
-            unsafeSelf->_currentInputReadOffset += framesToCopy;
-            if (framesToCopy < (NSUInteger)inNumberOfFrames) {
-                MKAudioZeroAudioBufferList(outputData,
-                                           outputInterleaved,
-                                           outputChannels,
-                                           framesToCopy,
-                                           (NSUInteger)inNumberOfFrames - framesToCopy);
-            }
-            if (isSilence != NULL) {
-                *isSilence = NO;
-            }
-            return noErr;
-        }];
-        if (newSourceNode == nil) {
-            localError = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil];
-            goto commit;
-        }
-
-        if (!MKAudioAttachNodeSafely(newEngine, newSourceNode, &localError)) {
-            goto commit;
-        }
-
-        AVAudioNode *previousNode = (AVAudioNode *)newSourceNode;
-        AVAudioFormat *previousFormat = inputFormat;
-        for (id audioUnit in audioUnits) {
-            AVAudioNode *effectNode = (AVAudioNode *)audioUnit;
-            AVAudioFormat *effectInputBusFormat = MKAudioInputFormatForAudioUnit(audioUnit);
-            AVAudioFormat *effectOutputBusFormat = MKAudioOutputFormatForAudioUnit(audioUnit);
-            AVAudioFormat *effectInputReferenceFormat = effectInputBusFormat != nil ? effectInputBusFormat : previousFormat;
-            AVAudioFormat *effectInputFormat = MKAudioFormatWithSampleRateAndChannels(effectInputReferenceFormat,
-                                                                                      effectiveSampleRate,
-                                                                                      [effectInputReferenceFormat channelCount]);
-            AVAudioFormat *effectOutputReferenceFormat = effectOutputBusFormat != nil ? effectOutputBusFormat : effectInputFormat;
-            AVAudioFormat *effectOutputFormat = MKAudioFormatWithSampleRateAndChannels(effectOutputReferenceFormat,
-                                                                                       effectiveSampleRate,
-                                                                                       [effectOutputReferenceFormat channelCount]);
-
-            if (!MKAudioConfigureAudioUnitForFormats(audioUnit,
-                                                     effectInputFormat,
-                                                     effectOutputFormat,
-                                                     newMaximumFrames,
-                                                     &localError)) {
-                goto commit;
-            }
-
-            if (!MKAudioAttachNodeSafely(newEngine, effectNode, &localError)) {
-                goto commit;
-            }
-
-            AVAudioNode *sourceNode = previousNode;
-            if ([previousFormat channelCount] != [effectInputFormat channelCount]) {
-                AVAudioMixerNode *adapterNode = [[AVAudioMixerNode alloc] init];
-                if (adapterNode == nil) {
-                    localError = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil];
-                    goto commit;
-                }
-                [adapterNodes addObject:adapterNode];
-                if (!MKAudioAttachNodeSafely(newEngine, adapterNode, &localError)) {
-                    [adapterNode release];
-                    goto commit;
-                }
-                if (!MKAudioConnectNodesSafely(newEngine, previousNode, adapterNode, nil, &localError) &&
-                    !MKAudioConnectNodesSafely(newEngine, previousNode, adapterNode, previousFormat, &localError)) {
-                    [adapterNode release];
-                    goto commit;
-                }
-                sourceNode = adapterNode;
-                [adapterNode release];
-            }
-
-            if (!MKAudioConnectNodesSafely(newEngine, sourceNode, effectNode, nil, &localError) &&
-                !MKAudioConnectNodesSafely(newEngine, sourceNode, effectNode, effectInputFormat, &localError)) {
-                goto commit;
-            }
-            previousNode = effectNode;
-            previousFormat = effectOutputFormat;
-        }
-
-        AVAudioMixerNode *finalAdapterNode = [[AVAudioMixerNode alloc] init];
-        if (finalAdapterNode == nil) {
-            localError = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil];
-            goto commit;
-        }
-        [adapterNodes addObject:finalAdapterNode];
-        if (!MKAudioAttachNodeSafely(newEngine, finalAdapterNode, &localError)) {
-            [finalAdapterNode release];
-            goto commit;
-        }
-        if (!MKAudioConnectNodesSafely(newEngine, previousNode, finalAdapterNode, nil, &localError) &&
-            !MKAudioConnectNodesSafely(newEngine, previousNode, finalAdapterNode, previousFormat, &localError)) {
-            [finalAdapterNode release];
-            goto commit;
-        }
-
-        if (!MKAudioConnectNodesSafely(newEngine, finalAdapterNode, [newEngine mainMixerNode], nil, &localError) &&
-            !MKAudioConnectNodesSafely(newEngine, finalAdapterNode, [newEngine mainMixerNode], renderOutputFormat, &localError)) {
-            [finalAdapterNode release];
-            goto commit;
-        }
-        [finalAdapterNode release];
-
-        [newEngine prepare];
-        if (![newEngine startAndReturnError:&localError]) {
-            goto commit;
-        }
-
-        newSourceScratchCapacity = (NSUInteger)newMaximumFrames * (NSUInteger)[inputFormat channelCount];
-        if (newSourceScratchCapacity > 0) {
-            newSourceScratchBuffer = (float *)calloc(newSourceScratchCapacity, sizeof(float));
-            if (newSourceScratchBuffer == NULL) {
-                localError = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil];
-                goto commit;
-            }
-        }
-        newOutputBuffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:[newEngine manualRenderingFormat]
-                                                        frameCapacity:newMaximumFrames];
-        if (newOutputBuffer == nil) {
-            localError = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil];
-            goto commit;
-        }
-
-        newManualRenderingBlock = [[newEngine manualRenderingBlock] copy];
-        if (newManualRenderingBlock == nil) {
-            localError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFeatureUnsupportedError userInfo:nil];
-            goto commit;
-        }
-        newMixScratchCapacity = (NSUInteger)newMaximumFrames * (NSUInteger)[renderOutputFormat channelCount];
-        if (newMixScratchCapacity > 0) {
-            newMixScratchBuffer = (float *)calloc(newMixScratchCapacity, sizeof(float));
-            if (newMixScratchBuffer == NULL) {
-                localError = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil];
-                goto commit;
-            }
-        }
-        newAudioUnits = [audioUnits copy];
-        newInputFormat = [inputFormat retain];
-        newAdapterNodes = [adapterNodes copy];
-        newOutputFormat = [[newEngine manualRenderingFormat] retain];
-    }
-
-commit:
-    os_unfair_lock_lock(&_renderLock);
-    _currentInputSamples = NULL;
-    _currentInputFrameCount = 0;
-    _currentInputChannelCount = 0;
-    _currentInputReadOffset = 0;
-
-    [_manualRenderingBlock release];
-    _manualRenderingBlock = newManualRenderingBlock;
-    newManualRenderingBlock = nil;
-
-    [_outputBuffer release];
-    _outputBuffer = newOutputBuffer;
-    newOutputBuffer = nil;
-
-    [_sourceNode release];
-    _sourceNode = newSourceNode;
-    newSourceNode = nil;
-
-    [_audioUnits release];
-    _audioUnits = newAudioUnits;
-    newAudioUnits = nil;
-
-    [_inputFormat release];
-    _inputFormat = newInputFormat;
-    newInputFormat = nil;
-
-    [_outputFormat release];
-    _outputFormat = newOutputFormat;
-    newOutputFormat = nil;
-
-    [_adapterNodes release];
-    _adapterNodes = newAdapterNodes;
-    newAdapterNodes = nil;
-
-    if (_engine != nil) {
-        [_engine stop];
-        [_engine release];
-    }
-    _engine = newEngine;
-    newEngine = nil;
-
-    free(_sourceScratchBuffer);
-    _sourceScratchBuffer = newSourceScratchBuffer;
-    newSourceScratchBuffer = NULL;
-    _sourceScratchCapacity = newSourceScratchCapacity;
-    newSourceScratchCapacity = 0;
-    free(_mixScratchBuffer);
-    _mixScratchBuffer = newMixScratchBuffer;
-    newMixScratchBuffer = NULL;
-    _mixScratchCapacity = newMixScratchCapacity;
-    newMixScratchCapacity = 0;
-    _maximumFramesToRender = newMaximumFrames;
-    _preferredChannels = effectivePreferredChannels;
-    os_unfair_lock_unlock(&_renderLock);
-
-    if (newManualRenderingBlock != nil) {
-        [newManualRenderingBlock release];
-    }
-    [newOutputBuffer release];
-    [newSourceNode release];
-    [newAudioUnits release];
-    [newAdapterNodes release];
-    [newInputFormat release];
-    [newOutputFormat release];
-    free(newSourceScratchBuffer);
-    free(newMixScratchBuffer);
-    if (newEngine != nil) {
-        [newEngine stop];
-        [newEngine release];
-    }
-
-    if (outError != NULL) {
-        *outError = localError;
-    }
-    return (localError == nil);
-}
-
-- (BOOL)processInterleavedSamples:(float *)samples
-                       frameCount:(NSUInteger)frameCount
-                         channels:(NSUInteger)channels
-                       sampleRate:(NSUInteger)sampleRate
-                        wetDryMix:(float)wetDryMix
-             manualRenderingStatus:(AVAudioEngineManualRenderingStatus *)outRenderStatus
-                            error:(OSStatus *)outError {
-    (void)sampleRate;
-    if (samples == NULL || frameCount == 0 || channels == 0) {
-        if (outRenderStatus != NULL) {
-            *outRenderStatus = AVAudioEngineManualRenderingStatusError;
-        }
-        if (outError != NULL) {
-            *outError = kAudio_ParamError;
-        }
-        return NO;
-    }
-
-    if (wetDryMix <= 0.0f) {
-        if (outRenderStatus != NULL) {
-            *outRenderStatus = AVAudioEngineManualRenderingStatusSuccess;
-        }
-        if (outError != NULL) {
-            *outError = noErr;
-        }
-        return YES;
-    }
-    if (wetDryMix > 1.0f) {
-        wetDryMix = 1.0f;
-    }
-
-    os_unfair_lock_lock(&_renderLock);
-    if (_manualRenderingBlock == nil || _outputBuffer == nil || _outputFormat == nil) {
-        os_unfair_lock_unlock(&_renderLock);
-        if (outRenderStatus != NULL) {
-            *outRenderStatus = AVAudioEngineManualRenderingStatusError;
-        }
-        if (outError != NULL) {
-            *outError = kAudioUnitErr_NoConnection;
-        }
-        return NO;
-    }
-
-    if (frameCount > (NSUInteger)_maximumFramesToRender) {
-        os_unfair_lock_unlock(&_renderLock);
-        if (outRenderStatus != NULL) {
-            *outRenderStatus = AVAudioEngineManualRenderingStatusError;
-        }
-        if (outError != NULL) {
-            *outError = kAudioUnitErr_TooManyFramesToProcess;
-        }
-        return NO;
-    }
-
-    NSUInteger sampleCount = frameCount * channels;
-    BOOL needsDryWetMix = (wetDryMix < 1.0f);
-    if (needsDryWetMix && (_mixScratchBuffer == NULL || _mixScratchCapacity < sampleCount)) {
-        os_unfair_lock_unlock(&_renderLock);
-        if (outRenderStatus != NULL) {
-            *outRenderStatus = AVAudioEngineManualRenderingStatusError;
-        }
-        if (outError != NULL) {
-            *outError = kAudio_MemFullError;
-        }
-        return NO;
-    }
-    if (needsDryWetMix) {
-        memcpy(_mixScratchBuffer, samples, sampleCount * sizeof(float));
-    }
-
-    _currentInputSamples = samples;
-    _currentInputFrameCount = frameCount;
-    _currentInputChannelCount = channels;
-    _currentInputReadOffset = 0;
-    [_outputBuffer setFrameLength:(AVAudioFrameCount)frameCount];
-    AVAudioFormat *renderedOutputFormat = [_outputBuffer format];
-    MKAudioZeroAudioBufferList([_outputBuffer mutableAudioBufferList],
-                               [renderedOutputFormat isInterleaved],
-                               [renderedOutputFormat channelCount],
-                               0,
-                               frameCount);
-
-    OSStatus renderError = noErr;
-    AVAudioEngineManualRenderingStatus renderStatus = _manualRenderingBlock((AVAudioFrameCount)frameCount,
-                                                                            [_outputBuffer mutableAudioBufferList],
-                                                                            &renderError);
-
-    _currentInputSamples = NULL;
-    _currentInputFrameCount = 0;
-    _currentInputChannelCount = 0;
-    _currentInputReadOffset = 0;
-
-    if (renderStatus == AVAudioEngineManualRenderingStatusSuccess) {
-        MKAudioCopyAudioBufferListToHostInterleaved([_outputBuffer audioBufferList],
-                                                    [renderedOutputFormat isInterleaved],
-                                                    [renderedOutputFormat channelCount],
-                                                    frameCount,
-                                                    samples,
-                                                    channels);
-        if (needsDryWetMix) {
-            float dryMix = 1.0f - wetDryMix;
-            for (NSUInteger i = 0; i < sampleCount; i++) {
-                samples[i] = (_mixScratchBuffer[i] * dryMix) + (samples[i] * wetDryMix);
-            }
-        }
-    }
-    os_unfair_lock_unlock(&_renderLock);
-
-    if (outRenderStatus != NULL) {
-        *outRenderStatus = renderStatus;
-    }
-    if (outError != NULL) {
-        *outError = renderError;
-    }
-
-    return (renderStatus == AVAudioEngineManualRenderingStatusSuccess);
-}
-
-- (NSString *)probeSummary {
-    NSString *summary = nil;
-    os_unfair_lock_lock(&_renderLock);
-    AVAudioFormat *inputFormat = _inputFormat;
-    AVAudioFormat *outputFormat = _outputBuffer != nil ? [_outputBuffer format] : _outputFormat;
-    AVAudioFormat *manualFormat = _engine != nil ? [_engine manualRenderingFormat] : nil;
-    summary = [[NSString alloc] initWithFormat:@"in=%@ out=%@ manual=%@ max=%u pref=%lu",
-               MKAudioFormatProbeSummary(inputFormat),
-               MKAudioFormatProbeSummary(outputFormat),
-               MKAudioFormatProbeSummary(manualFormat),
-               (unsigned int)_maximumFramesToRender,
-               (unsigned long)_preferredChannels];
-    os_unfair_lock_unlock(&_renderLock);
-    return [summary autorelease];
-}
-
-@end
-
-static NSString *const MKAudioDSPStageAudioUnitKey = @"audioUnit";
-static NSString *const MKAudioDSPStageMixKey = @"mix";
-
-static NSArray *MKAudioNormalizedDSPStages(NSArray *stageEntries) {
-    if (stageEntries == nil) {
-        return nil;
-    }
-
-    NSMutableArray *mutable = [NSMutableArray arrayWithCapacity:[stageEntries count]];
-    Class audioUnitClass = NSClassFromString(@"AVAudioUnit");
-    for (id entry in stageEntries) {
-        id audioUnit = nil;
-        float mix = 1.0f;
-
-        if ([entry isKindOfClass:[NSDictionary class]]) {
-            NSDictionary *descriptor = (NSDictionary *)entry;
-            audioUnit = [descriptor objectForKey:MKAudioDSPStageAudioUnitKey];
-            id mixValue = [descriptor objectForKey:MKAudioDSPStageMixKey];
-            if ([mixValue respondsToSelector:@selector(floatValue)]) {
-                mix = [mixValue floatValue];
-            }
-        } else {
-            audioUnit = entry;
-        }
-
-        if (audioUnitClass != Nil && ![audioUnit isKindOfClass:audioUnitClass]) {
-            continue;
-        }
-        if (mix < 0.0f) {
-            mix = 0.0f;
-        } else if (mix > 1.0f) {
-            mix = 1.0f;
-        }
-
-        [mutable addObject:@{
-            MKAudioDSPStageAudioUnitKey: audioUnit,
-            MKAudioDSPStageMixKey: @(mix)
-        }];
-    }
-    return [NSArray arrayWithArray:mutable];
-}
-
-static NSArray *MKAudioAudioUnitsFromDSPStages(NSArray *stages) {
-    if (stages == nil) {
-        return nil;
-    }
-
-    NSMutableArray *units = [NSMutableArray arrayWithCapacity:[stages count]];
-    for (NSDictionary *stage in stages) {
-        id audioUnit = [stage objectForKey:MKAudioDSPStageAudioUnitKey];
-        if (audioUnit != nil) {
-            [units addObject:audioUnit];
-        }
-    }
-    return [NSArray arrayWithArray:units];
-}
-
-static NSArray *MKAudioMixLevelsFromDSPStages(NSArray *stages) {
-    if (stages == nil) {
-        return nil;
-    }
-
-    NSMutableArray *mixes = [NSMutableArray arrayWithCapacity:[stages count]];
-    for (NSDictionary *stage in stages) {
-        id mixValue = [stage objectForKey:MKAudioDSPStageMixKey];
-        if (![mixValue respondsToSelector:@selector(floatValue)]) {
-            mixValue = @(1.0f);
-        }
-        [mixes addObject:@([mixValue floatValue])];
-    }
-    return [NSArray arrayWithArray:mixes];
-}
-
-static void MKAudioTearDownStageHosts(NSArray *hosts, NSUInteger preferredChannels) {
-    for (id candidate in hosts) {
-        if (![candidate isKindOfClass:[MKAudioUnitChainHost class]]) {
-            continue;
-        }
-        [(MKAudioUnitChainHost *)candidate reconfigureWithAudioUnits:nil
-                                                   preferredChannels:preferredChannels
-                                                          sampleRate:48000
-                                                               error:nil];
-    }
-}
-
-static NSArray *MKAudioBuildStageHosts(NSArray *audioUnits, NSUInteger preferredChannels, NSUInteger sampleRate, NSString *logPrefix) {
-    if (audioUnits == nil || [audioUnits count] == 0) {
-        return nil;
-    }
-
-    NSMutableArray *hosts = [NSMutableArray arrayWithCapacity:[audioUnits count]];
-    for (NSUInteger index = 0; index < [audioUnits count]; index++) {
-        id audioUnit = [audioUnits objectAtIndexedSubscript:index];
-        NSError *hostError = nil;
-        MKAudioUnitChainHost *host = [[MKAudioUnitChainHost alloc] initWithAudioUnits:@[ audioUnit ]
-                                                                     preferredChannels:preferredChannels
-                                                                           sampleRate:sampleRate
-                                                                                 error:&hostError];
-        if (host == nil) {
-            NSLog(@"MKAudio: %@ - failed to create AU host for stage %lu: %@",
-                  logPrefix,
-                  (unsigned long)(index + 1),
-                  [hostError localizedDescription]);
-            [hosts addObject:[NSNull null]];
-            continue;
-        }
-        [hosts addObject:host];
-        [host release];
-    }
-    return [NSArray arrayWithArray:hosts];
-}
-
-static BOOL MKAudioShouldLogRenderFailure(MKAudioDSPChainProcessorState *state) {
-    if (state == NULL) {
-        return YES;
-    }
-
-    BOOL shouldLog = NO;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    os_unfair_lock_lock(&state->lock);
-    if (state->lastRenderFailureLogTime <= 0.0 || (now - state->lastRenderFailureLogTime) >= 2.0) {
-        state->lastRenderFailureLogTime = now;
-        shouldLog = YES;
-    }
-    os_unfair_lock_unlock(&state->lock);
-    return shouldLog;
-}
-
-static BOOL MKAudioShouldLogStateProbe(MKAudioDSPChainProcessorState *state, CFAbsoluteTime minimumInterval) {
-    if (state == NULL) {
-        return YES;
-    }
-
-    BOOL shouldLog = NO;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    os_unfair_lock_lock(&state->lock);
-    if (state->lastStateProbeLogTime <= 0.0 || (now - state->lastStateProbeLogTime) >= minimumInterval) {
-        state->lastStateProbeLogTime = now;
-        shouldLog = YES;
-    }
-    os_unfair_lock_unlock(&state->lock);
-    return shouldLog;
-}
-
-static BOOL MKAudioShouldLogRenderProbe(MKAudioDSPChainProcessorState *state, CFAbsoluteTime minimumInterval) {
-    if (state == NULL) {
-        return YES;
-    }
-
-    BOOL shouldLog = NO;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    os_unfair_lock_lock(&state->lock);
-    if (state->lastRenderProbeLogTime <= 0.0 || (now - state->lastRenderProbeLogTime) >= minimumInterval) {
-        state->lastRenderProbeLogTime = now;
-        shouldLog = YES;
-    }
-    os_unfair_lock_unlock(&state->lock);
-    return shouldLog;
-}
-
-static float MKAudioPeakForInterleavedSamples(const float *samples, NSUInteger frameCount, NSUInteger channels) {
-    if (samples == NULL || frameCount == 0 || channels == 0) {
-        return 0.0f;
-    }
-
-    float peak = 0.0f;
-    NSUInteger sampleCount = frameCount * channels;
-    for (NSUInteger i = 0; i < sampleCount; i++) {
-        float value = fabsf(samples[i]);
-        if (value > peak) {
-            peak = value;
-        }
-    }
-    return peak;
-}
-
-static void MKAudioApplyHardClipInterleaved(float *samples, NSUInteger frameCount, NSUInteger channels) {
-    if (samples == NULL || frameCount == 0 || channels == 0) {
-        return;
-    }
-
-    NSUInteger sampleCount = frameCount * channels;
-    for (NSUInteger i = 0; i < sampleCount; i++) {
-        if (samples[i] > 1.0f) {
-            samples[i] = 1.0f;
-        } else if (samples[i] < -1.0f) {
-            samples[i] = -1.0f;
-        }
-    }
-}
-
-static float MKAudioPeakForInterleavedChannel(const float *samples,
-                                              NSUInteger frameCount,
-                                              NSUInteger channels,
-                                              NSUInteger channelIndex) {
-    if (samples == NULL || frameCount == 0 || channels == 0 || channelIndex >= channels) {
-        return 0.0f;
-    }
-
-    float peak = 0.0f;
-    for (NSUInteger frame = 0; frame < frameCount; frame++) {
-        float value = fabsf(samples[(frame * channels) + channelIndex]);
-        if (value > peak) {
-            peak = value;
-        }
-    }
-    return peak;
-}
-
-static NSArray *MKAudioCopyHostProbeSummaries(NSArray *hosts) {
-    if (hosts == nil || [hosts count] == 0) {
-        return @[];
-    }
-
-    NSMutableArray *result = [NSMutableArray arrayWithCapacity:[hosts count]];
-    for (id candidate in hosts) {
-        if ([candidate isKindOfClass:[MKAudioUnitChainHost class]]) {
-            NSString *summary = [(MKAudioUnitChainHost *)candidate probeSummary];
-            [result addObject:(summary != nil ? summary : @"nil")];
-        } else {
-            [result addObject:@"null"];
-        }
-    }
-    return [NSArray arrayWithArray:result];
-}
-
-static void MKAudioLogDSPChainProbeState(MKAudioDSPChainProcessorState *state,
-                                         NSString *logPrefix,
-                                         NSString *reason) {
-    if (state == NULL || ![logPrefix isEqualToString:@"Remote Bus"] || !MKAudioShouldLogStateProbe(state, 0.5)) {
-        return;
-    }
-
-    NSArray *audioUnits = nil;
-    NSArray *mixLevels = nil;
-    NSArray *hosts = nil;
-    NSUInteger preferredChannels = 0;
-    NSUInteger hostBufferFrames = 0;
-    NSUInteger renderSampleRate = 0;
-    BOOL sampleRateRefreshPending = NO;
-
-    os_unfair_lock_lock(&state->lock);
-    audioUnits = [state->audioUnits retain];
-    mixLevels = [state->mixLevels retain];
-    hosts = [state->hosts retain];
-    preferredChannels = state->preferredChannels;
-    hostBufferFrames = state->hostBufferFrames;
-    renderSampleRate = state->renderSampleRate;
-    sampleRateRefreshPending = state->sampleRateRefreshPending;
-    os_unfair_lock_unlock(&state->lock);
-
-    NSArray *hostSummaries = MKAudioCopyHostProbeSummaries(hosts);
-    NSLog(@"MKAudioProbe: %@ [%@] stages=%lu mixes=%@ hosts=%@ prefCh=%lu hostBuf=%lu renderSR=%lu pending=%@",
-          logPrefix,
-          reason,
-          (unsigned long)[audioUnits count],
-          mixLevels != nil ? mixLevels : @[],
-          hostSummaries,
-          (unsigned long)preferredChannels,
-          (unsigned long)hostBufferFrames,
-          (unsigned long)renderSampleRate,
-          sampleRateRefreshPending ? @"YES" : @"NO");
-
-    [audioUnits release];
-    [mixLevels release];
-    [hosts release];
-}
-
-static void MKAudioLogRemoteBusRenderProbe(MKAudioDSPChainProcessorState *state,
-                                           NSUInteger frameCount,
-                                           NSUInteger channels,
-                                           NSUInteger sampleRate,
-                                           NSUInteger configuredSampleRate,
-                                           NSUInteger hostBufferFrames,
-                                           NSArray *hosts,
-                                           float inputPeak,
-                                           float outputPeak,
-                                           float inputLeftPeak,
-                                           float inputRightPeak,
-                                           float outputLeftPeak,
-                                           float outputRightPeak) {
-    if (state == NULL) {
-        return;
-    }
-
-    NSArray *hostSummaries = MKAudioCopyHostProbeSummaries(hosts);
-    NSLog(@"MKAudioProbe: Remote Bus [render] frames=%lu channels=%lu sampleRate=%lu configuredSR=%lu hostBuf=%lu inPeak=%.3f outPeak=%.3f inL=%.3f inR=%.3f outL=%.3f outR=%.3f hosts=%@",
-          (unsigned long)frameCount,
-          (unsigned long)channels,
-          (unsigned long)sampleRate,
-          (unsigned long)configuredSampleRate,
-          (unsigned long)hostBufferFrames,
-          inputPeak,
-          outputPeak,
-          inputLeftPeak,
-          inputRightPeak,
-          outputLeftPeak,
-          outputRightPeak,
-          hostSummaries);
-}
-
-static void MKAudioStoreDSPPeaks(MKAudioDSPChainProcessorState *state, float inputPeak, float outputPeak) {
-    if (state == NULL) {
-        return;
-    }
-
-    os_unfair_lock_lock(&state->lock);
-    state->inputPeak = inputPeak;
-    state->outputPeak = outputPeak;
-    os_unfair_lock_unlock(&state->lock);
-}
-
-static void MKAudioUpdateDSPChainState(MKAudioDSPChainProcessorState *state, NSArray *audioUnits, NSString *logPrefix, BOOL forceRebuild) {
-    if (state == NULL) {
-        return;
-    }
-
-    NSArray *normalizedStages = MKAudioNormalizedDSPStages(audioUnits);
-    NSArray *filteredUnits = MKAudioAudioUnitsFromDSPStages(normalizedStages);
-    NSArray *mixLevels = MKAudioMixLevelsFromDSPStages(normalizedStages);
-    NSArray *currentStages = nil;
-    NSArray *currentUnits = nil;
-    NSArray *currentMixLevels = nil;
-    NSArray *currentHosts = nil;
-
-    os_unfair_lock_lock(&state->lock);
-    currentStages = [state->stages retain];
-    currentUnits = [state->audioUnits retain];
-    currentMixLevels = [state->mixLevels retain];
-    currentHosts = [state->hosts retain];
-    NSUInteger renderSampleRate = state->renderSampleRate > 0 ? state->renderSampleRate : 48000;
-    os_unfair_lock_unlock(&state->lock);
-
-    BOOL stagesUnchanged = ((currentStages == normalizedStages) || [currentStages isEqualToArray:normalizedStages]);
-    BOOL unitsUnchanged = ((currentUnits == filteredUnits) || [currentUnits isEqualToArray:filteredUnits]);
-    BOOL mixesUnchanged = ((currentMixLevels == mixLevels) || [currentMixLevels isEqualToArray:mixLevels]);
-    [currentStages release];
-    [currentUnits release];
-    [currentMixLevels release];
-    if (!forceRebuild && stagesUnchanged && unitsUnchanged && mixesUnchanged) {
-        [currentHosts release];
-        return;
-    }
-
-    NSArray *hostsToStore = nil;
-    if (!forceRebuild && unitsUnchanged) {
-        hostsToStore = currentHosts;
-    } else {
-        // AVAudioUnit instances are owned by a single AVAudioEngine at a time.
-        // Tear down old hosts before rebuilding so units can be safely reattached.
-        MKAudioTearDownStageHosts(currentHosts, state->preferredChannels);
-        [currentHosts release];
-        currentHosts = nil;
-        hostsToStore = MKAudioBuildStageHosts(filteredUnits, state->preferredChannels, renderSampleRate, logPrefix);
-    }
-
-    os_unfair_lock_lock(&state->lock);
-    [state->stages release];
-    state->stages = [normalizedStages retain];
-    [state->audioUnits release];
-    state->audioUnits = [filteredUnits retain];
-    [state->mixLevels release];
-    state->mixLevels = [mixLevels retain];
-    [state->hosts release];
-    state->hosts = [hostsToStore retain];
-    os_unfair_lock_unlock(&state->lock);
-
-    [currentHosts release];
-    MKAudioLogDSPChainProbeState(state, logPrefix, forceRebuild ? @"rebuild" : @"update");
-}
-
-static BOOL MKAudioScheduleDSPChainSampleRateRefresh(MKAudioDSPChainProcessorState *state,
-                                                     NSUInteger sampleRate,
-                                                     NSString *logPrefix) {
-    if (state == NULL || sampleRate == 0) {
-        return NO;
-    }
-
-    __unsafe_unretained MKAudio *owner = nil;
-    NSArray *stages = nil;
-    BOOL shouldSchedule = NO;
-
-    os_unfair_lock_lock(&state->lock);
-    if (state->renderSampleRate != sampleRate && !state->sampleRateRefreshPending) {
-        state->renderSampleRate = sampleRate;
-        state->sampleRateRefreshPending = YES;
-        owner = state->owner;
-        stages = [state->stages retain];
-        shouldSchedule = YES;
-    }
-    os_unfair_lock_unlock(&state->lock);
-
-    if (!shouldSchedule || owner == nil) {
-        [stages release];
-        return NO;
-    }
-
-    [owner refreshDSPChainState:state stages:stages logPrefix:logPrefix];
-
-    return YES;
-}
-
-static void MKAudioClearDSPChainState(MKAudioDSPChainProcessorState *state) {
-    if (state == NULL) {
-        return;
-    }
-
-    NSArray *hosts = nil;
-    os_unfair_lock_lock(&state->lock);
-    [state->stages release];
-    state->stages = nil;
-    [state->audioUnits release];
-    state->audioUnits = nil;
-    [state->mixLevels release];
-    state->mixLevels = nil;
-    state->sampleRateRefreshPending = NO;
-    hosts = [state->hosts retain];
-    [state->hosts release];
-    state->hosts = nil;
-    os_unfair_lock_unlock(&state->lock);
-
-    MKAudioTearDownStageHosts(hosts, state->preferredChannels);
-    [hosts release];
-}
-
-static void MKAudioProcessDSPStagesFloat(float *samples,
-                                         NSUInteger frameCount,
-                                         NSUInteger channels,
-                                         NSUInteger sampleRate,
-                                         MKAudioDSPChainProcessorState *state,
-                                         NSString *logPrefix) {
-    NSArray *audioUnits = nil;
-    NSArray *mixLevels = nil;
-    NSArray *hosts = nil;
-    NSUInteger configuredSampleRate = 48000;
-    BOOL sampleRateRefreshPending = NO;
-    os_unfair_lock_lock(&state->lock);
-    audioUnits = [state->audioUnits retain];
-    mixLevels = [state->mixLevels retain];
-    hosts = [state->hosts retain];
-    NSUInteger hostBufferFrames = state->hostBufferFrames;
-    configuredSampleRate = state->renderSampleRate > 0 ? state->renderSampleRate : 48000;
-    sampleRateRefreshPending = state->sampleRateRefreshPending;
-    os_unfair_lock_unlock(&state->lock);
-
-    float inputPeak = MKAudioPeakForInterleavedSamples(samples, frameCount, channels);
-    BOOL shouldProbeRender = [logPrefix isEqualToString:@"Remote Bus"] && MKAudioShouldLogRenderProbe(state, 1.0);
-    float inputLeftPeak = 0.0f;
-    float inputRightPeak = 0.0f;
-    if (shouldProbeRender) {
-        inputLeftPeak = MKAudioPeakForInterleavedChannel(samples, frameCount, channels, 0);
-        inputRightPeak = MKAudioPeakForInterleavedChannel(samples, frameCount, channels, MIN((NSUInteger)1, channels - 1));
-    }
-
-    if (audioUnits == nil || [audioUnits count] == 0 || hosts == nil || [hosts count] == 0) {
-        MKAudioStoreDSPPeaks(state, inputPeak, inputPeak);
-        if (shouldProbeRender) {
-            MKAudioLogRemoteBusRenderProbe(state,
-                                           frameCount,
-                                           channels,
-                                           sampleRate,
-                                           configuredSampleRate,
-                                           hostBufferFrames,
-                                           hosts,
-                                           inputPeak,
-                                           inputPeak,
-                                           inputLeftPeak,
-                                           inputRightPeak,
-                                           inputLeftPeak,
-                                           inputRightPeak);
-        }
-        [audioUnits release];
-        [mixLevels release];
-        [hosts release];
-        return;
-    }
-
-    if ((sampleRate > 0 && configuredSampleRate != sampleRate)
-        || sampleRateRefreshPending) {
-        MKAudioScheduleDSPChainSampleRateRefresh(state, sampleRate, logPrefix);
-        MKAudioStoreDSPPeaks(state, inputPeak, inputPeak);
-        [audioUnits release];
-        [mixLevels release];
-        [hosts release];
-        return;
-    }
-
-    NSUInteger stageCount = MIN([audioUnits count], MIN([mixLevels count], [hosts count]));
-    for (NSUInteger index = 0; index < stageCount; index++) {
-        id hostCandidate = [hosts objectAtIndexedSubscript:index];
-        if (![hostCandidate isKindOfClass:[MKAudioUnitChainHost class]]) {
-            continue;
-        }
-
-        float wetDryMix = 1.0f;
-        id mixValue = [mixLevels objectAtIndexedSubscript:index];
-        if ([mixValue respondsToSelector:@selector(floatValue)]) {
-            wetDryMix = [mixValue floatValue];
-        }
-
-        // Process the full callback block in one render pass. Splitting a live
-        // buffer into smaller host-sized chunks caused audible discontinuities
-        // with effects that internally pull fixed quanta or latency-compensated
-        // lookahead blocks.
-        NSUInteger chunkSize = frameCount;
-        (void)hostBufferFrames;
-        for (NSUInteger offset = 0; offset < frameCount; offset += chunkSize) {
-            NSUInteger framesThisPass = MIN(chunkSize, frameCount - offset);
-            AVAudioEngineManualRenderingStatus renderStatus = AVAudioEngineManualRenderingStatusError;
-            OSStatus renderError = noErr;
-            if (![(MKAudioUnitChainHost *)hostCandidate processInterleavedSamples:(samples + (offset * channels))
-                                                                       frameCount:framesThisPass
-                                                                         channels:channels
-                                                                       sampleRate:sampleRate
-                                                                        wetDryMix:wetDryMix
-                                                             manualRenderingStatus:&renderStatus
-                                                                            error:&renderError]) {
-                if (MKAudioShouldLogRenderFailure(state)) {
-                    NSLog(@"MKAudio: %@ - AU host render failed at stage %lu, status=%ld, error=%d",
-                          logPrefix,
-                          (unsigned long)(index + 1),
-                          (long)renderStatus,
-                          (int)renderError);
-                }
-            }
-        }
-    }
-
-    MKAudioApplyHardClipInterleaved(samples, frameCount, channels);
-
-    float outputPeak = MKAudioPeakForInterleavedSamples(samples, frameCount, channels);
-    MKAudioStoreDSPPeaks(state, inputPeak, outputPeak);
-    if (shouldProbeRender) {
-        float outputLeftPeak = MKAudioPeakForInterleavedChannel(samples, frameCount, channels, 0);
-        float outputRightPeak = MKAudioPeakForInterleavedChannel(samples, frameCount, channels, MIN((NSUInteger)1, channels - 1));
-        MKAudioLogRemoteBusRenderProbe(state,
-                                       frameCount,
-                                       channels,
-                                       sampleRate,
-                                       configuredSampleRate,
-                                       hostBufferFrames,
-                                       hosts,
-                                       inputPeak,
-                                       outputPeak,
-                                       inputLeftPeak,
-                                       inputRightPeak,
-                                       outputLeftPeak,
-                                       outputRightPeak);
-    }
-    [audioUnits release];
-    [mixLevels release];
-    [hosts release];
-}
-
-static void MKAudioInputDSPProcess(short *samples, NSUInteger frameCount, NSUInteger channels, NSUInteger sampleRate, void *context) {
-    MKAudioDSPChainProcessorState *state = (MKAudioDSPChainProcessorState *)context;
-    if (samples == NULL || frameCount == 0 || channels == 0 || state == NULL) {
-        return;
-    }
-
-    MKAudioPreviewGainProcessorState preview;
-    NSArray *audioUnits = nil;
-    os_unfair_lock_lock(&state->lock);
-    preview = state->preview;
-    audioUnits = [state->audioUnits retain];
-    os_unfair_lock_unlock(&state->lock);
-
-    MKAudioInputPreviewGainProcess(samples, frameCount, channels, sampleRate, &preview);
-
-    if (audioUnits == nil || audioUnits.count == 0) {
-        [audioUnits release];
-        return;
-    }
-
-    NSUInteger sampleCount = frameCount * channels;
-    float *floatSamples = (float *)calloc(sampleCount, sizeof(float));
-    if (floatSamples == NULL) {
-        NSLog(@"MKAudio: Input Track - calloc failed!");
-        [audioUnits release];
-        return;
-    }
-
-    for (NSUInteger i = 0; i < sampleCount; i++) {
-        floatSamples[i] = ((float)samples[i]) / 32768.0f;
-    }
-
-    MKAudioProcessDSPStagesFloat(floatSamples, frameCount, channels, sampleRate, state, @"Input Track");
-
-    for (NSUInteger i = 0; i < sampleCount; i++) {
-        float scaled = floatSamples[i] * 32767.0f;
-        if (scaled > 32767.0f) {
-            scaled = 32767.0f;
-        } else if (scaled < -32768.0f) {
-            scaled = -32768.0f;
-        }
-        samples[i] = (short)scaled;
-    }
-
-    free(floatSamples);
-    [audioUnits release];
-}
-
-static void MKAudioRemoteBusPreviewGainProcess(float *samples, NSUInteger frameCount, NSUInteger channels, NSUInteger sampleRate, void *context) {
-    (void)sampleRate;
-    MKAudioPreviewGainProcessorState *state = (MKAudioPreviewGainProcessorState *)context;
-    if (state == NULL || !state->enabled) {
-        return;
-    }
-    float gain = state->gain;
-    if (gain == 1.0f) {
-        return;
-    }
-
-    NSUInteger sampleCount = frameCount * channels;
-    for (NSUInteger i = 0; i < sampleCount; i++) {
-        samples[i] *= gain;
-    }
-}
-
-static void MKAudioRemoteBusDSPProcess(float *samples, NSUInteger frameCount, NSUInteger channels, NSUInteger sampleRate, void *context) {
-    MKAudioDSPChainProcessorState *state = (MKAudioDSPChainProcessorState *)context;
-    if (samples == NULL || frameCount == 0 || channels == 0 || state == NULL) {
-        return;
-    }
-
-    MKAudioPreviewGainProcessorState preview;
-    NSArray *audioUnits = nil;
-    os_unfair_lock_lock(&state->lock);
-    preview = state->preview;
-    audioUnits = [state->audioUnits retain];
-    os_unfair_lock_unlock(&state->lock);
-
-    MKAudioApplyPreviewGainFloat(samples, frameCount, channels, &preview);
-
-    if (audioUnits == nil || audioUnits.count == 0) {
-        [audioUnits release];
-        return;
-    }
-
-    MKAudioProcessDSPStagesFloat(samples, frameCount, channels, sampleRate, state, @"Remote Bus");
-
-    [audioUnits release];
-}
-
-static void MKAudioRemoteTrackPreviewGainProcess(float *samples, NSUInteger frameCount, NSUInteger channels, NSUInteger sampleRate, void *context) {
-    MKAudioRemoteBusPreviewGainProcess(samples, frameCount, channels, sampleRate, context);
-}
-
-static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, NSUInteger channels, NSUInteger sampleRate, void *context) {
-    MKAudioDSPChainProcessorState *state = (MKAudioDSPChainProcessorState *)context;
-    if (samples == NULL || frameCount == 0 || channels == 0 || state == NULL) {
-        return;
-    }
-
-    MKAudioPreviewGainProcessorState preview;
-    NSArray *audioUnits = nil;
-    os_unfair_lock_lock(&state->lock);
-    preview = state->preview;
-    audioUnits = [state->audioUnits retain];
-    os_unfair_lock_unlock(&state->lock);
-
-    MKAudioApplyPreviewGainFloat(samples, frameCount, channels, &preview);
-
-    if (audioUnits == nil || audioUnits.count == 0) {
-        [audioUnits release];
-        return;
-    }
-
-    MKAudioProcessDSPStagesFloat(samples, frameCount, channels, sampleRate, state, @"Remote Track");
-    [audioUnits release];
-}
-
 @implementation MKAudio
 
 #pragma mark - Singleton & Init
@@ -2038,37 +339,44 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
         _inputTrackPreviewState.enabled = NO;
         _remoteBusPreviewState.gain = 1.0f;
         _remoteBusPreviewState.enabled = NO;
-
-        _inputTrackDSPState.preview = _inputTrackPreviewState;
-        _inputTrackDSPState.lock = OS_UNFAIR_LOCK_INIT;
-        _inputTrackDSPState.stages = nil;
-        _inputTrackDSPState.audioUnits = nil;
-        _inputTrackDSPState.mixLevels = nil;
-        _inputTrackDSPState.hosts = nil;
-        _inputTrackDSPState.preferredChannels = 1;
-        _inputTrackDSPState.hostBufferFrames = 256;
-        _inputTrackDSPState.renderSampleRate = 48000;
-        _inputTrackDSPState.sampleRateRefreshPending = NO;
-        _inputTrackDSPState.owner = self;
-        _inputTrackDSPState.inputPeak = 0.0f;
-        _inputTrackDSPState.outputPeak = 0.0f;
-        _remoteBusDSPState.preview = _remoteBusPreviewState;
-        _remoteBusDSPState.lock = OS_UNFAIR_LOCK_INIT;
-        _remoteBusDSPState.stages = nil;
-        _remoteBusDSPState.audioUnits = nil;
-        _remoteBusDSPState.mixLevels = nil;
-        _remoteBusDSPState.hosts = nil;
-        _remoteBusDSPState.preferredChannels = 2;
-        _remoteBusDSPState.hostBufferFrames = 256;
-        _remoteBusDSPState.renderSampleRate = 48000;
-        _remoteBusDSPState.sampleRateRefreshPending = NO;
-        _remoteBusDSPState.owner = self;
-        _remoteBusDSPState.inputPeak = 0.0f;
-        _remoteBusDSPState.outputPeak = 0.0f;
         _pluginHostBufferFrames = 256;
+        _inputTrackRackBridge = [[MKAudioInputRackBridge alloc] init];
+        _sidetoneRackBridge = [[MKAudioInputRackBridge alloc] init];
+        _remoteBusRackBridge = [[MKAudioRemoteBusRackBridge alloc] init];
+        _remoteBusRackBridge2 = [[MKAudioRemoteBusRackBridge alloc] init];
+        _remoteBus2PreviewState.gain = 1.0f;
+        _remoteBus2PreviewState.enabled = NO;
         _remoteTrackPreviewStates = [[NSMutableDictionary alloc] init];
-        _remoteTrackDSPStates = [[NSMutableDictionary alloc] init];
-        
+        _remoteTrackRackBridges = [[NSMutableDictionary alloc] init];
+
+        _sidechainInputLock = OS_UNFAIR_LOCK_INIT;
+        _sidechainInputRingCapacityFrames = MK_SIDECHAIN_MAX_FRAMES * 8;
+        _sidechainInputRingBuffer = calloc(_sidechainInputRingCapacityFrames * 2, sizeof(float));
+        _sidechainInputReadBuffer = calloc(MK_SIDECHAIN_MAX_FRAMES * 2, sizeof(float));
+        _sidechainInputReadPos = 0;
+        _sidechainInputWritePos = 0;
+        _sidechainInputBufferedFrames = 0;
+        _sidechainInputPPChannels = 0;
+        _sidechainInputPPSampleRate = 0;
+        _sidechainSidetoneLock = OS_UNFAIR_LOCK_INIT;
+        _sidechainSidetoneRingCapacityFrames = MK_SIDECHAIN_MAX_FRAMES * 8;
+        _sidechainSidetoneRingBuffer = calloc(_sidechainSidetoneRingCapacityFrames * 2, sizeof(float));
+        _sidechainSidetoneReadBuffer = calloc(MK_SIDECHAIN_MAX_FRAMES * 2, sizeof(float));
+        _sidechainSidetoneReadPos = 0;
+        _sidechainSidetoneWritePos = 0;
+        _sidechainSidetoneBufferedFrames = 0;
+        _sidechainSidetonePPChannels = 0;
+        _sidechainSidetonePPSampleRate = 0;
+        _inputMonitorLock = OS_UNFAIR_LOCK_INIT;
+        _inputMonitorRingCapacityFrames = MK_SIDECHAIN_MAX_FRAMES * 8;
+        _inputMonitorRingBuffer = calloc(_inputMonitorRingCapacityFrames * 2, sizeof(float));
+        _inputMonitorReadBuffer = calloc(MK_SIDECHAIN_MAX_FRAMES * 2, sizeof(float));
+        _inputMonitorReadPos = 0;
+        _inputMonitorWritePos = 0;
+        _inputMonitorBufferedFrames = 0;
+        _inputMonitorPPChannels = 0;
+        _inputMonitorPPSampleRate = 0;
+
 #if TARGET_OS_IOS
         // 注册通知监听 (替代旧的 C 回调)
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -2113,54 +421,25 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
     }
     [_remoteTrackPreviewStates release];
     _remoteTrackPreviewStates = nil;
-
-    for (NSValue *value in [_remoteTrackDSPStates allValues]) {
-        MKAudioDSPChainProcessorState *state = (MKAudioDSPChainProcessorState *)[value pointerValue];
-        if (state != NULL) {
-            NSArray *hosts = nil;
-            os_unfair_lock_lock(&state->lock);
-            [state->audioUnits release];
-            state->audioUnits = nil;
-            [state->mixLevels release];
-            state->mixLevels = nil;
-            hosts = [state->hosts retain];
-            [state->hosts release];
-            state->hosts = nil;
-            os_unfair_lock_unlock(&state->lock);
-            MKAudioTearDownStageHosts(hosts, state->preferredChannels);
-            [hosts release];
-            free(state);
-        }
-    }
-    [_remoteTrackDSPStates release];
-    _remoteTrackDSPStates = nil;
-
-    NSArray *inputHosts = nil;
-    os_unfair_lock_lock(&_inputTrackDSPState.lock);
-    [_inputTrackDSPState.audioUnits release];
-    _inputTrackDSPState.audioUnits = nil;
-    [_inputTrackDSPState.mixLevels release];
-    _inputTrackDSPState.mixLevels = nil;
-    inputHosts = [_inputTrackDSPState.hosts retain];
-    [_inputTrackDSPState.hosts release];
-    _inputTrackDSPState.hosts = nil;
-    os_unfair_lock_unlock(&_inputTrackDSPState.lock);
-    MKAudioTearDownStageHosts(inputHosts, _inputTrackDSPState.preferredChannels);
-    [inputHosts release];
-
-    NSArray *remoteBusHosts = nil;
-    os_unfair_lock_lock(&_remoteBusDSPState.lock);
-    [_remoteBusDSPState.audioUnits release];
-    _remoteBusDSPState.audioUnits = nil;
-    [_remoteBusDSPState.mixLevels release];
-    _remoteBusDSPState.mixLevels = nil;
-    remoteBusHosts = [_remoteBusDSPState.hosts retain];
-    [_remoteBusDSPState.hosts release];
-    _remoteBusDSPState.hosts = nil;
-    os_unfair_lock_unlock(&_remoteBusDSPState.lock);
-    MKAudioTearDownStageHosts(remoteBusHosts, _remoteBusDSPState.preferredChannels);
-    [remoteBusHosts release];
     
+    [_inputTrackRackBridge release];
+    _inputTrackRackBridge = nil;
+    [_sidetoneRackBridge release];
+    _sidetoneRackBridge = nil;
+    [_remoteBusRackBridge release];
+    _remoteBusRackBridge = nil;
+    [_remoteBusRackBridge2 release];
+    _remoteBusRackBridge2 = nil;
+    [_remoteTrackRackBridges release];
+    _remoteTrackRackBridges = nil;
+
+    free(_sidechainInputRingBuffer);
+    free(_sidechainInputReadBuffer);
+    free(_sidechainSidetoneRingBuffer);
+    free(_sidechainSidetoneReadBuffer);
+    free(_inputMonitorRingBuffer);
+    free(_inputMonitorReadBuffer);
+
     [super dealloc];
 }
 
@@ -2199,7 +478,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
                                   error:&error];
     
     if (!success) {
-        NSLog(@"MKAudio: Failed to set session category: %@", error.localizedDescription);
+        MKLogError(Audio, @"MKAudio: Failed to set session category: %@", error.localizedDescription);
     }
 
     // 3. 设置硬件采样率 (推荐 48kHz)
@@ -2223,10 +502,10 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
     AVAudioSessionInterruptionType type = [userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
 
     if (type == AVAudioSessionInterruptionTypeBegan) {
-        NSLog(@"MKAudio: Interruption BEGAN (Phone call etc.)");
+        MKLogInfo(Audio, @"MKAudio: Interruption BEGAN (Phone call etc.)");
         [self stop];
     } else if (type == AVAudioSessionInterruptionTypeEnded) {
-        NSLog(@"MKAudio: Interruption ENDED. Restarting audio engine...");
+        MKLogInfo(Audio, @"MKAudio: Interruption ENDED. Restarting audio engine...");
         // 不再依赖 ShouldResume 标志位。电话挂断后该标志经常不被设置，
         // 导致音频引擎永远无法恢复。只要中断结束且连接仍然活跃，就无条件重启。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -2234,7 +513,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
             NSError *error = nil;
             [[AVAudioSession sharedInstance] setActive:YES withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&error];
             if (error) {
-                NSLog(@"MKAudio: Failed to reactivate session after interruption: %@", error);
+                MKLogError(Audio, @"MKAudio: Failed to reactivate session after interruption: %@", error);
             }
             [self restart];
         });
@@ -2245,7 +524,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
     NSDictionary *userInfo = notification.userInfo;
     AVAudioSessionRouteChangeReason reason = [userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
     
-    NSLog(@"MKAudio: Route Changed. Reason: %lu", (unsigned long)reason);
+    MKLogInfo(Audio, @"MKAudio: Route Changed. Reason: %lu", (unsigned long)reason);
     
     // 以下情况通常不需要重启：
     // kAudioSessionRouteChangeReasonOverride (我们自己代码改的)
@@ -2256,7 +535,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
         case AVAudioSessionRouteChangeReasonOldDeviceUnavailable: // 拔出耳机
             // 只有音频引擎已经在运行时才重启，避免在未连接服务器时激活麦克风
             if (_running) {
-                NSLog(@"MKAudio: Restarting audio due to device change.");
+                MKLogInfo(Audio, @"MKAudio: Restarting audio due to device change.");
                 [self restart];
             }
             break;
@@ -2266,7 +545,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
 }
 
 - (void)handleMediaServicesReset:(NSNotification *)notification {
-    NSLog(@"MKAudio: Media Services Reset (Audio daemon crashed). Re-initializing.");
+    MKLogWarning(Audio, @"MKAudio: Media Services Reset (Audio daemon crashed). Re-initializing.");
     // 彻底重置
     [self stop];
     [self setupAudioSession];
@@ -2290,7 +569,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
                                                   MKAudioDefaultInputDeviceChangedCallback,
                                                   self);
     if (err != noErr) {
-        NSLog(@"MKAudio: Failed to observe default input device changes (%d).", (int)err);
+        MKLogWarning(Audio, @"MKAudio: Failed to observe default input device changes (%d).", (int)err);
         return;
     }
     
@@ -2308,7 +587,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
                                           &defaultInputAddr,
                                           MKAudioDefaultInputDeviceChangedCallback,
                                           self);
-        NSLog(@"MKAudio: Failed to observe device list changes (%d).", (int)devicesErr);
+        MKLogWarning(Audio, @"MKAudio: Failed to observe device list changes (%d).", (int)devicesErr);
         return;
     }
     
@@ -2330,12 +609,12 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
                                           &devicesAddr,
                                           MKAudioDefaultInputDeviceChangedCallback,
                                           self);
-        NSLog(@"MKAudio: Failed to observe default output device changes (%d).", (int)outputErr);
+        MKLogWarning(Audio, @"MKAudio: Failed to observe default output device changes (%d).", (int)outputErr);
         return;
     }
     
     _isObservingDefaultInputDevice = YES;
-    NSLog(@"MKAudio: Observing default input/output and device list changes.");
+    MKLogInfo(Audio, @"MKAudio: Observing default input/output and device list changes.");
 }
 
 - (void)stopObservingDefaultInputDeviceChanges {
@@ -2351,7 +630,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
                                                      MKAudioDefaultInputDeviceChangedCallback,
                                                      self);
     if (err != noErr) {
-        NSLog(@"MKAudio: Failed to remove default input device observer (%d).", (int)err);
+        MKLogWarning(Audio, @"MKAudio: Failed to remove default input device observer (%d).", (int)err);
     }
     
     AudioObjectPropertyAddress devicesAddr;
@@ -2364,7 +643,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
                                                             MKAudioDefaultInputDeviceChangedCallback,
                                                             self);
     if (devicesErr != noErr) {
-        NSLog(@"MKAudio: Failed to remove device list observer (%d).", (int)devicesErr);
+        MKLogWarning(Audio, @"MKAudio: Failed to remove device list observer (%d).", (int)devicesErr);
     }
     
     AudioObjectPropertyAddress defaultOutputAddr;
@@ -2377,7 +656,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
                                                            MKAudioDefaultOutputDeviceChangedCallback,
                                                            self);
     if (outputErr != noErr) {
-        NSLog(@"MKAudio: Failed to remove default output device observer (%d).", (int)outputErr);
+        MKLogWarning(Audio, @"MKAudio: Failed to remove default output device observer (%d).", (int)outputErr);
     }
     
     _isObservingDefaultInputDevice = NO;
@@ -2411,7 +690,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
             // 固定设备已经不存在，自动回退到“跟随系统”
             [defaults setBool:YES forKey:@"AudioFollowSystemInputDevice"];
             [defaults setObject:@"" forKey:@"AudioPreferredInputDeviceUID"];
-            NSLog(@"MKAudio: Preferred input device missing. Auto-fallback to follow system default.");
+            MKLogInfo(Audio, @"MKAudio: Preferred input device missing. Auto-fallback to follow system default.");
         }
         
         if (!self->_running) {
@@ -2423,7 +702,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
         self->_isRestartingForDeviceChange = YES;
         BOOL wasVPIO = [self->_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
         BOOL nowExternal = !MKAudioSystemDefaultInputIsBuiltInOrBluetooth();
-        NSLog(@"MKAudio: Default input device changed. Restarting audio to apply new microphone.");
+        MKLogInfo(Audio, @"MKAudio: Default input device changed. Restarting audio to apply new microphone.");
         [self restart];
         if (wasVPIO && nowExternal) {
             [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioVPIOToHALTransitionNotification object:self];
@@ -2450,7 +729,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
             return;
         }
         self->_isRestartingForDeviceChange = YES;
-        NSLog(@"MKAudio: Default output device changed. Restarting audio to apply new speaker/output.");
+        MKLogInfo(Audio, @"MKAudio: Default output device changed. Restarting audio to apply new speaker/output.");
         [self restart];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             self->_isRestartingForDeviceChange = NO;
@@ -2498,6 +777,16 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
 #if TARGET_OS_OSX == 1
         _lastDeviceWasVPIO = [_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
 #endif
+        // Clear sidechain references before tearing down audio output
+        [_inputTrackRackBridge setSidechainAudioOutput:nil];
+        [_sidetoneRackBridge setSidechainAudioOutput:nil];
+        [_remoteBusRackBridge setSidechainAudioOutput:nil];
+        [_remoteBusRackBridge2 setSidechainAudioOutput:nil];
+        for (NSNumber *sessionKey in _remoteTrackRackBridges) {
+            MKAudioRemoteTrackRackBridge *bridge = [_remoteTrackRackBridges objectForKey:sessionKey];
+            [bridge setSidechainAudioOutput:nil];
+        }
+
         [_audioInput release];
         _audioInput = nil;
         [_audioOutput release];
@@ -2507,6 +796,27 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
         _audioDevice = nil;
         [_sidetoneOutput release];
         _sidetoneOutput = nil;
+        os_unfair_lock_lock(&_sidechainInputLock);
+        _sidechainInputReadPos = 0;
+        _sidechainInputWritePos = 0;
+        _sidechainInputBufferedFrames = 0;
+        _sidechainInputPPChannels = 0;
+        _sidechainInputPPSampleRate = 0;
+        os_unfair_lock_unlock(&_sidechainInputLock);
+        os_unfair_lock_lock(&_sidechainSidetoneLock);
+        _sidechainSidetoneReadPos = 0;
+        _sidechainSidetoneWritePos = 0;
+        _sidechainSidetoneBufferedFrames = 0;
+        _sidechainSidetonePPChannels = 0;
+        _sidechainSidetonePPSampleRate = 0;
+        os_unfair_lock_unlock(&_sidechainSidetoneLock);
+        os_unfair_lock_lock(&_inputMonitorLock);
+        _inputMonitorReadPos = 0;
+        _inputMonitorWritePos = 0;
+        _inputMonitorBufferedFrames = 0;
+        _inputMonitorPPChannels = 0;
+        _inputMonitorPPSampleRate = 0;
+        os_unfair_lock_unlock(&_inputMonitorLock);
         _running = NO;
     }
     
@@ -2525,7 +835,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
     NSError *error = nil;
     [[AVAudioSession sharedInstance] setActive:YES error:&error];
     if (error) {
-        NSLog(@"MKAudio: Failed to activate AVAudioSession: %@", error);
+        MKLogError(Audio, @"MKAudio: Failed to activate AVAudioSession: %@", error);
         NSDictionary *info = @{@"message": [NSString stringWithFormat:@"Audio session activation failed: %@", error.localizedDescription]};
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioErrorNotification object:nil userInfo:info];
@@ -2569,10 +879,10 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
                         && !settingsSnapshot.enableStereoInput
                         && MKAudioSystemDefaultInputIsBuiltInOrBluetooth();
             if (useVPIO) {
-                NSLog(@"MKAudio: macOS using VPIO (follow-system, built-in/Bluetooth).");
+                MKLogInfo(Audio, @"MKAudio: macOS using VPIO (follow-system, built-in/Bluetooth).");
                 _audioDevice = [[MKVoiceProcessingDevice alloc] initWithSettings:&settingsSnapshot];
             } else {
-                NSLog(@"MKAudio: macOS using HALOutput.");
+                MKLogInfo(Audio, @"MKAudio: macOS using HALOutput.");
                 _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&settingsSnapshot];
             }
         }
@@ -2583,14 +893,14 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
         BOOL setupSuccess = [_audioDevice setupDevice];
 #if TARGET_OS_OSX == 1
         if (!setupSuccess && ![_audioDevice isKindOfClass:[MKMacAudioDevice class]]) {
-            NSLog(@"MKAudio: VPIO setup failed on macOS, falling back to HALOutput.");
+            MKLogWarning(Audio, @"MKAudio: VPIO setup failed on macOS, falling back to HALOutput.");
             [_audioDevice release];
             _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&settingsSnapshot];
             setupSuccess = [_audioDevice setupDevice];
         }
 #endif
         if (!setupSuccess) {
-            NSLog(@"MKAudio: Failed to setup audio device.");
+            MKLogError(Audio, @"MKAudio: Failed to setup audio device.");
             [_audioDevice release];
             _audioDevice = nil;
             [connSnapshot release];
@@ -2603,19 +913,36 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
 
         _audioInput = [[MKAudioInput alloc] initWithDevice:_audioDevice andSettings:&settingsSnapshot];
         [_audioInput setMainConnectionForAudio:connSnapshot];
-        [_audioInput setInputTrackProcessor:MKAudioInputDSPProcess context:&_inputTrackDSPState];
+        [_inputTrackRackBridge updateHostBufferFrames:_pluginHostBufferFrames];
+        [_inputTrackRackBridge updatePreviewGain:_inputTrackPreviewState.gain enabled:_inputTrackPreviewState.enabled];
+        [_inputTrackRackBridge updateSampleRate:MKAudioInputProcessingSampleRateForSettings(&settingsSnapshot)];
+        [_audioInput setInputTrackProcessor:MKAudioInputRackBridgeProcess context:_inputTrackRackBridge];
+        [_sidetoneRackBridge updateHostBufferFrames:_pluginHostBufferFrames];
+        [_sidetoneRackBridge updatePreviewGain:1.0f enabled:NO];
+        [_sidetoneRackBridge updateSampleRate:MKAudioInputProcessingSampleRateForSettings(&settingsSnapshot)];
+        [_audioInput setSidetoneTrackProcessor:MKAudioInputRackBridgeProcess context:_sidetoneRackBridge];
         
         [_audioInput setSelfMuted:_cachedSelfMuted];
         [_audioInput setSuppressed:_cachedSuppressed];
         [_audioInput setMuted:_cachedMuted];
         
         _audioOutput = [[MKAudioOutput alloc] initWithDevice:_audioDevice andSettings:&settingsSnapshot];
-        [_audioOutput setRemoteBusProcessor:MKAudioRemoteBusDSPProcess context:&_remoteBusDSPState];
+        [_remoteBusRackBridge updateHostBufferFrames:_pluginHostBufferFrames];
+        [_remoteBusRackBridge updatePreviewGain:_remoteBusPreviewState.gain enabled:_remoteBusPreviewState.enabled];
+        [_remoteBusRackBridge updateSampleRate:[_audioOutput outputSampleRate]];
+        [_audioOutput setRemoteBusProcessor:MKAudioRemoteBusRackBridgeProcess context:_remoteBusRackBridge];
+        [_remoteBusRackBridge2 updateHostBufferFrames:_pluginHostBufferFrames];
+        [_remoteBusRackBridge2 updatePreviewGain:_remoteBus2PreviewState.gain enabled:_remoteBus2PreviewState.enabled];
+        [_remoteBusRackBridge2 updateSampleRate:[_audioOutput outputSampleRate]];
+        [_audioOutput setRemoteBus2Processor:MKAudioRemoteBusRackBridgeProcess context:_remoteBusRackBridge2];
+
+        // Wire sidechain buffer pool to all rack bridges
+        [_inputTrackRackBridge setSidechainAudioOutput:_audioOutput];
+        [_sidetoneRackBridge setSidechainAudioOutput:_audioOutput];
+        [_remoteBusRackBridge setSidechainAudioOutput:_audioOutput];
+        [_remoteBusRackBridge2 setSidechainAudioOutput:_audioOutput];
+
         [self rebindRemoteTrackProcessorsToOutputLocked];
-        
-        if (settingsSnapshot.enableSideTone) {
-            _sidetoneOutput = [[MKAudioOutputSidetone alloc] initWithSettings:&settingsSnapshot];
-        }
         
         _running = YES;
     }
@@ -2628,7 +955,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
 #if TARGET_OS_OSX == 1
     if (_lastDeviceWasVPIO) {
         _lastDeviceWasVPIO = NO;
-        NSLog(@"MKAudio: VPIO teardown detected, delaying start for pipeline release...");
+        MKLogInfo(Audio, @"MKAudio: VPIO teardown detected, delaying start for pipeline release...");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
                        dispatch_get_main_queue(), ^{
             [self start];
@@ -2683,8 +1010,13 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
     
     dispatch_async(_accessQueue, ^{
         memcpy(&_audioSettings, &settingsCopy, sizeof(MKAudioSettings));
+        [_audioInput setInputMonitorEnabled:settingsCopy.enableSideTone];
         if (_audioOutput != nil) {
             [_audioOutput setMasterVolume:settingsCopy.volume];
+            [_audioOutput setInputMonitorEnabled:settingsCopy.enableSideTone gain:settingsCopy.sidetoneVolume];
+        }
+        if (!settingsCopy.enableSideTone) {
+            [self writeInputMonitorSamples:NULL frameCount:0 channels:0 sampleRate:0];
         }
     });
     // 如果设置改变（如切换扬声器），可能需要刷新 Session 配置
@@ -2809,25 +1141,13 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
 
     dispatch_async(_accessQueue, ^{
         _pluginHostBufferFrames = normalized;
-        os_unfair_lock_lock(&_inputTrackDSPState.lock);
-        _inputTrackDSPState.hostBufferFrames = normalized;
-        os_unfair_lock_unlock(&_inputTrackDSPState.lock);
-
-        os_unfair_lock_lock(&_remoteBusDSPState.lock);
-        _remoteBusDSPState.hostBufferFrames = normalized;
-        os_unfair_lock_unlock(&_remoteBusDSPState.lock);
-
-        for (NSValue *value in [_remoteTrackDSPStates allValues]) {
-            MKAudioDSPChainProcessorState *state = (MKAudioDSPChainProcessorState *)[value pointerValue];
-            if (state == NULL) {
-                continue;
-            }
-            os_unfair_lock_lock(&state->lock);
-            state->hostBufferFrames = normalized;
-            os_unfair_lock_unlock(&state->lock);
+        [_inputTrackRackBridge updateHostBufferFrames:normalized];
+        [_sidetoneRackBridge updateHostBufferFrames:normalized];
+        [_remoteBusRackBridge updateHostBufferFrames:normalized];
+        [_remoteBusRackBridge2 updateHostBufferFrames:normalized];
+        for (MKAudioRemoteTrackRackBridge *bridge in [_remoteTrackRackBridges allValues]) {
+            [bridge updateHostBufferFrames:normalized];
         }
-
-        MKAudioLogDSPChainProbeState(&_remoteBusDSPState, @"Remote Bus", @"setPluginHostBufferFrames");
     });
 }
 
@@ -2847,6 +1167,10 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
     __block NSUInteger result = SAMPLE_RATE;
     dispatch_sync(_accessQueue, ^{
         if ([trackKey isEqualToString:@"input"]) {
+            result = MKAudioInputProcessingSampleRateForSettings(&_audioSettings);
+            return;
+        }
+        if ([trackKey isEqualToString:@"sidetone"]) {
             result = MKAudioInputProcessingSampleRateForSettings(&_audioSettings);
             return;
         }
@@ -2875,12 +1199,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
 - (NSDictionary *)copyInputTrackDSPStatus {
     __block NSDictionary *result = nil;
     dispatch_sync(_accessQueue, ^{
-        os_unfair_lock_lock(&_inputTrackDSPState.lock);
-        result = [[NSDictionary alloc] initWithObjectsAndKeys:
-                  [NSNumber numberWithFloat:_inputTrackDSPState.inputPeak], @"inputPeak",
-                  [NSNumber numberWithFloat:_inputTrackDSPState.outputPeak], @"outputPeak",
-                  nil];
-        os_unfair_lock_unlock(&_inputTrackDSPState.lock);
+        result = [_inputTrackRackBridge copyStatus];
     });
     return result;
 }
@@ -2888,33 +1207,55 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
 - (NSDictionary *)copyRemoteBusDSPStatus {
     __block NSDictionary *result = nil;
     dispatch_sync(_accessQueue, ^{
-        os_unfair_lock_lock(&_remoteBusDSPState.lock);
-        result = [[NSDictionary alloc] initWithObjectsAndKeys:
-                  [NSNumber numberWithFloat:_remoteBusDSPState.inputPeak], @"inputPeak",
-                  [NSNumber numberWithFloat:_remoteBusDSPState.outputPeak], @"outputPeak",
-                  nil];
-        os_unfair_lock_unlock(&_remoteBusDSPState.lock);
+        result = [_remoteBusRackBridge copyStatus];
     });
     return result;
 }
 
-- (void)refreshDSPChainState:(MKAudioDSPChainProcessorState *)state stages:(NSArray *)stages logPrefix:(NSString *)logPrefix {
-    if (state == NULL) {
-        [stages release];
-        return;
+- (NSUInteger)currentOutputProcessingSampleRateLocked {
+    NSUInteger sampleRate = SAMPLE_RATE;
+    if (_audioOutput != nil) {
+        NSUInteger outputSampleRate = [_audioOutput outputSampleRate];
+        if (outputSampleRate > 0) {
+            return outputSampleRate;
+        }
     }
 
-    dispatch_async(_accessQueue, ^{
-        if (stages != nil) {
-            MKAudioUpdateDSPChainState(state, stages, logPrefix, YES);
+    if (_audioDevice != nil) {
+        int outputSampleRate = [_audioDevice outputSampleRate];
+        if (outputSampleRate <= 0) {
+            outputSampleRate = [_audioDevice inputSampleRate];
         }
+        if (outputSampleRate > 0) {
+            sampleRate = (NSUInteger)outputSampleRate;
+        }
+    }
+    return sampleRate;
+}
 
-        os_unfair_lock_lock(&state->lock);
-        state->sampleRateRefreshPending = NO;
-        os_unfair_lock_unlock(&state->lock);
+- (MKAudioRemoteTrackRackBridge *)remoteTrackRackBridgeForSessionLocked:(NSUInteger)session createIfNeeded:(BOOL)create {
+    NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
+    MKAudioRemoteTrackRackBridge *bridge = [_remoteTrackRackBridges objectForKey:sessionKey];
+    if (bridge == nil && create) {
+        bridge = [[MKAudioRemoteTrackRackBridge alloc] init];
+        if (bridge == nil) {
+            return nil;
+        }
+        [_remoteTrackRackBridges setObject:bridge forKey:sessionKey];
+        [bridge release];
+        bridge = [_remoteTrackRackBridges objectForKey:sessionKey];
+        [bridge updateHostBufferFrames:_pluginHostBufferFrames];
+        [bridge updateSampleRate:[self currentOutputProcessingSampleRateLocked]];
 
-        [stages release];
-    });
+        NSValue *previewValue = [_remoteTrackPreviewStates objectForKey:sessionKey];
+        if (previewValue != nil) {
+            MKAudioPreviewGainProcessorState *previewState = (MKAudioPreviewGainProcessorState *)[previewValue pointerValue];
+            if (previewState != NULL) {
+                [bridge updatePreviewGain:previewState->gain enabled:previewState->enabled];
+            }
+        }
+    }
+    return bridge;
 }
 
 - (void)rebindRemoteTrackProcessorsToOutputLocked {
@@ -2923,25 +1264,18 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
     }
 
     [_audioOutput clearAllRemoteTrackProcessors];
-
-    for (NSNumber *sessionKey in _remoteTrackPreviewStates) {
-        NSValue *previewValue = [_remoteTrackPreviewStates objectForKey:sessionKey];
-        MKAudioPreviewGainProcessorState *previewState = (MKAudioPreviewGainProcessorState *)[previewValue pointerValue];
-        if (previewState != NULL) {
-            [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackPreviewGainProcess
-                                          context:previewState
-                                       forSession:[sessionKey unsignedIntegerValue]];
+    NSUInteger sampleRate = [self currentOutputProcessingSampleRateLocked];
+    for (NSNumber *sessionKey in _remoteTrackRackBridges) {
+        MKAudioRemoteTrackRackBridge *bridge = [_remoteTrackRackBridges objectForKey:sessionKey];
+        if (bridge == nil) {
+            continue;
         }
-    }
-
-    for (NSNumber *sessionKey in _remoteTrackDSPStates) {
-        NSValue *dspValue = [_remoteTrackDSPStates objectForKey:sessionKey];
-        MKAudioDSPChainProcessorState *dspState = (MKAudioDSPChainProcessorState *)[dspValue pointerValue];
-        if (dspState != NULL) {
-            [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackDSPProcess
-                                          context:dspState
-                                       forSession:[sessionKey unsignedIntegerValue]];
-        }
+        [bridge updateHostBufferFrames:_pluginHostBufferFrames];
+        [bridge updateSampleRate:sampleRate];
+        [bridge setSidechainAudioOutput:_audioOutput];
+        [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess
+                                      context:bridge
+                                   forSession:[sessionKey unsignedIntegerValue]];
     }
 }
 
@@ -2952,9 +1286,7 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
     dispatch_async(_accessQueue, ^{
         _inputTrackPreviewState.gain = gain;
         _inputTrackPreviewState.enabled = enabled;
-        os_unfair_lock_lock(&_inputTrackDSPState.lock);
-        _inputTrackDSPState.preview = _inputTrackPreviewState;
-        os_unfair_lock_unlock(&_inputTrackDSPState.lock);
+        [_inputTrackRackBridge updatePreviewGain:gain enabled:enabled];
     });
 }
 
@@ -2965,22 +1297,147 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
     dispatch_async(_accessQueue, ^{
         _remoteBusPreviewState.gain = gain;
         _remoteBusPreviewState.enabled = enabled;
-        os_unfair_lock_lock(&_remoteBusDSPState.lock);
-        _remoteBusDSPState.preview = _remoteBusPreviewState;
-        os_unfair_lock_unlock(&_remoteBusDSPState.lock);
+        [_remoteBusRackBridge updatePreviewGain:gain enabled:enabled];
     });
 }
 
 - (void) setInputTrackAudioUnitChain:(NSArray *)audioUnits {
     dispatch_async(_accessQueue, ^{
-        MKAudioUpdateDSPChainState(&_inputTrackDSPState, audioUnits, @"Input Track", NO);
+        NSUInteger sampleRate = MKAudioInputProcessingSampleRateForSettings(&_audioSettings);
+        [_inputTrackRackBridge updateSampleRate:sampleRate];
+        // Set sidechain audio output reference for input track (captures mic signal for sidechain)
+        if (self->_audioOutput != nil) {
+            [_inputTrackRackBridge setSidechainAudioOutput:self->_audioOutput];
+        }
+        [_inputTrackRackBridge updateAudioUnitChain:audioUnits sampleRate:sampleRate];
+    });
+}
+
+- (void) setInputTrackSendSourceKeys:(NSArray<NSString *> *)trackKeys {
+    dispatch_async(_accessQueue, ^{
+        [_inputTrackRackBridge setSendSourceKeys:trackKeys];
+    });
+}
+
+- (void) setSidetoneAudioUnitChain:(NSArray *)audioUnits {
+    dispatch_async(_accessQueue, ^{
+        NSUInteger sampleRate = MKAudioInputProcessingSampleRateForSettings(&_audioSettings);
+        [_sidetoneRackBridge updateSampleRate:sampleRate];
+        if (self->_audioOutput != nil) {
+            [_sidetoneRackBridge setSidechainAudioOutput:self->_audioOutput];
+        }
+        [_sidetoneRackBridge updateAudioUnitChain:audioUnits sampleRate:sampleRate];
+    });
+}
+
+- (void) setSidetoneTrackSendSourceKeys:(NSArray<NSString *> *)trackKeys {
+    dispatch_async(_accessQueue, ^{
+        [_sidetoneRackBridge setSendSourceKeys:trackKeys];
     });
 }
 
 - (void) setRemoteBusAudioUnitChain:(NSArray *)audioUnits {
     dispatch_async(_accessQueue, ^{
-        MKAudioUpdateDSPChainState(&_remoteBusDSPState, audioUnits, @"Remote Bus", NO);
-        MKAudioLogDSPChainProbeState(&_remoteBusDSPState, @"Remote Bus", @"setRemoteBusAudioUnitChain");
+        NSUInteger sampleRate = SAMPLE_RATE;
+        if (_audioOutput != nil) {
+            NSUInteger outputSampleRate = [_audioOutput outputSampleRate];
+            if (outputSampleRate > 0) {
+                sampleRate = outputSampleRate;
+            }
+        } else if (_audioDevice != nil) {
+            int outputSampleRate = [_audioDevice outputSampleRate];
+            if (outputSampleRate > 0) {
+                sampleRate = (NSUInteger)outputSampleRate;
+            }
+        }
+        // Set sidechain audio output reference for remote bus (captures mixed audio for sidechain)
+        [_remoteBusRackBridge setSidechainAudioOutput:_audioOutput];
+        [_remoteBusRackBridge updateAudioUnitChain:audioUnits sampleRate:sampleRate];
+    });
+}
+
+- (void) setRemoteBusSendSourceKeys:(NSArray<NSString *> *)trackKeys {
+    dispatch_async(_accessQueue, ^{
+        [_remoteBusRackBridge setSendSourceKeys:trackKeys];
+    });
+}
+
+- (void) setRemoteBus2AudioUnitChain:(NSArray *)audioUnits {
+    dispatch_async(_accessQueue, ^{
+        NSUInteger sampleRate = SAMPLE_RATE;
+        if (_audioOutput != nil) {
+            NSUInteger outputSampleRate = [_audioOutput outputSampleRate];
+            if (outputSampleRate > 0) {
+                sampleRate = outputSampleRate;
+            }
+        } else if (_audioDevice != nil) {
+            int outputSampleRate = [_audioDevice outputSampleRate];
+            if (outputSampleRate > 0) {
+                sampleRate = (NSUInteger)outputSampleRate;
+            }
+        }
+        // Set sidechain audio output reference for remote bus 2 (captures mixed audio for sidechain)
+        [_remoteBusRackBridge2 setSidechainAudioOutput:_audioOutput];
+        [_remoteBusRackBridge2 updateAudioUnitChain:audioUnits sampleRate:sampleRate];
+    });
+}
+
+- (void) setRemoteBus2SendSourceKeys:(NSArray<NSString *> *)trackKeys {
+    dispatch_async(_accessQueue, ^{
+        [_remoteBusRackBridge2 setSendSourceKeys:trackKeys];
+    });
+}
+
+- (void) setRemoteBus2PreviewGain:(float)gain enabled:(BOOL)enabled {
+    if (gain < 0.0f) {
+        gain = 0.0f;
+    }
+    dispatch_async(_accessQueue, ^{
+        _remoteBus2PreviewState.gain = gain;
+        _remoteBus2PreviewState.enabled = enabled;
+        [_remoteBusRackBridge2 updatePreviewGain:gain enabled:enabled];
+    });
+}
+
+- (void) setBusAssignment:(NSUInteger)busIndex forSession:(NSUInteger)session {
+    dispatch_async(_accessQueue, ^{
+        if (_audioOutput != nil) {
+            [_audioOutput setBusAssignment:busIndex forSession:session];
+        }
+    });
+}
+
+- (NSUInteger) busAssignmentForSession:(NSUInteger)session {
+    __block NSUInteger result = 0;
+    dispatch_sync(_accessQueue, ^{
+        if (_audioOutput != nil) {
+            result = [_audioOutput busAssignmentForSession:session];
+        }
+    });
+    return result;
+}
+
+- (void) setRemoteTrackUsesSendRouting:(BOOL)enabled forSession:(NSUInteger)session {
+    dispatch_async(_accessQueue, ^{
+        if (_audioOutput != nil) {
+            [_audioOutput setUsesTrackSendRouting:enabled forSession:session];
+        }
+    });
+}
+
+- (void) setRemoteTrackSendBusMask:(NSUInteger)busMask forSession:(NSUInteger)session {
+    dispatch_async(_accessQueue, ^{
+        if (_audioOutput != nil) {
+            [_audioOutput setTrackSendBusMask:busMask forSession:session];
+        }
+    });
+}
+
+- (void) setInputTrackSendBusMask:(NSUInteger)busMask {
+    dispatch_async(_accessQueue, ^{
+        if (_audioOutput != nil) {
+            [_audioOutput setInputTrackSendBusMask:busMask];
+        }
     });
 }
 
@@ -3007,20 +1464,11 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
         state->gain = gain;
         state->enabled = enabled;
 
-        NSValue *dspValue = [_remoteTrackDSPStates objectForKey:sessionKey];
-        MKAudioDSPChainProcessorState *dspState = (MKAudioDSPChainProcessorState *)[dspValue pointerValue];
-        if (dspState != NULL) {
-            os_unfair_lock_lock(&dspState->lock);
-            dspState->preview = *state;
-            os_unfair_lock_unlock(&dspState->lock);
-        }
+        MKAudioRemoteTrackRackBridge *bridge = [self remoteTrackRackBridgeForSessionLocked:session createIfNeeded:YES];
+        [bridge updatePreviewGain:gain enabled:enabled];
 
         if (_audioOutput != nil) {
-            if (dspState != NULL) {
-                [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackDSPProcess context:dspState forSession:session];
-            } else {
-                [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackPreviewGainProcess context:state forSession:session];
-            }
+            [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess context:bridge forSession:session];
         }
     });
 }
@@ -3036,19 +1484,12 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
             }
             [_remoteTrackPreviewStates removeObjectForKey:sessionKey];
         }
-
-        NSValue *dspValue = [_remoteTrackDSPStates objectForKey:sessionKey];
-        MKAudioDSPChainProcessorState *dspState = (MKAudioDSPChainProcessorState *)[dspValue pointerValue];
-        if (dspState != NULL) {
-            os_unfair_lock_lock(&dspState->lock);
-            dspState->preview.gain = 1.0f;
-            dspState->preview.enabled = NO;
-            os_unfair_lock_unlock(&dspState->lock);
-        }
+        MKAudioRemoteTrackRackBridge *bridge = [self remoteTrackRackBridgeForSessionLocked:session createIfNeeded:NO];
+        [bridge updatePreviewGain:1.0f enabled:NO];
 
         if (_audioOutput != nil) {
-            if (dspState != NULL) {
-                [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackDSPProcess context:dspState forSession:session];
+            if (bridge != nil) {
+                [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess context:bridge forSession:session];
             } else {
                 [_audioOutput clearRemoteTrackProcessorForSession:session];
             }
@@ -3065,15 +1506,8 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
             }
         }
         [_remoteTrackPreviewStates removeAllObjects];
-
-        for (NSValue *value in [_remoteTrackDSPStates allValues]) {
-            MKAudioDSPChainProcessorState *state = (MKAudioDSPChainProcessorState *)[value pointerValue];
-            if (state != NULL) {
-                os_unfair_lock_lock(&state->lock);
-                state->preview.gain = 1.0f;
-                state->preview.enabled = NO;
-                os_unfair_lock_unlock(&state->lock);
-            }
+        for (MKAudioRemoteTrackRackBridge *bridge in [_remoteTrackRackBridges allValues]) {
+            [bridge updatePreviewGain:1.0f enabled:NO];
         }
 
         [self rebindRemoteTrackProcessorsToOutputLocked];
@@ -3081,47 +1515,46 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
 }
 
 - (void) setRemoteTrackAudioUnitChain:(NSArray *)audioUnits forSession:(NSUInteger)session {
+    MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain: session=%lu count=%lu", (unsigned long)session, (unsigned long)[audioUnits count]);
     dispatch_async(_accessQueue, ^{
-        NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
-        NSValue *stateValue = [_remoteTrackDSPStates objectForKey:sessionKey];
-        MKAudioDSPChainProcessorState *state = (MKAudioDSPChainProcessorState *)[stateValue pointerValue];
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu starting...", (unsigned long)session);
 
-        if (state == NULL) {
-            state = (MKAudioDSPChainProcessorState *)calloc(1, sizeof(MKAudioDSPChainProcessorState));
-            if (state == NULL) {
-                return;
-            }
-            state->lock = OS_UNFAIR_LOCK_INIT;
-            state->preview.gain = 1.0f;
-            state->preview.enabled = NO;
-            state->stages = nil;
-            state->audioUnits = nil;
-            state->mixLevels = nil;
-            state->hosts = nil;
-            state->preferredChannels = 2;
-            state->hostBufferFrames = _pluginHostBufferFrames;
-            state->renderSampleRate = 48000;
-            state->sampleRateRefreshPending = NO;
-            state->owner = self;
-            state->inputPeak = 0.0f;
-            state->outputPeak = 0.0f;
+        MKAudioRemoteTrackRackBridge *bridge = [self remoteTrackRackBridgeForSessionLocked:session createIfNeeded:YES];
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu bridge=%p", (unsigned long)session, bridge);
 
-            // 同步 preview state
-            NSValue *previewValue = [_remoteTrackPreviewStates objectForKey:sessionKey];
-            if (previewValue != nil) {
-                MKAudioPreviewGainProcessorState *previewState = (MKAudioPreviewGainProcessorState *)[previewValue pointerValue];
-                if (previewState != NULL) {
-                    state->preview = *previewState;
-                }
-            }
+        NSUInteger sampleRate = [self currentOutputProcessingSampleRateLocked];
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu sampleRate=%lu", (unsigned long)session, (unsigned long)sampleRate);
 
-            [_remoteTrackDSPStates setObject:[NSValue valueWithPointer:state] forKey:sessionKey];
-        }
-
-        MKAudioUpdateDSPChainState(state, audioUnits, [NSString stringWithFormat:@"Remote Track %lu", (unsigned long)session], NO);
+        [bridge updateSampleRate:sampleRate];
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu calling updateAudioUnitChain...", (unsigned long)session);
 
         if (_audioOutput != nil) {
-            [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackDSPProcess context:state forSession:session];
+            // Set sidechain audio output reference for this bridge (critical for sidechain routing)
+            [bridge setSidechainAudioOutput:_audioOutput];
+            MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu set sidechain output", (unsigned long)session);
+        }
+
+        [bridge updateAudioUnitChain:audioUnits sampleRate:sampleRate];
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu updateAudioUnitChain returned", (unsigned long)session);
+
+        if (_audioOutput != nil) {
+            [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess context:bridge forSession:session];
+            MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu registered processor", (unsigned long)session);
+        } else {
+            MKLogWarning(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu _audioOutput is nil", (unsigned long)session);
+        }
+
+        MKLogInfo(Audio, @"setRemoteTrackAudioUnitChain [queue]: session=%lu completed", (unsigned long)session);
+    });
+}
+
+- (void) setRemoteTrackSendSourceKeys:(NSArray<NSString *> *)trackKeys forSession:(NSUInteger)session {
+    dispatch_async(_accessQueue, ^{
+        MKAudioRemoteTrackRackBridge *bridge = [self remoteTrackRackBridgeForSessionLocked:session createIfNeeded:YES];
+        [bridge setSendSourceKeys:trackKeys];
+
+        if (_audioOutput != nil) {
+            [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess context:bridge forSession:session];
         }
     });
 }
@@ -3129,39 +1562,44 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
 - (void) clearRemoteTrackAudioUnitChainForSession:(NSUInteger)session {
     dispatch_async(_accessQueue, ^{
         NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:session];
-        NSValue *stateValue = [_remoteTrackDSPStates objectForKey:sessionKey];
-        if (stateValue != nil) {
-            MKAudioDSPChainProcessorState *state = (MKAudioDSPChainProcessorState *)[stateValue pointerValue];
-            if (state != NULL) {
-                MKAudioClearDSPChainState(state);
-
+        MKAudioRemoteTrackRackBridge *bridge = [self remoteTrackRackBridgeForSessionLocked:session createIfNeeded:NO];
+        if (bridge != nil) {
+            [bridge updateAudioUnitChain:nil sampleRate:[self currentOutputProcessingSampleRateLocked]];
+            NSValue *previewValue = [_remoteTrackPreviewStates objectForKey:sessionKey];
+            MKAudioPreviewGainProcessorState *previewState = (MKAudioPreviewGainProcessorState *)[previewValue pointerValue];
+            BOOL keepPreviewProcessor = previewState != NULL && previewState->enabled;
+            if (keepPreviewProcessor) {
+                [bridge updatePreviewGain:previewState->gain enabled:YES];
                 if (_audioOutput != nil) {
-                    NSValue *previewValue = [_remoteTrackPreviewStates objectForKey:sessionKey];
-                    MKAudioPreviewGainProcessorState *previewState = (MKAudioPreviewGainProcessorState *)[previewValue pointerValue];
-                    if (previewState != NULL) {
-                        [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackPreviewGainProcess context:previewState forSession:session];
-                    } else {
-                        [_audioOutput clearRemoteTrackProcessorForSession:session];
-                    }
+                    [_audioOutput setRemoteTrackProcessor:MKAudioRemoteTrackRackBridgeProcess context:bridge forSession:session];
                 }
-
-                free(state);
+            } else {
+                [_remoteTrackRackBridges removeObjectForKey:sessionKey];
+                if (_audioOutput != nil) {
+                    [_audioOutput clearRemoteTrackProcessorForSession:session];
+                }
             }
-            [_remoteTrackDSPStates removeObjectForKey:sessionKey];
         }
     });
 }
 
 - (void) clearAllRemoteTrackAudioUnitChains {
     dispatch_async(_accessQueue, ^{
-        for (NSValue *value in [_remoteTrackDSPStates allValues]) {
-            MKAudioDSPChainProcessorState *state = (MKAudioDSPChainProcessorState *)[value pointerValue];
-            if (state != NULL) {
-                MKAudioClearDSPChainState(state);
-                free(state);
+        NSUInteger sampleRate = [self currentOutputProcessingSampleRateLocked];
+        NSArray *sessionKeys = [[_remoteTrackRackBridges allKeys] copy];
+        for (NSNumber *sessionKey in sessionKeys) {
+            MKAudioRemoteTrackRackBridge *bridge = [_remoteTrackRackBridges objectForKey:sessionKey];
+            if (bridge == nil) {
+                continue;
+            }
+            [bridge updateAudioUnitChain:nil sampleRate:sampleRate];
+            NSValue *previewValue = [_remoteTrackPreviewStates objectForKey:sessionKey];
+            MKAudioPreviewGainProcessorState *previewState = (MKAudioPreviewGainProcessorState *)[previewValue pointerValue];
+            if (!(previewState != NULL && previewState->enabled)) {
+                [_remoteTrackRackBridges removeObjectForKey:sessionKey];
             }
         }
-        [_remoteTrackDSPStates removeAllObjects];
+        [sessionKeys release];
 
         if (_audioOutput != nil) {
             [self rebindRemoteTrackProcessorsToOutputLocked];
@@ -3184,13 +1622,365 @@ static void MKAudioRemoteTrackDSPProcess(float *samples, NSUInteger frameCount, 
 - (NSDictionary *)copyDSPStatus:(NSUInteger)session {
     __block NSDictionary *status = nil;
     dispatch_sync(_accessQueue, ^{
-        if (_audioOutput != nil) {
+        MKAudioRemoteTrackRackBridge *bridge = [self remoteTrackRackBridgeForSessionLocked:session createIfNeeded:NO];
+        if (bridge != nil) {
+            status = [bridge copyStatus];
+        } else if (_audioOutput != nil) {
             status = [_audioOutput copyDSPStatusForSession:session];
         } else {
             status = [[NSDictionary alloc] init];
         }
     });
     return status;
+}
+
+#pragma mark - Sidechain FIFOs
+
+- (void) writeSidechainInputSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels {
+    os_unfair_lock_lock(&_sidechainInputLock);
+    if (samples == NULL || frameCount == 0 || channels == 0 || channels > 2 || frameCount > MK_SIDECHAIN_MAX_FRAMES) {
+        _sidechainInputReadPos = 0;
+        _sidechainInputWritePos = 0;
+        _sidechainInputBufferedFrames = 0;
+        _sidechainInputPPChannels = 0;
+        _sidechainInputPPSampleRate = 0;
+        os_unfair_lock_unlock(&_sidechainInputLock);
+        return;
+    }
+
+    if (_sidechainInputPPSampleRate != SAMPLE_RATE || _sidechainInputPPChannels != channels) {
+        _sidechainInputReadPos = 0;
+        _sidechainInputWritePos = 0;
+        _sidechainInputBufferedFrames = 0;
+    }
+
+    if (frameCount > _sidechainInputRingCapacityFrames) {
+        samples += (frameCount - _sidechainInputRingCapacityFrames) * channels;
+        frameCount = _sidechainInputRingCapacityFrames;
+    }
+
+    NSUInteger availableSpace = _sidechainInputRingCapacityFrames - _sidechainInputBufferedFrames;
+    if (frameCount > availableSpace) {
+        NSUInteger framesToDrop = frameCount - availableSpace;
+        _sidechainInputReadPos = (_sidechainInputReadPos + framesToDrop) % _sidechainInputRingCapacityFrames;
+        _sidechainInputBufferedFrames -= framesToDrop;
+    }
+
+    NSUInteger framesUntilWrap = _sidechainInputRingCapacityFrames - _sidechainInputWritePos;
+    NSUInteger firstChunk = MIN(frameCount, framesUntilWrap);
+    memcpy(_sidechainInputRingBuffer + (_sidechainInputWritePos * channels),
+           samples,
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < frameCount) {
+        memcpy(_sidechainInputRingBuffer,
+               samples + (firstChunk * channels),
+               (frameCount - firstChunk) * channels * sizeof(float));
+    }
+
+    _sidechainInputWritePos = (_sidechainInputWritePos + frameCount) % _sidechainInputRingCapacityFrames;
+    _sidechainInputBufferedFrames += frameCount;
+    _sidechainInputPPChannels = channels;
+    _sidechainInputPPSampleRate = SAMPLE_RATE;
+    os_unfair_lock_unlock(&_sidechainInputLock);
+}
+
+- (const float *) readSidechainInputBufferWithMaxFrameCount:(NSUInteger)maxFrameCount
+                                              outFrameCount:(NSUInteger *)outFrameCount
+                                                   channels:(NSUInteger *)outChannels {
+    os_unfair_lock_lock(&_sidechainInputLock);
+    if (maxFrameCount == 0 || _sidechainInputBufferedFrames == 0 || _sidechainInputPPSampleRate != SAMPLE_RATE || _sidechainInputPPChannels == 0) {
+        os_unfair_lock_unlock(&_sidechainInputLock);
+        return NULL;
+    }
+
+    NSUInteger channels = _sidechainInputPPChannels;
+    NSUInteger framesToRead = MIN(maxFrameCount, _sidechainInputBufferedFrames);
+    NSUInteger framesUntilWrap = _sidechainInputRingCapacityFrames - _sidechainInputReadPos;
+    NSUInteger firstChunk = MIN(framesToRead, framesUntilWrap);
+    memcpy(_sidechainInputReadBuffer,
+           _sidechainInputRingBuffer + (_sidechainInputReadPos * channels),
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < framesToRead) {
+        memcpy(_sidechainInputReadBuffer + (firstChunk * channels),
+               _sidechainInputRingBuffer,
+               (framesToRead - firstChunk) * channels * sizeof(float));
+    }
+
+    _sidechainInputReadPos = (_sidechainInputReadPos + framesToRead) % _sidechainInputRingCapacityFrames;
+    _sidechainInputBufferedFrames -= framesToRead;
+    if (outFrameCount != NULL) {
+        *outFrameCount = framesToRead;
+    }
+    if (outChannels != NULL) {
+        *outChannels = channels;
+    }
+    os_unfair_lock_unlock(&_sidechainInputLock);
+    return _sidechainInputReadBuffer;
+}
+
+- (void) writeSidetoneSidechainSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels {
+    os_unfair_lock_lock(&_sidechainSidetoneLock);
+    if (samples == NULL || frameCount == 0 || channels == 0 || channels > 2 || frameCount > MK_SIDECHAIN_MAX_FRAMES) {
+        _sidechainSidetoneReadPos = 0;
+        _sidechainSidetoneWritePos = 0;
+        _sidechainSidetoneBufferedFrames = 0;
+        _sidechainSidetonePPChannels = 0;
+        _sidechainSidetonePPSampleRate = 0;
+        os_unfair_lock_unlock(&_sidechainSidetoneLock);
+        return;
+    }
+
+    if (_sidechainSidetonePPSampleRate != SAMPLE_RATE || _sidechainSidetonePPChannels != channels) {
+        _sidechainSidetoneReadPos = 0;
+        _sidechainSidetoneWritePos = 0;
+        _sidechainSidetoneBufferedFrames = 0;
+    }
+
+    if (frameCount > _sidechainSidetoneRingCapacityFrames) {
+        samples += (frameCount - _sidechainSidetoneRingCapacityFrames) * channels;
+        frameCount = _sidechainSidetoneRingCapacityFrames;
+    }
+
+    NSUInteger availableSpace = _sidechainSidetoneRingCapacityFrames - _sidechainSidetoneBufferedFrames;
+    if (frameCount > availableSpace) {
+        NSUInteger framesToDrop = frameCount - availableSpace;
+        _sidechainSidetoneReadPos = (_sidechainSidetoneReadPos + framesToDrop) % _sidechainSidetoneRingCapacityFrames;
+        _sidechainSidetoneBufferedFrames -= framesToDrop;
+    }
+
+    NSUInteger framesUntilWrap = _sidechainSidetoneRingCapacityFrames - _sidechainSidetoneWritePos;
+    NSUInteger firstChunk = MIN(frameCount, framesUntilWrap);
+    memcpy(_sidechainSidetoneRingBuffer + (_sidechainSidetoneWritePos * channels),
+           samples,
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < frameCount) {
+        memcpy(_sidechainSidetoneRingBuffer,
+               samples + (firstChunk * channels),
+               (frameCount - firstChunk) * channels * sizeof(float));
+    }
+
+    _sidechainSidetoneWritePos = (_sidechainSidetoneWritePos + frameCount) % _sidechainSidetoneRingCapacityFrames;
+    _sidechainSidetoneBufferedFrames += frameCount;
+    _sidechainSidetonePPChannels = channels;
+    _sidechainSidetonePPSampleRate = SAMPLE_RATE;
+    os_unfair_lock_unlock(&_sidechainSidetoneLock);
+}
+
+- (const float *) readSidetoneSidechainBufferWithMaxFrameCount:(NSUInteger)maxFrameCount
+                                                 outFrameCount:(NSUInteger *)outFrameCount
+                                                      channels:(NSUInteger *)outChannels {
+    os_unfair_lock_lock(&_sidechainSidetoneLock);
+    if (maxFrameCount == 0 || _sidechainSidetoneBufferedFrames == 0 || _sidechainSidetonePPSampleRate != SAMPLE_RATE || _sidechainSidetonePPChannels == 0) {
+        os_unfair_lock_unlock(&_sidechainSidetoneLock);
+        return NULL;
+    }
+
+    NSUInteger channels = _sidechainSidetonePPChannels;
+    NSUInteger framesToRead = MIN(maxFrameCount, _sidechainSidetoneBufferedFrames);
+    NSUInteger framesUntilWrap = _sidechainSidetoneRingCapacityFrames - _sidechainSidetoneReadPos;
+    NSUInteger firstChunk = MIN(framesToRead, framesUntilWrap);
+    memcpy(_sidechainSidetoneReadBuffer,
+           _sidechainSidetoneRingBuffer + (_sidechainSidetoneReadPos * channels),
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < framesToRead) {
+        memcpy(_sidechainSidetoneReadBuffer + (firstChunk * channels),
+               _sidechainSidetoneRingBuffer,
+               (framesToRead - firstChunk) * channels * sizeof(float));
+    }
+
+    _sidechainSidetoneReadPos = (_sidechainSidetoneReadPos + framesToRead) % _sidechainSidetoneRingCapacityFrames;
+    _sidechainSidetoneBufferedFrames -= framesToRead;
+    if (outFrameCount != NULL) {
+        *outFrameCount = framesToRead;
+    }
+    if (outChannels != NULL) {
+        *outChannels = channels;
+    }
+    os_unfair_lock_unlock(&_sidechainSidetoneLock);
+    return _sidechainSidetoneReadBuffer;
+}
+
+- (void) writeInputMonitorSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels sampleRate:(NSUInteger)sampleRate {
+    os_unfair_lock_lock(&_inputMonitorLock);
+    if (samples == NULL || frameCount == 0 || channels == 0 || channels > 2 || frameCount > MK_SIDECHAIN_MAX_FRAMES || sampleRate != SAMPLE_RATE) {
+        _inputMonitorReadPos = 0;
+        _inputMonitorWritePos = 0;
+        _inputMonitorBufferedFrames = 0;
+        _inputMonitorPPChannels = 0;
+        _inputMonitorPPSampleRate = sampleRate;
+        os_unfair_lock_unlock(&_inputMonitorLock);
+        return;
+    }
+
+    if (_inputMonitorPPSampleRate != sampleRate || _inputMonitorPPChannels != channels) {
+        _inputMonitorReadPos = 0;
+        _inputMonitorWritePos = 0;
+        _inputMonitorBufferedFrames = 0;
+    }
+
+    if (frameCount > _inputMonitorRingCapacityFrames) {
+        samples += (frameCount - _inputMonitorRingCapacityFrames) * channels;
+        frameCount = _inputMonitorRingCapacityFrames;
+    }
+
+    NSUInteger availableSpace = _inputMonitorRingCapacityFrames - _inputMonitorBufferedFrames;
+    if (frameCount > availableSpace) {
+        NSUInteger framesToDrop = frameCount - availableSpace;
+        _inputMonitorReadPos = (_inputMonitorReadPos + framesToDrop) % _inputMonitorRingCapacityFrames;
+        _inputMonitorBufferedFrames -= framesToDrop;
+    }
+
+    NSUInteger framesUntilWrap = _inputMonitorRingCapacityFrames - _inputMonitorWritePos;
+    NSUInteger firstChunk = MIN(frameCount, framesUntilWrap);
+    memcpy(_inputMonitorRingBuffer + (_inputMonitorWritePos * channels),
+           samples,
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < frameCount) {
+        memcpy(_inputMonitorRingBuffer,
+               samples + (firstChunk * channels),
+               (frameCount - firstChunk) * channels * sizeof(float));
+    }
+
+    _inputMonitorWritePos = (_inputMonitorWritePos + frameCount) % _inputMonitorRingCapacityFrames;
+    _inputMonitorBufferedFrames += frameCount;
+    _inputMonitorPPChannels = channels;
+    _inputMonitorPPSampleRate = sampleRate;
+    os_unfair_lock_unlock(&_inputMonitorLock);
+}
+
+- (const float *) readInputMonitorBufferWithMaxFrameCount:(NSUInteger)maxFrameCount
+                                           outFrameCount:(NSUInteger *)outFrameCount
+                                                channels:(NSUInteger *)outChannels {
+    os_unfair_lock_lock(&_inputMonitorLock);
+    if (maxFrameCount == 0 || _inputMonitorBufferedFrames < maxFrameCount || _inputMonitorPPSampleRate != SAMPLE_RATE || _inputMonitorPPChannels == 0) {
+        os_unfair_lock_unlock(&_inputMonitorLock);
+        return NULL;
+    }
+
+    NSUInteger channels = _inputMonitorPPChannels;
+    NSUInteger framesUntilWrap = _inputMonitorRingCapacityFrames - _inputMonitorReadPos;
+    NSUInteger firstChunk = MIN(maxFrameCount, framesUntilWrap);
+    memcpy(_inputMonitorReadBuffer,
+           _inputMonitorRingBuffer + (_inputMonitorReadPos * channels),
+           firstChunk * channels * sizeof(float));
+    if (firstChunk < maxFrameCount) {
+        memcpy(_inputMonitorReadBuffer + (firstChunk * channels),
+               _inputMonitorRingBuffer,
+               (maxFrameCount - firstChunk) * channels * sizeof(float));
+    }
+
+    _inputMonitorReadPos = (_inputMonitorReadPos + maxFrameCount) % _inputMonitorRingCapacityFrames;
+    _inputMonitorBufferedFrames -= maxFrameCount;
+    if (outFrameCount != NULL) {
+        *outFrameCount = maxFrameCount;
+    }
+    if (outChannels != NULL) {
+        *outChannels = channels;
+    }
+    os_unfair_lock_unlock(&_inputMonitorLock);
+    return _inputMonitorReadBuffer;
+}
+
+#pragma mark - Weak Network Mode (弱网模式)
+
+- (void) setWeakNetworkModeEnabled:(BOOL)enabled {
+    _weakNetworkModeEnabled = enabled;
+
+    // 更新音频设置
+    MKAudioSettings settings = _audioSettings;
+    settings.enableWeakNetworkMode = enabled;
+
+    if (enabled) {
+        // 应用弱网默认配置
+        if (settings.weakNetworkJitterBufferMs <= 0)
+            settings.weakNetworkJitterBufferMs = 100;
+        if (settings.weakNetworkExpectedLoss <= 0)
+            settings.weakNetworkExpectedLoss = 20;
+        if (settings.weakNetworkMinBitrate <= 0)
+            settings.weakNetworkMinBitrate = 16000;
+        if (settings.weakNetworkMaxBitrate <= 0)
+            settings.weakNetworkMaxBitrate = 64000;
+        settings.weakNetworkAdaptiveBitrate = YES;
+        settings.weakNetworkEnhancedPLC = YES;
+    }
+
+    [self updateAudioSettings:&settings];
+
+    MKLogInfo(Audio, @"Weak Network Mode %@", enabled ? @"enabled" : @"disabled");
+}
+
+- (BOOL) isWeakNetworkModeEnabled {
+    return _weakNetworkModeEnabled;
+}
+
+- (NSDictionary *) copyNetworkQualityMetrics {
+    NSMutableDictionary *metrics = [NSMutableDictionary dictionary];
+
+    // 从连接获取网络指标
+    MKConnection *conn = _connection;
+    if (conn) {
+        double udpPingMean = [conn udpPingMeanMs];
+        double udpPingVariance = [conn udpPingVarianceMs];
+        uint32_t udpPingSamples = [conn udpPingSamples];
+        uint32_t lastGood = [conn lastGood];
+        uint32_t lastLate = [conn lastLate];
+        uint32_t lastLost = [conn lastLost];
+
+        metrics[@"udpPingMeanMs"] = @(udpPingMean);
+        metrics[@"udpPingVarianceMs"] = @(udpPingVariance);
+        metrics[@"udpPingSamples"] = @(udpPingSamples);
+        metrics[@"udpTransportState"] = (int)[conn udpTransportState];
+
+        // 计算丢包率
+        uint32_t totalPackets = lastGood + lastLate + lastLost;
+        if (totalPackets > 0) {
+            double lossRate = (double)(lastLate + lastLost) / (double)totalPackets * 100.0;
+            metrics[@"packetLossPercent"] = @(lossRate);
+        }
+
+        // 计算有效延迟 (mean + stddev)
+        double stddev = sqrt(udpPingVariance);
+        double effectiveLatency = udpPingMean + stddev;
+        metrics[@"effectiveLatencyMs"] = @(effectiveLatency);
+
+        // 网络质量评分 (0-100, 越高越好)
+        double qualityScore = 100.0;
+        if (udpPingSamples >= 5) {
+            if (effectiveLatency > 300) qualityScore -= 40;
+            else if (effectiveLatency > 150) qualityScore -= 20;
+            else if (effectiveLatency > 80) qualityScore -= 10;
+
+            if (totalPackets > 10) {
+                double lossRate = (double)(lastLate + lastLost) / (double)totalPackets;
+                qualityScore -= MIN(40, lossRate * 80);
+            }
+        }
+        metrics[@"qualityScore"] = @(MAX(0, qualityScore));
+    }
+
+    return [metrics copy];
+}
+
+- (NSDictionary *) copyWeakNetworkStatistics {
+    return @{
+        @"weakNetworkModeEnabled": @(_weakNetworkModeEnabled),
+        @"lastBitrate": _weakNetworkLastBitrate ?: @(0),
+        @"lastLatency": _weakNetworkLastLatency ?: @(0),
+        @"lastPacketLoss": _weakNetworkLastPacketLoss ?: @(0),
+    };
+}
+
+- (void) resetWeakNetworkStatistics {
+    _weakNetworkLastBitrate = @(0);
+    _weakNetworkLastLatency = @(0);
+    _weakNetworkLastPacketLoss = @(0);
+    MKLogInfo(Audio, @"Weak network statistics reset");
+}
+
+- (void) updateWeakNetworkStatisticsWithBitrate:(int)bitrate latency:(double)latency packetLoss:(double)packetLoss {
+    _weakNetworkLastBitrate = @(bitrate);
+    _weakNetworkLastLatency = @(latency);
+    _weakNetworkLastPacketLoss = @(packetLoss);
 }
 
 @end

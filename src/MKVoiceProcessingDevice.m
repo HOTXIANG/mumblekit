@@ -27,6 +27,7 @@
 #endif
 
 #import "MKAudioPerfStats.h"
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 @interface MKVoiceProcessingDevice () {
 @public
@@ -50,7 +51,7 @@ static void MKAudioPerfLogAndReset(NSString *label, MKAudioPerfStats *stats) {
         return;
     }
 
-    NSLog(@"PERF audio_callback %@ callbacks=%llu sampled=%llu avg_us=%llu p95_us=%llu p99_us=%llu max_us=%llu",
+    MKLogVerbose(Audio, @"PERF audio_callback %@ callbacks=%llu sampled=%llu avg_us=%llu p95_us=%llu p99_us=%llu max_us=%llu",
           label,
           stats->callbackCount,
           stats->sampledCount,
@@ -69,7 +70,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
         
     if (! dev->_buflist.mBuffers->mData) {
-        NSLog(@"MKVoiceProcessingDevice: No buffer allocated. Allocating for %d frames.", (int)nframes);
+        MKLogDebug(Audio, @"MKVoiceProcessingDevice: No buffer allocated. Allocating for %d frames.", (int)nframes);
         dev->_buflist.mNumberBuffers = 1;
         AudioBuffer *b = dev->_buflist.mBuffers;
         b->mNumberChannels = dev->_numMicChannels;
@@ -78,7 +79,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     }
     
     if (dev->_buflist.mBuffers->mDataByteSize < (dev->_micSampleSize * nframes)) {
-        NSLog(@"MKVoiceProcessingDevice: Buffer too small. Allocating more space for %d frames.", (int)nframes);
+        MKLogDebug(Audio, @"MKVoiceProcessingDevice: Buffer too small. Allocating more space for %d frames.", (int)nframes);
         AudioBuffer *b = dev->_buflist.mBuffers;
         free(b->mData);
         b->mDataByteSize = dev->_micSampleSize * nframes;
@@ -93,7 +94,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     UInt32 dataByteSize = dev->_buflist.mBuffers->mDataByteSize;
     err = AudioUnitRender(dev->_audioUnit, flags, ts, busnum, nframes, &dev->_buflist);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: AudioUnitRender failed. err = %d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: AudioUnitRender failed. err = %d", (int)err);
         return err;
     }
     dev->_buflist.mBuffers->mDataByteSize = dataByteSize;
@@ -172,13 +173,13 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     comp = AudioComponentFindNext(NULL, &desc);
     if (! comp) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to find AudioUnit.");
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to find AudioUnit.");
         return NO;
     }
     
     err = AudioComponentInstanceNew(comp, (AudioComponentInstance *) &_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to instantiate new AudioUnit. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to instantiate new AudioUnit. err=%d", (int)err);
         return NO;
     }
 
@@ -186,20 +187,20 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     // macOS: 不显式设置 kAudioOutputUnitProperty_CurrentDevice。
     // VPIO 会自动使用系统默认输入/输出设备并创建内部聚合设备。
     // 显式设置设备 ID 会导致多通道内置麦克风（3ch beamforming）的聚合设备创建失败。
-    NSLog(@"MKVoiceProcessingDevice: macOS VPIO using system default input/output devices.");
+    MKLogInfo(Audio, @"MKVoiceProcessingDevice: macOS VPIO using system default input/output devices.");
 #endif
 
     val = 1;
     err = AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &val, sizeof(UInt32));
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to configure input scope. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to configure input scope. err=%d", (int)err);
         return NO;
     }
     
     val = 1;
     err = AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &val, sizeof(UInt32));
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to configure output scope. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to configure output scope. err=%d", (int)err);
         return NO;
     }
     
@@ -209,7 +210,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AURenderCallbackStruct);
     err = AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, &cb, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to setup input callback. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to setup input callback. err=%d", (int)err);
         return NO;
     }
     
@@ -218,26 +219,26 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AURenderCallbackStruct);
     err = AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Global, 0, &cb, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Could not set render callback. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Could not set render callback. err=%d", (int)err);
         return NO;
     }
     
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitGetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &inputFmt, &len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to query input stream info. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to query input stream info. err=%d", (int)err);
         return NO;
     }
     
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitGetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &outputFmt, &len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to query output stream info. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to query output stream info. err=%d", (int)err);
         return NO;
     }
     
     if (_settings.enableStereoInput) {
-        NSLog(@"MKVoiceProcessingDevice: Stereo input is not supported in voice-processing mode. Defaulting to mono.");
+        MKLogWarning(Audio, @"MKVoiceProcessingDevice: Stereo input is not supported in voice-processing mode. Defaulting to mono.");
     }
     _micFrequency = 48000;
     _numMicChannels = 1;
@@ -245,7 +246,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     int requestedOutputChannels = _settings.enableStereoOutput ? 2 : 1;
     _numOutputChannels = MIN(requestedOutputChannels, hardwareOutputChannels);
     if (_settings.enableStereoOutput && _numOutputChannels < 2) {
-        NSLog(@"MKVoiceProcessingDevice: Stereo output requested but unavailable on current route. Falling back to mono.");
+        MKLogWarning(Audio, @"MKVoiceProcessingDevice: Stereo output requested but unavailable on current route. Falling back to mono.");
     }
     _micSampleSize = _numMicChannels * sizeof(short);
     
@@ -270,14 +271,14 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &inputFmt, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to set stream format for output device. (output scope)");
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to set stream format for output device. (output scope)");
         return NO;
     }
     
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &outputFmt, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to set stream format for input device. (input scope)");
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to set stream format for input device. (input scope)");
         return NO;
     }
     
@@ -285,7 +286,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(UInt32);
     err = AudioUnitSetProperty(_audioUnit, kAUVoiceIOProperty_BypassVoiceProcessing, kAudioUnitScope_Global, 0, &val, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to ENABLE voice processing (Bypass failed). err=%d", (int)err);
+        MKLogWarning(Audio, @"MKVoiceProcessingDevice: Unable to ENABLE voice processing (Bypass failed). err=%d", (int)err);
     }
         
 #if TARGET_OS_IPHONE
@@ -296,25 +297,25 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(UInt32);
     err = AudioUnitSetProperty(_audioUnit, kAUVoiceIOProperty_VoiceProcessingEnableAGC, kAudioUnitScope_Global, 0, &val, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to set VPIO AGC (%u). err=%d", (unsigned)val, (int)err);
+        MKLogWarning(Audio, @"MKVoiceProcessingDevice: Unable to set VPIO AGC (%u). err=%d", (unsigned)val, (int)err);
     }
     
     val = 0;
     len = sizeof(UInt32);
     err = AudioUnitSetProperty(_audioUnit, kAUVoiceIOProperty_MuteOutput, kAudioUnitScope_Global, 0, &val, len);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: unable to unmute output. err=%d", (int)err);
+        MKLogWarning(Audio, @"MKVoiceProcessingDevice: unable to unmute output. err=%d", (int)err);
     }
     
     err = AudioUnitInitialize(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to initialize AudioUnit. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to initialize AudioUnit. err=%d", (int)err);
         return NO;
     }
     
     err = AudioOutputUnitStart(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: Unable to start AudioUnit. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to start AudioUnit. err=%d", (int)err);
         return NO;
     }
     
@@ -340,17 +341,17 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 
     err = AudioOutputUnitStop(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: unable to stop AudioUnit. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: unable to stop AudioUnit. err=%d", (int)err);
     }
 
     err = AudioUnitUninitialize(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: unable to uninitialize AudioUnit. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: unable to uninitialize AudioUnit. err=%d", (int)err);
     }
 
     err = AudioComponentInstanceDispose(_audioUnit);
     if (err != noErr) {
-        NSLog(@"MKVoiceProcessingDevice: unable to dispose of AudioUnit. err=%d", (int)err);
+        MKLogError(Audio, @"MKVoiceProcessingDevice: unable to dispose of AudioUnit. err=%d", (int)err);
     }
 
     pthread_set_qos_class_self_np(origQoS, origRP);
@@ -359,7 +360,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     if (b && b->mData)
         free(b->mData);
 
-    NSLog(@"MKVoiceProcessingDevice: teardown finished.");
+    MKLogInfo(Audio, @"MKVoiceProcessingDevice: teardown finished.");
     return (err == noErr);
 }
 

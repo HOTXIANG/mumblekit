@@ -15,6 +15,7 @@
 #import "MKPacketDataStream.h"
 #import "MKAudio.h"
 #import "MKAudioOutput.h"
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #include <dispatch/dispatch.h>
 
@@ -179,17 +180,17 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     MKConnection *conn = (MKConnection *)udata;
 
     if (conn == NULL) {
-        NSLog(@"MKConnection: MKConnectionUDPCallback called with udata == NULL");
+        MKLogWarning(Connection, @"MKConnection: MKConnectionUDPCallback called with udata == NULL");
         return;
     }
 
     if (type != kCFSocketDataCallBack) {
-        NSLog(@"MKConnection: MKConnectionUDPCallback called with type=%lu", type);
+        MKLogWarning(Connection, @"MKConnection: MKConnectionUDPCallback called with type=%lu", type);
         return;
     }
 
     if (data == NULL) {
-        NSLog(@"MKConnection: MKConnectionUDPCallback called with data == NULL");
+        MKLogWarning(Connection, @"MKConnection: MKConnectionUDPCallback called with data == NULL");
         return;
     }
 
@@ -304,7 +305,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
                                            (CFWriteStreamRef *) &_outputStream);
 
         if (_inputStream == nil || _outputStream == nil) {
-            NSLog(@"MKConnection: Unable to create stream pair.");
+            MKLogError(Connection, @"MKConnection: Unable to create stream pair.");
             return;
         }
 
@@ -435,7 +436,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     BOOL warned = NO;
     while ([self isExecuting] && ![self isFinished]) {
         if (!warned && ++attempts > 300) {
-            NSLog(@"MKConnection: disconnect still waiting for thread after 3s.");
+            MKLogWarning(Connection, @"MKConnection: disconnect still waiting for thread after 3s.");
             warned = YES;
         }
         usleep(10000);
@@ -580,7 +581,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         }
 
         default:
-            NSLog(@"MKConnection: Unknown event (%lu)", (unsigned long)eventCode);
+            MKLogWarning(Connection, @"MKConnection: Unknown event (%lu)", (unsigned long)eventCode);
             break;
     }
 }
@@ -624,7 +625,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
     socklen_t sl = sizeof(sa);
     if (getpeername(_socket, (struct sockaddr *) &sa, &sl) == -1) {
-        NSLog(@"MKConnection: Unable to query TCP socket for address.");
+        MKLogError(Connection, @"MKConnection: Unable to query TCP socket for address.");
         return;
     }
 
@@ -636,7 +637,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
                                   kCFSocketDataCallBack, MKConnectionUDPCallback,
                                   &udpctx);
     if (! _udpSock) {
-        NSLog(@"MKConnection: Failed to create UDP socket.");
+        MKLogError(Connection, @"MKConnection: Failed to create UDP socket.");
         return;
     }
 
@@ -647,7 +648,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     NSData *_udpAddr = [[[NSData alloc] initWithBytes:&sa length:(NSUInteger)sl] autorelease];
     CFSocketError err = CFSocketConnectToAddress(_udpSock, (CFDataRef)_udpAddr, -1);
     if (err == kCFSocketError) {
-        NSLog(@"MKConnection: Unable to CFSocketConnectToAddress()");
+        MKLogError(Connection, @"MKConnection: Unable to CFSocketConnectToAddress()");
         [self _teardownUdpSock];
         return;
     }
@@ -768,7 +769,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 
     if (![_crypt valid] || !CFSocketIsValid(_udpSock)) {
-        NSLog(@"MKConnection: Invalid CryptState or CFSocket.");
+        MKLogWarning(Connection, @"MKConnection: Invalid CryptState or CFSocket.");
         _udpAvailable = NO;
         [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
         _udpConsecutiveSendFailures += 1;
@@ -778,7 +779,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
     NSData *crypted = [_crypt encryptData:data];
     if (crypted == nil) {
-        NSLog(@"MKConnection: unable to encrypt UDP message");
+        MKLogWarning(Connection, @"MKConnection: unable to encrypt UDP message");
         _udpAvailable = NO;
         [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
         _udpConsecutiveSendFailures += 1;
@@ -788,7 +789,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
     CFSocketError err = CFSocketSendData(_udpSock, NULL, (CFDataRef)crypted, -1.0f);
     if (err != kCFSocketSuccess) {
-        NSLog(@"MKConnection: CFSocketSendData failed with err=%i", (int)err);
+        MKLogWarning(Connection, @"MKConnection: CFSocketSendData failed with err=%i", (int)err);
         _udpAvailable = NO;
         [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
         _udpConsecutiveSendFailures += 1;
@@ -818,7 +819,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
     _lastUdpRebuildAttemptUsec = now;
     [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateRecovering];
-    NSLog(@"MKConnection: Rebuilding UDP socket after %lu consecutive failures.",
+    MKLogWarning(Connection, @"MKConnection: Rebuilding UDP socket after %lu consecutive failures.",
           (unsigned long)_udpConsecutiveSendFailures);
     [self _teardownUdpSock];
     [self _setupUdpSock];
@@ -857,7 +858,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
     NSInteger nwritten = [_outputStream write:[msg bytes] maxLength:[msg length]];
     if (nwritten != expectedLength) {
-        NSLog(@"MKConnection: write error, wrote %li, expected %lu", (long int)nwritten, (unsigned long)expectedLength);
+        MKLogError(Connection, @"MKConnection: write error, wrote %li, expected %lu", (long int)nwritten, (unsigned long)expectedLength);
     } else if (_tcpPacketsSent < UINT32_MAX) {
         _tcpPacketsSent += 1;
     }
@@ -902,7 +903,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     if (! _udpAvailable) {
         _udpAvailable = true;
         [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateAvailable];
-        NSLog(@"MKConnection: UDP is now available!");
+        MKLogInfo(Connection, @"MKConnection: UDP is now available!");
     }
     _udpConsecutiveSendFailures = 0;
     _lastUdpReceiveUsec = [self _currentTimeStamp];
@@ -936,7 +937,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         _headerBufLen = 0;
 
         if (rawLen > 8 * 1024 * 1024) {
-            NSLog(@"MKConnection: Received absurd packet length (%u). Dropping connection.", (unsigned)rawLen);
+            MKLogError(Connection, @"MKConnection: Received absurd packet length (%u). Dropping connection.", (unsigned)rawLen);
             _keepRunning = NO;
             return;
         }
@@ -949,7 +950,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     if (packetLength > 0) {
         UInt8 *packetBytes = [packetBuffer mutableBytes];
         if (!packetBytes) {
-            NSLog(@"MKConnection: NSMutableData is stubborn.");
+            MKLogWarning(Connection, @"MKConnection: NSMutableData is stubborn.");
             return;
         }
 
@@ -1017,7 +1018,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     data = [[ping build] data];
     [self sendMessageWithType:PingMessage data:data];
 
-    NSLog(@"MKConnection: Sent ping message (udpAvg=%.2fms, tcpAvg=%.2fms, udpPackets=%u, tcpPackets=%u).",
+    MKLogDebug(Connection, @"MKConnection: Sent ping message (udpAvg=%.2fms, tcpAvg=%.2fms, udpPackets=%u, tcpPackets=%u).",
           _udpPingMeanMs, _tcpPingMeanMs, _udpPacketsSent, _tcpPacketsSent);
 }
 
@@ -1034,7 +1035,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
     uint64_t idleUsec = now - _lastUdpReceiveUsec;
     if (_udpAvailable && idleUsec >= MKUDPReceiveStallThresholdUsec) {
-        NSLog(@"MKConnection: UDP stalled for %.2fs, forcing TCP fallback and rebuilding UDP socket.",
+        MKLogWarning(Connection, @"MKConnection: UDP stalled for %.2fs, forcing TCP fallback and rebuilding UDP socket.",
               (double)idleUsec / 1000000.0);
         _udpAvailable = NO;
         [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateStalled];
@@ -1098,11 +1099,11 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) _doCryptSetup:(MPCryptSetup *)cryptSetup {
-    NSLog(@"MKConnection: Got CryptSetup from server.");
+    MKLogInfo(Connection, @"MKConnection: Got CryptSetup from server.");
 
     if ([cryptSetup hasKey] && [cryptSetup hasClientNonce] && [cryptSetup hasServerNonce]) {
         [_crypt setKey:[cryptSetup key] eiv:[cryptSetup clientNonce] div:[cryptSetup serverNonce]];
-        NSLog(@"MKConnection: CryptState initialized.");
+        MKLogInfo(Connection, @"MKConnection: CryptState initialized.");
     }
 }
 
@@ -1144,7 +1145,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 
     if (_shouldUseOpus == NO) {
-        NSLog(@"MKConnection: Server does not support Opus codec. CELT is not supported. Please upgrade your Mumble server.");
+        MKLogError(Connection, @"MKConnection: Server does not support Opus codec. CELT is not supported. Please upgrade your Mumble server.");
         // Gracefully disconnect instead of crashing
         NSDictionary *userInfo = @{
             NSLocalizedDescriptionKey: @"Codec Unsupported",
@@ -1232,12 +1233,12 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     switch (messageType) {
         case UDPVoiceCELTAlphaMessage:
         case UDPVoiceCELTBetaMessage:
-            NSLog(@"MKConnection: Dropping unsupported CELT voice packet type=%d", (int)messageType);
+            MKLogWarning(Connection, @"MKConnection: Dropping unsupported CELT voice packet type=%d", (int)messageType);
             break;
         case UDPVoiceSpeexMessage:
         case UDPVoiceOpusMessage: {
             if (messageType == UDPVoiceOpusMessage && ![[MKVersion sharedVersion] isOpusEnabled]) {
-                NSLog(@"MKConnection: Received Opus voice packet in no-Opus mode. Discarding.");
+                MKLogWarning(Connection, @"MKConnection: Received Opus voice packet in no-Opus mode. Discarding.");
                 break;
             }
             NSUInteger session = [pds getUnsignedInt];
@@ -1260,13 +1261,13 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
                 if (rttUsec <= 5ULL * 60ULL * 1000000ULL) {
                     MKConnectionAddSample((double)rttUsec / 1000.0, &_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
                 }
-                NSLog(@"UDP ping = %llu usec", rttUsec);
+                MKLogVerbose(Connection, @"UDP ping = %llu usec", rttUsec);
             }
             break;
         }
 
         default:
-            NSLog(@"MKConnection: Unknown UDPTunnel packet (%i) received. Discarding...", (int)messageType);
+            MKLogWarning(Connection, @"MKConnection: Unknown UDPTunnel packet (%i) received. Discarding...", (int)messageType);
             break;
     }
 
@@ -1286,7 +1287,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         }
         case ServerSyncMessage: {
             if (_forceTCP) {
-                NSLog(@"MKConnection: Sending dummy UDPTunnel message.");
+                MKLogDebug(Connection, @"MKConnection: Sending dummy UDPTunnel message.");
                 NSMutableData *msg = [[NSMutableData alloc] initWithLength:3];
                 char *buf = [msg mutableBytes];
                 memset(buf, 0, 3);
@@ -1484,7 +1485,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         }
 
         default: {
-            NSLog(@"MKConnection: Unknown packet type recieved. Discarding. (type=%u)", packetType);
+            MKLogWarning(Connection, @"MKConnection: Unknown packet type recieved. Discarding. (type=%u)", packetType);
             break;
         }
     }

@@ -10,6 +10,7 @@
 
 #import "MKMacAudioDevice.h"
 #import "MKAudioPerfStats.h"
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #import <AudioUnit/AudioUnit.h>
 #import <AudioUnit/AUComponent.h>
@@ -43,7 +44,7 @@ static void MKAudioPerfLogAndReset(NSString *label, MKAudioPerfStats *stats) {
         return;
     }
 
-    NSLog(@"PERF audio_callback %@ callbacks=%llu sampled=%llu avg_us=%llu p95_us=%llu p99_us=%llu max_us=%llu",
+    MKLogVerbose(Audio, @"PERF audio_callback %@ callbacks=%llu sampled=%llu avg_us=%llu p95_us=%llu p99_us=%llu max_us=%llu",
           label,
           stats->callbackCount,
           stats->sampledCount,
@@ -148,13 +149,13 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     
     // P0 修复：验证输入参数有效性
     if (nframes == 0 || nframes > 4096) {
-        NSLog(@"MKMacAudioDevice: inputCallback received invalid frame count (%u). Skipping.", (unsigned int)nframes);
+        MKLogWarning(Audio, @"MKMacAudioDevice: inputCallback received invalid frame count (%u). Skipping.", (unsigned int)nframes);
         return -1;
     }
     
     // 确保缓冲区列表已初始化
     if (dev->_recordBufList.mNumberBuffers == 0) {
-        NSLog(@"MKMacAudioDevice: inputCallback called but buffer list not initialized.");
+        MKLogWarning(Audio, @"MKMacAudioDevice: inputCallback called but buffer list not initialized.");
         return -1;
     }
         
@@ -163,40 +164,40 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     
     // P0 修复：增强缓冲区分配和验证逻辑
     if (!b->mData) {
-        NSLog(@"MKMacAudioDevice: No buffer allocated. Allocating %u bytes.", (unsigned int)requiredSize);
+        MKLogDebug(Audio, @"MKMacAudioDevice: No buffer allocated. Allocating %u bytes.", (unsigned int)requiredSize);
         b->mNumberChannels = dev->_recordMicChannels;
         b->mDataByteSize = requiredSize;
         b->mData = calloc(1, b->mDataByteSize);
         
         if (b->mData == NULL) {
-            NSLog(@"MKMacAudioDevice: inputCallback failed to allocate buffer.");
+            MKLogError(Audio, @"MKMacAudioDevice: inputCallback failed to allocate buffer.");
             return -1;
         }
     }
     
     if (b->mDataByteSize < requiredSize) {
-        NSLog(@"MKMacAudioDevice: Buffer too small (%u < %u). Reallocating.", 
+        MKLogDebug(Audio, @"MKMacAudioDevice: Buffer too small (%u < %u). Reallocating.",
               (unsigned int)b->mDataByteSize, (unsigned int)requiredSize);
         free(b->mData);
         b->mDataByteSize = requiredSize;
         b->mData = calloc(1, b->mDataByteSize);
         
         if (b->mData == NULL) {
-            NSLog(@"MKMacAudioDevice: inputCallback failed to reallocate buffer.");
+            MKLogError(Audio, @"MKMacAudioDevice: inputCallback failed to reallocate buffer.");
             return -1;
         }
     }
     
     // P0 修复：额外的缓冲区完整性检查
     if (b->mData == NULL || b->mDataByteSize == 0 || b->mNumberChannels == 0) {
-        NSLog(@"MKMacAudioDevice: inputCallback buffer corrupted. Skipping render.");
+        MKLogError(Audio, @"MKMacAudioDevice: inputCallback buffer corrupted. Skipping render.");
         return -1;
     }
     
     // 验证指针有效性（防止 EXC_BAD_ACCESS）
     uintptr_t dataPtr = (uintptr_t)b->mData;
     if (dataPtr < 0x1000 || (dataPtr & 0x7) != 0) {
-        NSLog(@"MKMacAudioDevice: inputCallback received suspicious buffer pointer %p. Skipping.", b->mData);
+        MKLogWarning(Audio, @"MKMacAudioDevice: inputCallback received suspicious buffer pointer %p. Skipping.", b->mData);
         return -1;
     }
     
@@ -210,9 +211,9 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
     if (err != noErr) {
         // P0 修复：记录详细的错误信息以便调试
         if (err == kAudioUnitErr_InvalidParameter) {
-            NSLog(@"MKMacAudioDevice: AudioUnitRender failed: Invalid parameter (err=%ld). Check buffer/format configuration.", (long)err);
+            MKLogError(Audio, @"MKMacAudioDevice: AudioUnitRender failed: Invalid parameter (err=%ld). Check buffer/format configuration.", (long)err);
         } else {
-            NSLog(@"MKMacAudioDevice: AudioUnitRender failed. err = %ld, frames = %u, size = %u", 
+            MKLogError(Audio, @"MKMacAudioDevice: AudioUnitRender failed. err = %ld, frames = %u, size = %u",
                   (long)err, (unsigned int)nframes, (unsigned int)requiredSize);
         }
         return err;
@@ -227,7 +228,7 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
             inputFunc(buf, nframes);
         }
     } @catch (NSException *exception) {
-        NSLog(@"MKMacAudioDevice: inputFunc threw exception: %@. Audio recording interrupted.", exception);
+        MKLogError(Audio, @"MKMacAudioDevice: inputFunc threw exception: %@. Audio recording interrupted.", exception);
     } @finally {
         [pool release];
     }
@@ -256,7 +257,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     // P0 修复：验证音频缓冲区指针有效性，防止 EXC_BAD_ACCESS
     if (buf->mData == NULL || buf->mDataByteSize == 0) {
-        NSLog(@"MKMacAudioDevice: outputCallback received invalid buffer (data=%p, size=%u). Skipping.", 
+        MKLogWarning(Audio, @"MKMacAudioDevice: outputCallback received invalid buffer (data=%p, size=%u). Skipping.",
               buf->mData, (unsigned int)buf->mDataByteSize);
         buf->mDataByteSize = 0;
         return -1;
@@ -267,7 +268,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     uintptr_t dataPtr = (uintptr_t)buf->mData;
     if (dataPtr < 0x1000 || (dataPtr & 0x7) != 0) {
         // 指针未对齐或明显无效
-        NSLog(@"MKMacAudioDevice: outputCallback received suspicious buffer pointer %p. Skipping.", 
+        MKLogWarning(Audio, @"MKMacAudioDevice: outputCallback received suspicious buffer pointer %p. Skipping.",
               buf->mData);
         buf->mDataByteSize = 0;
         return -1;
@@ -277,7 +278,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     @try {
         done = outputFunc(buf->mData, nframes);
     } @catch (NSException *exception) {
-        NSLog(@"MKMacAudioDevice: outputFunc threw exception: %@. Audio playback interrupted.", exception);
+        MKLogError(Audio, @"MKMacAudioDevice: outputFunc threw exception: %@. Audio playback interrupted.", exception);
         done = NO;
     } @finally {
         if (! done) {
@@ -326,7 +327,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AudioDeviceID);
     err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &defaultInputAddr, 0, NULL, &len, &devId);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to query for default device.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to query for default device.");
         return NO;
     }
     
@@ -344,7 +345,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
             if (MUFindInputDeviceByUID(preferredUID, &preferredDevId)) {
                 devId = preferredDevId;
             } else {
-                NSLog(@"MKMacAudioDevice: Preferred input device UID not found. Falling back to system default.");
+                MKLogWarning(Audio, @"MKMacAudioDevice: Preferred input device UID not found. Falling back to system default.");
                 [defaults setBool:YES forKey:@"AudioFollowSystemInputDevice"];
                 [defaults setObject:@"" forKey:@"AudioPreferredInputDeviceUID"];
             }
@@ -356,7 +357,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     NSString *selectedName = MUCopyAudioDeviceName(devId);
     NSString *selectedUID = MUCopyAudioDeviceUID(devId);
-    NSLog(@"MKMacAudioDevice: Using input device: %@ (%@)", selectedName ?: @"Unknown", selectedUID ?: @"No UID");
+    MKLogInfo(Audio, @"MKMacAudioDevice: Using input device: %@ (%@)", selectedName ?: @"Unknown", selectedUID ?: @"No UID");
     
     desc.componentType = kAudioUnitType_Output;
     desc.componentSubType = kAudioUnitSubType_HALOutput;
@@ -366,41 +367,41 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     comp = AudioComponentFindNext(NULL, &desc);
     if (! comp) {
-        NSLog(@"MKMacAudioDevice: Unable to find AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to find AudioUnit.");
         return NO;
     }
-    
+
     err = AudioComponentInstanceNew(comp, (AudioComponentInstance *) &_recordAudioUnit);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to instantiate new AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to instantiate new AudioUnit.");
         return NO;
     }
-    
+
     val = 1;
     err = AudioUnitSetProperty(_recordAudioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &val, sizeof(UInt32));
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to configure input scope on AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to configure input scope on AudioUnit.");
         return NO;
     }
     
     val = 0;
     err = AudioUnitSetProperty(_recordAudioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &val, sizeof(UInt32));
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to configure output scope on AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to configure output scope on AudioUnit.");
         return NO;
     }
     
     len = sizeof(AudioDeviceID);
     err = AudioUnitSetProperty(_recordAudioUnit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &devId, len);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to set selected input device.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to set selected input device.");
         return NO;
     }
     
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitGetProperty(_recordAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &fmt, &len);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to query device for stream info.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to query device for stream info.");
         return NO;
     }
     
@@ -409,7 +410,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     int requestedInputChannels = _settings.enableStereoInput ? 2 : 1;
     _recordMicChannels = MIN(requestedInputChannels, hardwareInputChannels);
     if (_settings.enableStereoInput && _recordMicChannels < 2) {
-        NSLog(@"MKMacAudioDevice: Stereo input requested but unavailable on selected microphone. Falling back to mono.");
+        MKLogWarning(Audio, @"MKMacAudioDevice: Stereo input requested but unavailable on selected microphone. Falling back to mono.");
     }
     _recordSampleSize = _recordMicChannels * sizeof(short);
     
@@ -425,7 +426,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitSetProperty(_recordAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &fmt, len);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to set stream format for recording (output scope, bus 1). err=%d", (int)err);
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to set stream format for recording (output scope, bus 1). err=%d", (int)err);
         return NO;
     }
     
@@ -435,7 +436,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AURenderCallbackStruct);
     err = AudioUnitSetProperty(_recordAudioUnit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, &cb, len);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to setup callback.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to setup callback.");
         return NO;
     }
     
@@ -446,13 +447,13 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     err = AudioUnitInitialize(_recordAudioUnit);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to initialize AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to initialize AudioUnit.");
         return NO;
     }
     
     err = AudioOutputUnitStart(_recordAudioUnit);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to start AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to start AudioUnit.");
         return NO;
     }
     
@@ -464,21 +465,21 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     err = AudioOutputUnitStop(_recordAudioUnit);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: unable to stop AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: unable to stop AudioUnit.");
         return NO;
     }
     
     err = AudioComponentInstanceDispose(_recordAudioUnit);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: unable to dispose of AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: unable to dispose of AudioUnit.");
         return NO;
     }
     
     AudioBuffer *b = _recordBufList.mBuffers;
     if (b && b->mData)
         free(b->mData);
-    
-    NSLog(@"MKMacAudioDevice: teardown finished.");
+
+    MKLogInfo(Audio, @"MKMacAudioDevice: teardown finished.");
     return YES;
 }
 
@@ -497,20 +498,20 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     comp = AudioComponentFindNext(NULL, &desc);
     if (! comp) {
-        NSLog(@"MKMacAudioDevice: Unable to find AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to find AudioUnit.");
         return NO;
     }
-    
+
     err = AudioComponentInstanceNew(comp, (AudioComponentInstance *) &_playbackAudioUnit);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to instantiate new AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to instantiate new AudioUnit.");
         return NO;
     }
     
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitGetProperty(_playbackAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &fmt, &len);
     if (err != noErr) {
-        NSLog(@"MKAudioOuptut: Unable to get output stream format from AudioUnit.");
+        MKLogError(Audio, @"MKAudioOuptut: Unable to get output stream format from AudioUnit.");
         return NO;
     }
     
@@ -519,14 +520,14 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     int requestedOutputChannels = _settings.enableStereoOutput ? 2 : 1;
     _playbackChannels = MIN(requestedOutputChannels, hardwareOutputChannels);
     if (_settings.enableStereoOutput && _playbackChannels < 2) {
-        NSLog(@"MKMacAudioDevice: Stereo output requested but unavailable on selected playback device. Falling back to mono.");
+        MKLogWarning(Audio, @"MKMacAudioDevice: Stereo output requested but unavailable on selected playback device. Falling back to mono.");
     }
     _playbackSampleSize = _playbackChannels * sizeof(short);
     
     fmt.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
     fmt.mBitsPerChannel = sizeof(short) * 8;
     
-    NSLog(@"MKMacAudioDevice: Output device currently configured as %iHz sample rate, %i channels, %i sample size", _playbackFrequency, _playbackChannels, _playbackSampleSize);
+    MKLogInfo(Audio, @"MKMacAudioDevice: Output device currently configured as %iHz sample rate, %i channels, %i sample size", _playbackFrequency, _playbackChannels, _playbackSampleSize);
     
     fmt.mFormatID = kAudioFormatLinearPCM;
     fmt.mSampleRate = (float) _playbackFrequency;
@@ -538,7 +539,7 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AudioStreamBasicDescription);
     err = AudioUnitSetProperty(_playbackAudioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &fmt, len);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to set stream format for output device.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to set stream format for output device.");
         return NO;
     }
     
@@ -548,19 +549,19 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     len = sizeof(AURenderCallbackStruct);
     err = AudioUnitSetProperty(_playbackAudioUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Global, 0, &cb, len);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Could not set render callback.");
+        MKLogError(Audio, @"MKMacAudioDevice: Could not set render callback.");
         return NO;
     }
     
     err = AudioUnitInitialize(_playbackAudioUnit);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to initialize playback AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to initialize playback AudioUnit.");
         return NO;
     }
     
     err = AudioOutputUnitStart(_playbackAudioUnit);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: Unable to start AudioUnit");
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to start AudioUnit");
         return NO;
     }
     
@@ -570,17 +571,17 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 - (BOOL) teardownPlayback {
     OSStatus err = AudioOutputUnitStop(_playbackAudioUnit);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: unable to stop AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: unable to stop AudioUnit.");
         return NO;
     }
     
     err = AudioComponentInstanceDispose(_playbackAudioUnit);
     if (err != noErr) {
-        NSLog(@"MKMacAudioDevice: unable to dispose of AudioUnit.");
+        MKLogError(Audio, @"MKMacAudioDevice: unable to dispose of AudioUnit.");
         return NO;
     }
     
-    NSLog(@"MKMacAudioDevice: teardown finished.");
+    MKLogInfo(Audio, @"MKMacAudioDevice: teardown finished.");
     return YES;
 }
 

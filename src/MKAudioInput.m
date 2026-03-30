@@ -5,10 +5,13 @@
 #import <MumbleKit/MKServerModel.h>
 #import <MumbleKit/MKVersion.h>
 #import <MumbleKit/MKConnection.h>
+#import <MumbleKit/MKAudio.h>
 #import "MKPacketDataStream.h"
 #import "MKAudioInput.h"
+#import "MKAudioOutput.h"
 #import "MKAudioOutputSidetone.h"
 #import "MKAudioDevice.h"
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #include <speex/speex.h>
 #include <speex/speex_preprocess.h>
@@ -75,6 +78,8 @@
     NSMutableData          *_opusBuffer;
     MKAudioInputInt16ProcessCallback _inputTrackProcessor;
     void                   *_inputTrackProcessorContext;
+    MKAudioInputInt16ProcessCallback _sidetoneTrackProcessor;
+    void                   *_sidetoneTrackProcessorContext;
     
     MKConnection           *_connection;
 }
@@ -104,6 +109,8 @@
     _vadOpenLastTime = [[NSDate date] timeIntervalSince1970];
     _inputTrackProcessor = NULL;
     _inputTrackProcessorContext = NULL;
+    _sidetoneTrackProcessor = NULL;
+    _sidetoneTrackProcessorContext = NULL;
 
     micFrequency = [_device inputSampleRate];
     numMicChannels = MAX(1, [_device numberOfInputChannels]);
@@ -113,27 +120,61 @@
     // Fall back to CELT if Opus is not enabled.
     if (![[MKVersion sharedVersion] isOpusEnabled] && _settings.codec == MKCodecFormatOpus) {
         _settings.codec = MKCodecFormatCELT;
-        NSLog(@"Falling back to CELT");
+        MKLogWarning(Audio, @"Falling back to CELT");
     }
 
     if (_settings.codec == MKCodecFormatSpeex && encodeChannels > 1) {
-        NSLog(@"MKAudioInput: Speex does not support stereo encode path. Falling back to mono.");
+        MKLogWarning(Audio, @"MKAudioInput: Speex does not support stereo encode path. Falling back to mono.");
         encodeChannels = 1;
     }
     if (_settings.enableStereoInput && encodeChannels < 2 && _settings.codec != MKCodecFormatSpeex) {
-        NSLog(@"MKAudioInput: Stereo input requested but unavailable from device. Falling back to mono.");
+        MKLogWarning(Audio, @"MKAudioInput: Stereo input requested but unavailable from device. Falling back to mono.");
     }
 
     if (_settings.codec == MKCodecFormatOpus) {
         sampleRate = SAMPLE_RATE;
         frameSize = SAMPLE_RATE / 100;
         _opusEncoder = opus_encoder_create(SAMPLE_RATE, encodeChannels, OPUS_APPLICATION_VOIP, NULL);
-        opus_encoder_ctl(_opusEncoder, OPUS_SET_VBR(0)); // CBR
-        NSLog(@"MKAudioInput: %i bits/s, %d Hz, %d sample Opus (%d ch)", _settings.quality, sampleRate, frameSize, encodeChannels);
+
+        // CBR (Constant Bitrate)
+        opus_encoder_ctl(_opusEncoder, OPUS_SET_VBR(0));
+
+        // Weak Network Optimization (弱网优化)
+        if (_settings.enableWeakNetworkMode) {
+            // Enable in-band FEC (启用前向纠错)
+            opus_int32 fec = 1;
+            opus_encoder_ctl(_opusEncoder, OPUS_SET_INBAND_FEC(fec));
+
+            // Set expected packet loss percentage (设置期望丢包率)
+            opus_int32 expectedLoss = _settings.weakNetworkExpectedLoss;
+            if (expectedLoss < 0) expectedLoss = 0;
+            if (expectedLoss > 60) expectedLoss = 60;  // Cap at 60%
+            opus_encoder_ctl(_opusEncoder, OPUS_SET_PACKET_LOSS_PERC(expectedLoss));
+
+            // Higher complexity for better PLC (更高复杂度换取更好丢包隐藏)
+            opus_int32 complexity = 10;
+            opus_encoder_ctl(_opusEncoder, OPUS_SET_COMPLEXITY(complexity));
+
+            // DTX for bandwidth efficiency (DTX 节省带宽)
+            opus_int32 dtx = 1;
+            opus_encoder_ctl(_opusEncoder, OPUS_SET_DTX(dtx));
+
+            MKLogInfo(Audio, @"MKAudioInput: Weak Network Mode enabled - FEC=%d, ExpectedLoss=%d%%, Bitrate=%d-%d",
+                     fec, expectedLoss, _settings.weakNetworkMinBitrate, _settings.weakNetworkMaxBitrate);
+        } else {
+            // Default settings for good network (默认好网络配置)
+            opus_int32 fec = 0;
+            opus_encoder_ctl(_opusEncoder, OPUS_SET_INBAND_FEC(fec));
+            opus_int32 complexity = 5;
+            opus_encoder_ctl(_opusEncoder, OPUS_SET_COMPLEXITY(complexity));
+        }
+
+        MKLogInfo(Audio, @"MKAudioInput: %i bits/s, %d Hz, %d sample Opus (%d ch) weakNetwork=%d",
+                 _settings.quality, sampleRate, frameSize, encodeChannels, _settings.enableWeakNetworkMode ? 1 : 0);
     } else if (_settings.codec == MKCodecFormatCELT) {
         sampleRate = SAMPLE_RATE;
         frameSize = SAMPLE_RATE / 100;
-        NSLog(@"MKAudioInput: %i bits/s, %d Hz, %d sample CELT (%d ch input)", _settings.quality, sampleRate, frameSize, encodeChannels);
+        MKLogInfo(Audio, @"MKAudioInput: %i bits/s, %d Hz, %d sample CELT (%d ch input)", _settings.quality, sampleRate, frameSize, encodeChannels);
     } else if (_settings.codec == MKCodecFormatSpeex) {
         sampleRate = 32000;
 
@@ -158,7 +199,7 @@
 
         iArg = 5;
         speex_encoder_ctl(_speexEncoder, SPEEX_SET_COMPLEXITY, &iArg);
-        NSLog(@"MKAudioInput: %d bits/s, %d Hz, %d sample Speex-UWB", _settings.quality, sampleRate, frameSize);
+        MKLogInfo(Audio, @"MKAudioInput: %d bits/s, %d Hz, %d sample Speex-UWB", _settings.quality, sampleRate, frameSize);
     }
 
     doResetPreprocessor = YES;
@@ -240,15 +281,15 @@
     int err;
     
     if (sampleRate <= 0) {
-        NSLog(@"MKAudioInput: Invalid sampleRate=%d, falling back to %d.", sampleRate, SAMPLE_RATE);
+        MKLogWarning(Audio, @"MKAudioInput: Invalid sampleRate=%d, falling back to %d.", sampleRate, SAMPLE_RATE);
         sampleRate = SAMPLE_RATE;
     }
     if (frameSize <= 0) {
-        NSLog(@"MKAudioInput: Invalid frameSize=%d, falling back to %d.", frameSize, SAMPLE_RATE / 100);
+        MKLogWarning(Audio, @"MKAudioInput: Invalid frameSize=%d, falling back to %d.", frameSize, SAMPLE_RATE / 100);
         frameSize = SAMPLE_RATE / 100;
     }
 
-    NSLog(@"MKAudioInput: initializeMixer -- iMicFreq=%u, iSampleRate=%u", micFrequency, sampleRate);
+    MKLogDebug(Audio, @"MKAudioInput: initializeMixer -- iMicFreq=%u, iSampleRate=%u", micFrequency, sampleRate);
 
     micLength = (frameSize * micFrequency) / sampleRate;
 
@@ -262,7 +303,7 @@
 
     if (micFrequency != sampleRate) {
         _micResampler = speex_resampler_init(encodeChannels, micFrequency, sampleRate, 3, &err);
-        NSLog(@"MKAudioInput: initialized resampler (%iHz -> %iHz)", micFrequency, sampleRate);
+        MKLogInfo(Audio, @"MKAudioInput: initialized resampler (%iHz -> %iHz)", micFrequency, sampleRate);
     }
 
     psMic = malloc(micLength * encodeChannels * sizeof(short));
@@ -270,7 +311,7 @@
     micSampleSize = numMicChannels * sizeof(short);
     doResetPreprocessor = YES;
 
-    NSLog(@"MKAudioInput: Initialized mixer for input=%i ch @ %i Hz, encode=%i ch @ %i Hz", numMicChannels, micFrequency, encodeChannels, sampleRate);
+    MKLogInfo(Audio, @"MKAudioInput: Initialized mixer for input=%i ch @ %i Hz, encode=%i ch @ %i Hz", numMicChannels, micFrequency, encodeChannels, sampleRate);
 }
 
 - (void) addMicrophoneDataWithBuffer:(short *)input amount:(NSUInteger)nsamp {
@@ -322,21 +363,42 @@
     }
 }
 
-- (void) processSidetone {
-    // Limit sidetone processing to when we have a 48KHz mic sampling rate.
-    // For newer iOS versions, we're always given 48KHz, but for OS X, we can't
-    // be certain. So this most certainly mutes the sidetone on OS X for many audio
-    // devices.
-    //
-    // When resampling from the internal 48KHz sampling rate to 32KHz for Speex UWB, this
-    // sidetone code path will be adding non-preprocessed frames to the sidetone output.
-    // This is a deliberate choice for now, because it allows us to avoid resampling a
-    // perhaps already resampled signal.
-    if (micFrequency == 48000) {
-        NSData *data = [[NSData alloc] initWithBytes:psMic length:micLength * encodeChannels * sizeof(short)];
-        [[[MKAudio sharedAudio] sidetoneOutput] addFrame:data];
-        [data release];
+- (void) updateInputMonitorSendForFrame:(short *)frame
+                             frameCount:(NSUInteger)frameCount
+                               channels:(NSUInteger)channels
+                             sampleRate:(NSUInteger)processingSampleRate
+                                 active:(BOOL)active {
+    MKAudio *audio = [MKAudio sharedAudio];
+    if (audio == nil) {
+        return;
     }
+
+    if (!active || frame == NULL || frameCount == 0 || channels == 0 || channels > 2 || processingSampleRate != SAMPLE_RATE) {
+        [audio writeSidetoneSidechainSamples:NULL frameCount:0 channels:0];
+        [audio writeInputMonitorSamples:NULL frameCount:0 channels:0 sampleRate:processingSampleRate];
+        return;
+    }
+
+    NSUInteger sampleCount = frameCount * channels;
+    short sidetoneFrame[sampleCount];
+    // Sidetone is a dedicated output bus fed by the post-input-track signal.
+    // Start from the current input-track frame, then let the sidetone rack
+    // apply its own plugin chain on top.
+    memcpy(sidetoneFrame, frame, sampleCount * sizeof(short));
+    if (_sidetoneTrackProcessor != NULL) {
+        _sidetoneTrackProcessor(sidetoneFrame,
+                                frameCount,
+                                channels,
+                                processingSampleRate,
+                                _sidetoneTrackProcessorContext);
+    }
+
+    float monitorBuffer[sampleCount];
+    for (NSUInteger sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++) {
+        monitorBuffer[sampleIndex] = (float)sidetoneFrame[sampleIndex] / 32768.0f;
+    }
+    [audio writeSidetoneSidechainSamples:monitorBuffer frameCount:frameCount channels:channels];
+    [audio writeInputMonitorSamples:monitorBuffer frameCount:frameCount channels:channels sampleRate:processingSampleRate];
 }
 
 - (void) resetPreprocessor {
@@ -419,7 +481,13 @@
                 opus_encoder_ctl(_opusEncoder, OPUS_SET_FORCE_MODE(MODE_CELT_ONLY));
             }
 
-            opus_encoder_ctl(_opusEncoder, OPUS_SET_BITRATE(_settings.quality));
+            // Adaptive Bitrate Control (自适应码率控制)
+            int targetBitrate = _settings.quality;
+            if (_settings.enableWeakNetworkMode && _settings.weakNetworkAdaptiveBitrate) {
+                targetBitrate = [self calculateAdaptiveBitrate];
+            }
+            opus_encoder_ctl(_opusEncoder, OPUS_SET_BITRATE(targetBitrate));
+
             len = opus_encode(_opusEncoder, (short *) [_opusBuffer bytes], (opus_int32)(_bufferedFrames * frameSize), encbuf, (opus_int32)max);
             [_opusBuffer setLength:0];
             if (len <= 0) {
@@ -467,6 +535,7 @@
     short *frame = resampled ? psOut : psMic;
     int frameSamples = frameSize * encodeChannels;
     short monoFrame[frameSize];
+
     if (_settings.enablePreprocessor) {
         if (encodeChannels > 1) {
             int i;
@@ -502,9 +571,23 @@
             frame[i] = (short)val;
         }
     }
-    
-    if (_inputTrackProcessor != NULL) {
-        _inputTrackProcessor(frame, (NSUInteger)frameSize, (NSUInteger)encodeChannels, (NSUInteger)sampleRate, _inputTrackProcessorContext);
+
+    // Publish post-input-track signal for sidechain sends.
+    {
+        MKAudio *audio = [MKAudio sharedAudio];
+        if (audio != nil) {
+            float scBuf[MK_SIDECHAIN_MAX_FRAMES * 2];
+            NSUInteger scCount = MIN((NSUInteger)frameSize, (NSUInteger)MK_SIDECHAIN_MAX_FRAMES);
+            if (_inputTrackProcessor != NULL) {
+                _inputTrackProcessor(frame, (NSUInteger)frameSize, (NSUInteger)encodeChannels, (NSUInteger)sampleRate, _inputTrackProcessorContext);
+            }
+            for (NSUInteger si = 0; si < scCount * encodeChannels; si++) {
+                scBuf[si] = (float)frame[si] / 32768.0f;
+            }
+            [audio writeSidechainInputSamples:scBuf frameCount:scCount channels:encodeChannels];
+        } else if (_inputTrackProcessor != NULL) {
+            _inputTrackProcessor(frame, (NSUInteger)frameSize, (NSUInteger)encodeChannels, (NSUInteger)sampleRate, _inputTrackProcessorContext);
+        }
     }
 
     float sum = 1.0f;
@@ -574,9 +657,11 @@
     if (_muted)
         _doTransmit = NO;
     
-    if (_settings.enableSideTone && (_doTransmit || _lastTransmit)) {
-        [self processSidetone];
-    }
+    [self updateInputMonitorSendForFrame:frame
+                              frameCount:(NSUInteger)frameSize
+                                channels:(NSUInteger)encodeChannels
+                              sampleRate:(NSUInteger)sampleRate
+                                  active:_settings.enableSideTone];
     
     if (_lastTransmit != _doTransmit) {
         // fixme(mkrautz): Handle more talkstates
@@ -704,6 +789,102 @@
         _inputTrackProcessor = NULL;
         _inputTrackProcessorContext = NULL;
     }
+}
+
+- (void) setSidetoneTrackProcessor:(MKAudioInputInt16ProcessCallback)processor context:(void *)context {
+    @synchronized(self) {
+        _sidetoneTrackProcessor = processor;
+        _sidetoneTrackProcessorContext = context;
+    }
+}
+
+- (void) clearSidetoneTrackProcessor {
+    @synchronized(self) {
+        _sidetoneTrackProcessor = NULL;
+        _sidetoneTrackProcessorContext = NULL;
+    }
+}
+
+- (void) setInputMonitorEnabled:(BOOL)enabled {
+    _settings.enableSideTone = enabled;
+}
+
+#pragma mark - Weak Network Adaptive Bitrate (弱网自适应码率)
+
+- (int) calculateAdaptiveBitrate {
+    // 从连接获取网络质量指标
+    if (!_connection) {
+        return _settings.weakNetworkMinBitrate;
+    }
+
+    // 获取 UDP ping 统计
+    double udpPingMean = [_connection udpPingMeanMs];
+    double udpPingVariance = [_connection udpPingVarianceMs];
+    uint32_t udpPingSamples = [_connection udpPingSamples];
+
+    // 标准差 = sqrt(variance)
+    double udpPingStdDev = sqrt(udpPingVariance);
+
+    // 计算延迟因子 (0.0 - 1.0, 越高表示网络越差)
+    double latencyFactor = 0.0;
+    if (udpPingSamples >= 5) {
+        // 使用 mean + 1*stdDev 作为有效延迟指标
+        double effectiveLatency = udpPingMean + udpPingStdDev;
+
+        if (effectiveLatency > 300) {
+            latencyFactor = 1.0;  // 极高延迟
+        } else if (effectiveLatency > 150) {
+            latencyFactor = 0.6 + (effectiveLatency - 150) / 150 * 0.4;  // 0.6-1.0
+        } else if (effectiveLatency > 80) {
+            latencyFactor = 0.3 + (effectiveLatency - 80) / 70 * 0.3;  // 0.3-0.6
+        } else if (effectiveLatency > 50) {
+            latencyFactor = (effectiveLatency - 50) / 30 * 0.3;  // 0-0.3
+        }
+    }
+
+    // 获取丢包率统计 (从 connection 的 lastGood/lastLate/lastLost)
+    double packetLossFactor = 0.0;
+    uint32_t lastGood = [_connection lastGood];
+    uint32_t lastLate = [_connection lastLate];
+    uint32_t lastLost = [_connection lastLost];
+    uint32_t totalPackets = lastGood + lastLate + lastLost;
+
+    if (totalPackets > 10) {
+        double lossRate = (double)(lastLate + lastLost) / (double)totalPackets;
+        packetLossFactor = MIN(1.0, lossRate * 2.0);  // 50% 丢包率=1.0
+    }
+
+    // 综合网络质量因子 (0.0 = 好网络，1.0 = 极差网络)
+    double networkQualityFactor = MAX(latencyFactor, packetLossFactor);
+
+    // 根据网络质量计算目标码率
+    int minBitrate = _settings.weakNetworkMinBitrate > 0 ? _settings.weakNetworkMinBitrate : 16000;
+    int maxBitrate = _settings.weakNetworkMaxBitrate > 0 ? _settings.weakNetworkMaxBitrate : 64000;
+
+    // 线性插值：网络越好码率越高，网络越差码率越低
+    int targetBitrate = (int)((1.0 - networkQualityFactor) * (maxBitrate - minBitrate) + minBitrate);
+
+    // 限制在范围内
+    targetBitrate = MAX(minBitrate, MIN(maxBitrate, targetBitrate));
+
+    // 平滑过渡：避免码率突变
+    static int lastTargetBitrate = -1;
+    if (lastTargetBitrate < 0) {
+        lastTargetBitrate = targetBitrate;
+    } else {
+        // 每次最多变化 8kbps
+        int maxChange = 8000;
+        int delta = targetBitrate - lastTargetBitrate;
+        if (delta > maxChange) delta = maxChange;
+        if (delta < -maxChange) delta = -maxChange;
+        targetBitrate = lastTargetBitrate + delta;
+        lastTargetBitrate = targetBitrate;
+    }
+
+    MKLogVerbose(Audio, @"WeakNetwork: adaptive bitrate -- latency=%.1fms, loss=%.1f%%, factor=%.2f, target=%dbps",
+                udpPingMean, packetLossFactor * 50.0, networkQualityFactor, targetBitrate);
+
+    return targetBitrate;
 }
 
 @end

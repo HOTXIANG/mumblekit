@@ -828,6 +828,15 @@
 - (void) internalMoveUser:(MKUser *)user toChannel:(MKChannel *)chan fromChannel:(MKChannel *)prevChan byUser:(MKUser *)mover {
     [chan addUser:user];
 
+    // 换频道时重置说话状态，避免头像一直亮着
+    // 新的语音包到达后会重新设为 talking
+    if ([user talkState] != MKTalkStatePassive) {
+        [user setTalkState:MKTalkStatePassive];
+        if (_connectedUser) {
+            [_delegate serverModel:self userTalkStateChanged:user];
+        }
+    }
+
     if (_connectedUser) {
         [_delegate serverModel:self userMoved:user toChannel:chan byUser:mover];
         [_delegate serverModel:self userMoved:user toChannel:chan fromChannel:prevChan byUser:mover];

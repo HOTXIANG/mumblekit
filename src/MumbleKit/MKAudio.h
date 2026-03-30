@@ -62,6 +62,15 @@ typedef struct _MKAudioSettings {
     BOOL            preferReceiverOverSpeaker;
     BOOL            opusForceCELTMode;
     BOOL            audioMixerDebug;
+
+    // Weak Network Optimization Settings (弱网优化配置)
+    BOOL            enableWeakNetworkMode;      // 弱网模式总开关
+    int             weakNetworkJitterBufferMs;  // 自定义抖动缓冲 (ms), 默认 100ms
+    int             weakNetworkExpectedLoss;    // 期望丢包率 (0-100), 用于 FEC
+    BOOL            weakNetworkAdaptiveBitrate; // 自适应码率
+    BOOL            weakNetworkEnhancedPLC;     // 增强丢包隐藏
+    int             weakNetworkMinBitrate;      // 最低码率底线 (bps), 默认 16000
+    int             weakNetworkMaxBitrate;      // 最高码率上限 (bps), 默认 64000
 } MKAudioSettings;
 
 /// @protocol MKAudioDelegate MKAudio.h MumbleKit/MKAudio.h
@@ -254,18 +263,39 @@ typedef struct _MKAudioSettings {
 /// keys @"audioUnit" and @"mix" (0.0 dry to 1.0 wet). Stages are applied
 /// in order after preview gain and before encode/transmit.
 - (void) setInputTrackAudioUnitChain:(NSArray *)audioUnits;
+- (void) setInputTrackSendSourceKeys:(NSArray<NSString *> *)trackKeys;
 
-/// Configure true Audio Unit DSP chain for remote bus processing.
+/// Configure true Audio Unit DSP chain for the dedicated sidetone track.
+/// The sidetone track runs only while sidetone is enabled and uses the same
+/// sample rate and channel layout as the input track.
+- (void) setSidetoneAudioUnitChain:(NSArray *)audioUnits;
+- (void) setSidetoneTrackSendSourceKeys:(NSArray<NSString *> *)trackKeys;
+
+/// Configure true Audio Unit DSP chain for remote bus 1 processing.
 /// Each entry may be an AVAudioUnit or a stage descriptor dictionary with
 /// keys @"audioUnit" and @"mix" (0.0 dry to 1.0 wet). Stages are applied
 /// in order after remote mix and before output quantization.
 - (void) setRemoteBusAudioUnitChain:(NSArray *)audioUnits;
+- (void) setRemoteBusSendSourceKeys:(NSArray<NSString *> *)trackKeys;
+
+/// Configure true Audio Unit DSP chain for remote bus 2 processing.
+- (void) setRemoteBus2AudioUnitChain:(NSArray *)audioUnits;
+- (void) setRemoteBus2SendSourceKeys:(NSArray<NSString *> *)trackKeys;
+- (void) setRemoteBus2PreviewGain:(float)gain enabled:(BOOL)enabled;
+
+/// 设置用户输出路由到哪个总线（0=Bus1 默认, 1=Bus2）
+- (void) setBusAssignment:(NSUInteger)busIndex forSession:(NSUInteger)session;
+- (NSUInteger) busAssignmentForSession:(NSUInteger)session;
+- (void) setRemoteTrackUsesSendRouting:(BOOL)enabled forSession:(NSUInteger)session;
+- (void) setRemoteTrackSendBusMask:(NSUInteger)busMask forSession:(NSUInteger)session;
+- (void) setInputTrackSendBusMask:(NSUInteger)busMask;
 
 /// Configure true Audio Unit DSP chain for a specific remote session.
 /// Each entry may be an AVAudioUnit or a stage descriptor dictionary with
 /// keys @"audioUnit" and @"mix" (0.0 dry to 1.0 wet). Stages are applied
 /// in order after per-user decode and before mixing into remote bus.
 - (void) setRemoteTrackAudioUnitChain:(NSArray *)audioUnits forSession:(NSUInteger)session;
+- (void) setRemoteTrackSendSourceKeys:(NSArray<NSString *> *)trackKeys forSession:(NSUInteger)session;
 - (void) clearRemoteTrackAudioUnitChainForSession:(NSUInteger)session;
 - (void) clearAllRemoteTrackAudioUnitChains;
 
@@ -287,5 +317,51 @@ typedef struct _MKAudioSettings {
 
 /// DSP Observability - Query per-session DSP status and I/O levels.
 - (NSDictionary *)copyDSPStatus:(NSUInteger)session;
+
+/// Input track sidechain ping-pong buffer API
+/// Called by MKAudioInput on input thread to write post-input-track signal for sidechain use.
+- (void) writeSidechainInputSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels;
+
+/// Called by MKAudioOutput on output thread to dequeue up to one render-aligned block
+/// for the Input Track sidechain send.
+- (const float *) readSidechainInputBufferWithMaxFrameCount:(NSUInteger)maxFrameCount
+                                              outFrameCount:(NSUInteger *)outFrameCount
+                                                   channels:(NSUInteger *)outChannels;
+
+/// Sidetone track sidechain ping-pong buffer API
+/// Called by MKAudioInput on input thread to write post-sidetone-track signal for sidechain use.
+- (void) writeSidetoneSidechainSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels;
+
+/// Called by MKAudioOutput on output thread to dequeue up to one render-aligned block
+/// for the Sidetone Track sidechain send.
+- (const float *) readSidetoneSidechainBufferWithMaxFrameCount:(NSUInteger)maxFrameCount
+                                                 outFrameCount:(NSUInteger *)outFrameCount
+                                                      channels:(NSUInteger *)outChannels;
+
+/// Called by MKAudioInput on input thread to publish post-input-track monitor audio.
+- (void) writeInputMonitorSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels sampleRate:(NSUInteger)sampleRate;
+
+/// Called by MKAudioOutput on output thread to dequeue a contiguous block of
+/// post-input-track monitor audio for sidetone playback.
+- (const float *) readInputMonitorBufferWithMaxFrameCount:(NSUInteger)maxFrameCount
+                                           outFrameCount:(NSUInteger *)outFrameCount
+                                                channels:(NSUInteger *)outChannels;
+
+///-----------------------------------
+/// @name Weak Network Optimization (弱网优化)
+///-----------------------------------
+
+/// Get current network quality metrics (返回当前网络质量指标)
+- (NSDictionary *) copyNetworkQualityMetrics;
+
+/// Manually trigger weak network mode (手动触发弱网模式)
+- (void) setWeakNetworkModeEnabled:(BOOL)enabled;
+- (BOOL) isWeakNetworkModeEnabled;
+
+/// Get weak network statistics (获取弱网优化统计)
+- (NSDictionary *) copyWeakNetworkStatistics;
+
+/// Reset weak network statistics (重置弱网优化统计)
+- (void) resetWeakNetworkStatistics;
 
 @end
