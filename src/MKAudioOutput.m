@@ -533,7 +533,8 @@ typedef struct {
             [outputUser release];
         }
         BOOL useStereoOutput = _settings.enableStereoOutput && _numChannels > 1;
-        outputUser = [[MKAudioOutputSpeech alloc] initWithSession:session sampleRate:_mixerFrequency messageType:msgType useStereo:useStereoOutput];
+        int jitterMs = _settings.enableWeakNetworkMode ? _settings.weakNetworkJitterBufferMs : 0;
+        outputUser = [[MKAudioOutputSpeech alloc] initWithSession:session sampleRate:_mixerFrequency messageType:msgType useStereo:useStereoOutput jitterBufferMs:jitterMs];
         [_outputLock lock];
         [_outputs setObject:outputUser forKey:sessionKey];
         if (![_remoteSessionOrder containsObject:sessionKey]) {

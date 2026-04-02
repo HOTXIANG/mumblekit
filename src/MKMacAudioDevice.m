@@ -408,9 +408,12 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     _recordFrequency = (int) fmt.mSampleRate;
     int hardwareInputChannels = (int)MAX((UInt32)1, fmt.mChannelsPerFrame);
     int requestedInputChannels = _settings.enableStereoInput ? 2 : 1;
-    _recordMicChannels = MIN(requestedInputChannels, hardwareInputChannels);
-    if (_settings.enableStereoInput && _recordMicChannels < 2) {
+    _recordMicChannels = hardwareInputChannels;
+    if (_settings.enableStereoInput && hardwareInputChannels < 2) {
         MKLogWarning(Audio, @"MKMacAudioDevice: Stereo input requested but unavailable on selected microphone. Falling back to mono.");
+    } else if (hardwareInputChannels > requestedInputChannels) {
+        MKLogInfo(Audio, @"MKMacAudioDevice: Capturing all %d hardware input channels; encoder will downmix to %d channel(s).",
+              hardwareInputChannels, requestedInputChannels);
     }
     _recordSampleSize = _recordMicChannels * sizeof(short);
     

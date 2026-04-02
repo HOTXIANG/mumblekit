@@ -93,6 +93,9 @@
 
 @end
 
+static int _inputRackConsecutiveFailures = 0;
+static BOOL _inputRackCleanupScheduled = NO;
+
 void MKAudioInputRackBridgeProcess(short *samples,
                                    NSUInteger frameCount,
                                    NSUInteger channels,
@@ -102,5 +105,24 @@ void MKAudioInputRackBridgeProcess(short *samples,
     if (bridge == nil || samples == NULL || frameCount == 0 || channels == 0) {
         return;
     }
-    [bridge processSamples:samples frameCount:frameCount channels:channels sampleRate:sampleRate];
+    if (_inputRackCleanupScheduled) {
+        return; // Skip processing while cleanup is pending
+    }
+    @try {
+        [bridge processSamples:samples frameCount:frameCount channels:channels sampleRate:sampleRate];
+        _inputRackConsecutiveFailures = 0;
+    } @catch (NSException *exception) {
+        _inputRackConsecutiveFailures++;
+        NSLog(@"MKAudioInputRackBridge: Exception in processSamples (%d): %@ - %@",
+              _inputRackConsecutiveFailures, exception.name, exception.reason);
+        if (_inputRackConsecutiveFailures >= 3 && !_inputRackCleanupScheduled) {
+            NSLog(@"MKAudioInputRackBridge: Too many consecutive failures, scheduling plugin chain cleanup");
+            _inputRackCleanupScheduled = YES;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [bridge updateAudioUnitChain:nil sampleRate:sampleRate];
+                _inputRackConsecutiveFailures = 0;
+                _inputRackCleanupScheduled = NO;
+            });
+        }
+    }
 }

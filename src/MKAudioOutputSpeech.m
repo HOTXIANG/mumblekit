@@ -62,18 +62,25 @@
     NSInteger             _lastJitterMarginMs;
     NSTimeInterval        _jitterMarginUpdateTime;
     NSUInteger            _consecutiveMissCount;
+
+    // PLC 平滑滤波的上一帧输出（per-instance，避免 static 跨用户污染）
+    float                 _plcLastOutput[2];
 }
 @end
 
 @implementation MKAudioOutputSpeech
 
 - (id) initWithSession:(NSUInteger)session sampleRate:(NSUInteger)freq messageType:(MKUDPMessageType)type useStereo:(BOOL)useStereo {
+    return [self initWithSession:session sampleRate:freq messageType:type useStereo:useStereo jitterBufferMs:0];
+}
+
+- (id) initWithSession:(NSUInteger)session sampleRate:(NSUInteger)freq messageType:(MKUDPMessageType)type useStereo:(BOOL)useStereo jitterBufferMs:(int)jitterMs {
     if ((self = [super init])) {
         _jitter = NULL;
         _speexDecoder = NULL;
         _resampler = NULL;
         _useStereo = useStereo && type == UDPVoiceOpusMessage;
-    
+
         _userSession = session;
         _talkState = MKTalkStatePassive;
         _msgType = type;
@@ -108,7 +115,7 @@
             _resampler = speex_resampler_init(_useStereo ? 2 : 1, (spx_uint32_t)_sampleRate, (spx_uint32_t)_freq, 3, &err);
             _resamplerBuffer = malloc(sizeof(float)*_audioBufferSize);
             MKLogInfo(Audio, @"AudioOutputSpeech: Resampling from %lu Hz to %lu Hz", (unsigned long)_sampleRate, (unsigned long)_freq);
-        }    
+        }
 
         _bufferOffset = 0;
         _bufferFilled = 0;
@@ -124,12 +131,15 @@
         _jitterLock = [[NSLock alloc] init];
         _jitter = jitter_buffer_init((int)_frameSize);
 
-        // 初始 margin 设置为弱网模式配置值 (默认 100ms)
-        int initialMarginMs = 100;  // 默认 100ms 适用于弱网
-        int margin = initialMarginMs * (int)_frameSize / 10;  // 假设每帧 10ms
-        jitter_buffer_ctl(_jitter, JITTER_BUFFER_SET_MARGIN, &margin);
+        // 弱网模式：使用用户配置的 jitter buffer margin 来缓冲网络抖动
+        // jitterMs <= 0 表示使用 Speex jitter buffer 默认值（自适应）
+        if (jitterMs > 0) {
+            int margin = jitterMs * (int)_frameSize / 10;
+            jitter_buffer_ctl(_jitter, JITTER_BUFFER_SET_MARGIN, &margin);
+            MKLogInfo(Audio, @"AudioOutputSpeech[%lu]: jitter buffer margin=%dms", (unsigned long)session, jitterMs);
+        }
 
-        _lastJitterMarginMs = initialMarginMs;
+        _lastJitterMarginMs = jitterMs > 0 ? jitterMs : 0;
         _jitterMarginUpdateTime = 0;
 
         _fadeIn = malloc(sizeof(float) * _frameSize);
@@ -434,10 +444,9 @@
             } else {
                 if (_msgType == UDPVoiceOpusMessage) {
                     // 使用 Opus 内置 PLC (Packet Loss Concealment)
+                    // Opus PLC 在 complexity 10 时已经能生成高质量的补偿帧，
+                    // 不需要额外的自定义平滑处理（反而会引入电音伪影）
                     decodedSamples = opus_decode_float(_opusDecoder, NULL, 0, output, (int)_frameSize, 0);
-
-                    // 应用增强 PLC 处理
-                    [self applyEnhancedPLCIfNeeded:output channels:channels];
                 } else if (_msgType == UDPVoiceSpeexMessage) {
                     speex_decode(_speexDecoder, NULL, output);
                     for (unsigned int i = 0; i < _frameSize; i++)
@@ -584,13 +593,14 @@ nextframe:
 
 - (void) applyPLCSmoothingToBuffer:(float *)output channels:(NSUInteger)channels {
     // 简单的低通平滑滤波，减少 PLC 生成信号的突兀感
+    // 注意：使用实例变量而非 static，避免多用户流之间互相污染
     float smoothingFactor = 0.3f;
-    static float lastOutput[2] = {0, 0};  // 支持立体声
-
     for (NSUInteger i = 0; i < _frameSize * channels; i++) {
         NSUInteger c = i % channels;
-        output[i] = output[i] * (1.0f - smoothingFactor) + lastOutput[c] * smoothingFactor;
-        lastOutput[c] = output[i];
+        if (c < 2) {
+            output[i] = output[i] * (1.0f - smoothingFactor) + _plcLastOutput[c] * smoothingFactor;
+            _plcLastOutput[c] = output[i];
+        }
     }
 }
 

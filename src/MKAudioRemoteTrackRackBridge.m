@@ -93,6 +93,9 @@
 
 @end
 
+static int _remoteTrackRackConsecutiveFailures = 0;
+static BOOL _remoteTrackRackCleanupScheduled = NO;
+
 void MKAudioRemoteTrackRackBridgeProcess(float *samples,
                                          NSUInteger frameCount,
                                          NSUInteger channels,
@@ -102,5 +105,24 @@ void MKAudioRemoteTrackRackBridgeProcess(float *samples,
     if (bridge == nil || samples == NULL || frameCount == 0 || channels == 0) {
         return;
     }
-    [bridge processSamples:samples frameCount:frameCount channels:channels sampleRate:sampleRate];
+    if (_remoteTrackRackCleanupScheduled) {
+        return;
+    }
+    @try {
+        [bridge processSamples:samples frameCount:frameCount channels:channels sampleRate:sampleRate];
+        _remoteTrackRackConsecutiveFailures = 0;
+    } @catch (NSException *exception) {
+        _remoteTrackRackConsecutiveFailures++;
+        NSLog(@"MKAudioRemoteTrackRackBridge: Exception in processSamples (%d): %@ - %@",
+              _remoteTrackRackConsecutiveFailures, exception.name, exception.reason);
+        if (_remoteTrackRackConsecutiveFailures >= 3 && !_remoteTrackRackCleanupScheduled) {
+            NSLog(@"MKAudioRemoteTrackRackBridge: Too many consecutive failures, scheduling plugin chain cleanup");
+            _remoteTrackRackCleanupScheduled = YES;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [bridge updateAudioUnitChain:nil sampleRate:sampleRate];
+                _remoteTrackRackConsecutiveFailures = 0;
+                _remoteTrackRackCleanupScheduled = NO;
+            });
+        }
+    }
 }

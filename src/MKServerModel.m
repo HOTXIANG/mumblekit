@@ -828,9 +828,24 @@
 - (void) internalMoveUser:(MKUser *)user toChannel:(MKChannel *)chan fromChannel:(MKChannel *)prevChan byUser:(MKUser *)mover {
     [chan addUser:user];
 
-    // 换频道时重置说话状态，避免头像一直亮着
-    // 新的语音包到达后会重新设为 talking
-    if ([user talkState] != MKTalkStatePassive) {
+    // 连续模式下自己切频道：保持 talking 状态
+    // MKAudioInput 的 _lastTransmit 已为 YES，不会再触发 talking 通知
+    BOOL isContinuousSelf = NO;
+    if (_connectedUser && user == _connectedUser) {
+        MKAudioSettings settings;
+        [[MKAudio sharedAudio] readAudioSettings:&settings];
+        isContinuousSelf = (settings.transmitType == MKTransmitTypeContinuous);
+    }
+
+    if (isContinuousSelf) {
+        // 确保状态为 talking
+        if ([user talkState] != MKTalkStateTalking) {
+            [user setTalkState:MKTalkStateTalking];
+            [_delegate serverModel:self userTalkStateChanged:user];
+        }
+    } else if ([user talkState] != MKTalkStatePassive) {
+        // 换频道时重置说话状态，避免头像一直亮着
+        // 新的语音包到达后会重新设为 talking
         [user setTalkState:MKTalkStatePassive];
         if (_connectedUser) {
             [_delegate serverModel:self userTalkStateChanged:user];

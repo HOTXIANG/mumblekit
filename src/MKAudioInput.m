@@ -116,6 +116,10 @@
     numMicChannels = MAX(1, [_device numberOfInputChannels]);
     int requestedChannels = _settings.enableStereoInput ? 2 : 1;
     encodeChannels = MIN(requestedChannels, numMicChannels);
+    if (numMicChannels > encodeChannels) {
+        MKLogInfo(Audio, @"MKAudioInput: Multi-channel microphone detected (%d ch). Downmixing to %d channel(s) for encode path.",
+             numMicChannels, encodeChannels);
+    }
 
     // Fall back to CELT if Opus is not enabled.
     if (![[MKVersion sharedVersion] isOpusEnabled] && _settings.codec == MKCodecFormatOpus) {
@@ -140,33 +144,21 @@
         opus_encoder_ctl(_opusEncoder, OPUS_SET_VBR(0));
 
         // Weak Network Optimization (弱网优化)
-        if (_settings.enableWeakNetworkMode) {
-            // Enable in-band FEC (启用前向纠错)
-            opus_int32 fec = 1;
-            opus_encoder_ctl(_opusEncoder, OPUS_SET_INBAND_FEC(fec));
-
-            // Set expected packet loss percentage (设置期望丢包率)
-            opus_int32 expectedLoss = _settings.weakNetworkExpectedLoss;
-            if (expectedLoss < 0) expectedLoss = 0;
-            if (expectedLoss > 60) expectedLoss = 60;  // Cap at 60%
-            opus_encoder_ctl(_opusEncoder, OPUS_SET_PACKET_LOSS_PERC(expectedLoss));
-
-            // Higher complexity for better PLC (更高复杂度换取更好丢包隐藏)
-            opus_int32 complexity = 10;
+        //
+        // 注意：Mumble 的解码端不支持 Opus FEC 恢复（需要用下一包的 FEC 数据恢复上一包，
+        // 而 Mumble 协议/jitter buffer 架构不支持这种前向查看）。
+        // 因此 FEC 只会白白消耗 CBR 下的编码预算，降低主信号质量。
+        //
+        // 弱网模式下唯一有效的编码器优化是提高 complexity：
+        // - complexity 10 让 Opus 内部 PLC（丢包隐藏）生成更高质量的补偿帧
+        // - 解码端丢包时 opus_decode(NULL,0,...) 使用内部 PLC，质量取决于编码复杂度
+        {
+            opus_int32 complexity = _settings.enableWeakNetworkMode ? 10 : 5;
             opus_encoder_ctl(_opusEncoder, OPUS_SET_COMPLEXITY(complexity));
-
-            // DTX for bandwidth efficiency (DTX 节省带宽)
-            opus_int32 dtx = 1;
-            opus_encoder_ctl(_opusEncoder, OPUS_SET_DTX(dtx));
-
-            MKLogInfo(Audio, @"MKAudioInput: Weak Network Mode enabled - FEC=%d, ExpectedLoss=%d%%, Bitrate=%d-%d",
-                     fec, expectedLoss, _settings.weakNetworkMinBitrate, _settings.weakNetworkMaxBitrate);
-        } else {
-            // Default settings for good network (默认好网络配置)
-            opus_int32 fec = 0;
-            opus_encoder_ctl(_opusEncoder, OPUS_SET_INBAND_FEC(fec));
-            opus_int32 complexity = 5;
-            opus_encoder_ctl(_opusEncoder, OPUS_SET_COMPLEXITY(complexity));
+            // 显式关闭 FEC 和 DTX
+            opus_encoder_ctl(_opusEncoder, OPUS_SET_INBAND_FEC(0));
+            opus_encoder_ctl(_opusEncoder, OPUS_SET_DTX(0));
+            opus_encoder_ctl(_opusEncoder, OPUS_SET_PACKET_LOSS_PERC(0));
         }
 
         MKLogInfo(Audio, @"MKAudioInput: %i bits/s, %d Hz, %d sample Opus (%d ch) weakNetwork=%d",
@@ -329,12 +321,44 @@
             short sampleR = (numMicChannels > 1) ? inFrame[1] : sampleL;
 
             if (encodeChannels > 1) {
-                outFrame[0] = sampleL;
-                outFrame[1] = sampleR;
+                if (numMicChannels > 2) {
+                    long leftSum = 0;
+                    long rightSum = 0;
+                    int leftCount = 0;
+                    int rightCount = 0;
+
+                    for (int channelIndex = 0; channelIndex < numMicChannels; channelIndex++) {
+                        if ((channelIndex % 2) == 0) {
+                            leftSum += inFrame[channelIndex];
+                            leftCount++;
+                        } else {
+                            rightSum += inFrame[channelIndex];
+                            rightCount++;
+                        }
+                    }
+
+                    if (leftCount == 0) {
+                        leftSum = sampleL;
+                        leftCount = 1;
+                    }
+                    if (rightCount == 0) {
+                        rightSum = leftSum;
+                        rightCount = leftCount;
+                    }
+
+                    outFrame[0] = (short)(leftSum / leftCount);
+                    outFrame[1] = (short)(rightSum / rightCount);
+                } else {
+                    outFrame[0] = sampleL;
+                    outFrame[1] = sampleR;
+                }
             } else {
                 if (numMicChannels > 1) {
-                    int mixed = ((int)sampleL + (int)sampleR) / 2;
-                    outFrame[0] = (short)mixed;
+                    long mixedSum = 0;
+                    for (int channelIndex = 0; channelIndex < numMicChannels; channelIndex++) {
+                        mixedSum += inFrame[channelIndex];
+                    }
+                    outFrame[0] = (short)(mixedSum / numMicChannels);
                 } else {
                     outFrame[0] = sampleL;
                 }
@@ -481,12 +505,7 @@
                 opus_encoder_ctl(_opusEncoder, OPUS_SET_FORCE_MODE(MODE_CELT_ONLY));
             }
 
-            // Adaptive Bitrate Control (自适应码率控制)
-            int targetBitrate = _settings.quality;
-            if (_settings.enableWeakNetworkMode && _settings.weakNetworkAdaptiveBitrate) {
-                targetBitrate = [self calculateAdaptiveBitrate];
-            }
-            opus_encoder_ctl(_opusEncoder, OPUS_SET_BITRATE(targetBitrate));
+            opus_encoder_ctl(_opusEncoder, OPUS_SET_BITRATE(_settings.quality));
 
             len = opus_encode(_opusEncoder, (short *) [_opusBuffer bytes], (opus_int32)(_bufferedFrames * frameSize), encbuf, (opus_int32)max);
             [_opusBuffer setLength:0];
