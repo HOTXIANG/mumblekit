@@ -641,6 +641,7 @@ final class MKAudioInputRack: NSObject {
     private var previewEnabled = false
     private var hostBufferFrames: Int = 256
     private var configuredSampleRate: Double = 48000.0
+    private var preferredChannels: AVAudioChannelCount = 1
     private var inputPeak: Float = 0.0
     private var outputPeak: Float = 0.0
     private var frameCount: UInt = 0
@@ -656,10 +657,24 @@ final class MKAudioInputRack: NSObject {
         }
     }
 
+    private func chainRequiresSidechainRebuildLocked() -> Bool {
+        stageConfigurations.contains { configuration in
+            guard let sidechainSourceKey = configuration.sidechainSourceKey else {
+                return false
+            }
+            return !sidechainSourceKey.isEmpty
+        }
+    }
+
     func setSidechainProvider(_ provider: Any?) {
         guard let block = provider as? (String) -> NSDictionary? else {
             stateLock.lock()
             sidechainProvider = nil
+            let needsRebuild = chainRequiresSidechainRebuildLocked()
+            guard needsRebuild else {
+                stateLock.unlock()
+                return
+            }
             let rebuildConfigurations = stageConfigurations
             let rebuildSampleRate = configuredSampleRate
             let rebuildBufferFrames = hostBufferFrames
@@ -688,6 +703,11 @@ final class MKAudioInputRack: NSObject {
 
         stateLock.lock()
         sidechainProvider = translatedProvider
+        let needsRebuild = chainRequiresSidechainRebuildLocked()
+        guard needsRebuild else {
+            stateLock.unlock()
+            return
+        }
         let rebuildConfigurations = stageConfigurations
         let rebuildSampleRate = configuredSampleRate
         let rebuildBufferFrames = hostBufferFrames
@@ -811,6 +831,22 @@ final class MKAudioInputRack: NSObject {
                 stageHosts = newHosts
             }
         }
+        let requestedPreferredChannels = AVAudioChannelCount(max(1, localChannels))
+        if preferredChannels != requestedPreferredChannels {
+            preferredChannels = requestedPreferredChannels
+            let rebuildConfigurations = stageConfigurations
+            let rebuildSampleRate = configuredSampleRate
+            let rebuildBufferFrames = hostBufferFrames
+            let oldHosts = stageHosts
+            stageHosts = []
+            stateLock.unlock()
+            shutdownStageHosts(oldHosts)
+            let newHosts = buildStageHosts(from: rebuildConfigurations,
+                                           sampleRate: rebuildSampleRate,
+                                           hostBufferFrames: rebuildBufferFrames)
+            stateLock.lock()
+            stageHosts = newHosts
+        }
         let hosts = stageHosts
         let localPreviewGain = previewGain
         let localPreviewEnabled = previewEnabled
@@ -870,7 +906,8 @@ final class MKAudioInputRack: NSObject {
             "frameCount": NSNumber(value: frameCount),
             "hosts": hostSummaries,
             "sampleRate": NSNumber(value: configuredSampleRate),
-            "bufferFrames": NSNumber(value: hostBufferFrames)
+            "bufferFrames": NSNumber(value: hostBufferFrames),
+            "channelCount": NSNumber(value: preferredChannels)
         ]
         stateLock.unlock()
         return result
@@ -946,7 +983,7 @@ final class MKAudioInputRack: NSObject {
                 case .audioUnit(let audioUnit):
                     let host = try StageHost(audioUnit: audioUnit,
                                              wetDryMix: configuration.wetDryMix,
-                                             preferredChannels: 1,
+                                             preferredChannels: preferredChannels,
                                              sampleRate: sampleRate,
                                              hostBufferFrames: hostBufferFrames,
                                              sidechainSourceKey: configuration.sidechainSourceKey,

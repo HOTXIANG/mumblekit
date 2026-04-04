@@ -40,6 +40,10 @@
     int                    micFrequency;
     int                    sampleRate;
     int                    encodeChannels;
+    int                    selectedInputChannel;
+    int                    selectedLeftInputChannel;
+    int                    selectedRightInputChannel;
+    BOOL                   captureAllInputChannels;
 
     int                    micFilled;
     int                    micLength;
@@ -111,12 +115,29 @@
     _inputTrackProcessorContext = NULL;
     _sidetoneTrackProcessor = NULL;
     _sidetoneTrackProcessorContext = NULL;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    captureAllInputChannels = [defaults boolForKey:@"AudioCaptureAllInputChannels"];
+    selectedInputChannel = (int)MAX((NSInteger)1, [defaults integerForKey:@"AudioSelectedInputChannel"]);
+    selectedLeftInputChannel = (int)MAX((NSInteger)1, [defaults integerForKey:@"AudioSelectedInputChannelLeft"]);
+    selectedRightInputChannel = (int)MAX((NSInteger)1, [defaults integerForKey:@"AudioSelectedInputChannelRight"]);
 
     micFrequency = [_device inputSampleRate];
     numMicChannels = MAX(1, [_device numberOfInputChannels]);
     int requestedChannels = _settings.enableStereoInput ? 2 : 1;
     encodeChannels = MIN(requestedChannels, numMicChannels);
-    if (numMicChannels > encodeChannels) {
+    selectedInputChannel = MIN(selectedInputChannel, numMicChannels);
+    selectedLeftInputChannel = MIN(selectedLeftInputChannel, numMicChannels);
+    selectedRightInputChannel = MIN(selectedRightInputChannel, numMicChannels);
+    if (!captureAllInputChannels) {
+        if (encodeChannels != 1) {
+            MKLogInfo(Audio, @"MKAudioInput: Hardware input channel %d selected. Forcing mono encode path.", selectedInputChannel);
+        } else {
+            MKLogInfo(Audio, @"MKAudioInput: Using hardware input channel %d as mono encode source.", selectedInputChannel);
+        }
+        encodeChannels = 1;
+    } else if (_settings.enableStereoInput && encodeChannels > 1) {
+        MKLogInfo(Audio, @"MKAudioInput: Stereo input mapped to hardware channels L=%d R=%d.", selectedLeftInputChannel, selectedRightInputChannel);
+    } else if (numMicChannels > encodeChannels) {
         MKLogInfo(Audio, @"MKAudioInput: Multi-channel microphone detected (%d ch). Downmixing to %d channel(s) for encode path.",
              numMicChannels, encodeChannels);
     }
@@ -321,7 +342,10 @@
             short sampleR = (numMicChannels > 1) ? inFrame[1] : sampleL;
 
             if (encodeChannels > 1) {
-                if (numMicChannels > 2) {
+                if (captureAllInputChannels) {
+                    outFrame[0] = inFrame[selectedLeftInputChannel - 1];
+                    outFrame[1] = inFrame[selectedRightInputChannel - 1];
+                } else if (numMicChannels > 2) {
                     long leftSum = 0;
                     long rightSum = 0;
                     int leftCount = 0;
@@ -353,7 +377,9 @@
                     outFrame[1] = sampleR;
                 }
             } else {
-                if (numMicChannels > 1) {
+                if (!captureAllInputChannels) {
+                    outFrame[0] = inFrame[selectedInputChannel - 1];
+                } else if (numMicChannels > 1) {
                     long mixedSum = 0;
                     for (int channelIndex = 0; channelIndex < numMicChannels; channelIndex++) {
                         mixedSum += inFrame[channelIndex];

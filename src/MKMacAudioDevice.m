@@ -407,11 +407,24 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     
     _recordFrequency = (int) fmt.mSampleRate;
     int hardwareInputChannels = (int)MAX((UInt32)1, fmt.mChannelsPerFrame);
-    int requestedInputChannels = _settings.enableStereoInput ? 2 : 1;
-    _recordMicChannels = hardwareInputChannels;
-    if (_settings.enableStereoInput && hardwareInputChannels < 2) {
+    BOOL captureAllInputChannels = [defaults boolForKey:@"AudioCaptureAllInputChannels"];
+    BOOL stereoInputEnabled = captureAllInputChannels && _settings.enableStereoInput;
+    int requestedInputChannels = stereoInputEnabled ? 2 : 1;
+    NSInteger configuredInputChannel = [defaults integerForKey:@"AudioSelectedInputChannel"];
+    int selectedInputChannel = (int)MAX((NSInteger)1, configuredInputChannel);
+    if (selectedInputChannel > hardwareInputChannels) {
+        MKLogWarning(Audio, @"MKMacAudioDevice: Selected input channel %d is unavailable on selected microphone (%d hardware channels). Falling back to channel %d.",
+                     selectedInputChannel, hardwareInputChannels, hardwareInputChannels);
+        selectedInputChannel = hardwareInputChannels;
+    }
+    int requiredInputChannels = captureAllInputChannels ? requestedInputChannels : MAX(1, selectedInputChannel);
+    _recordMicChannels = captureAllInputChannels ? hardwareInputChannels : MIN(requiredInputChannels, hardwareInputChannels);
+    if (stereoInputEnabled && hardwareInputChannels < 2) {
         MKLogWarning(Audio, @"MKMacAudioDevice: Stereo input requested but unavailable on selected microphone. Falling back to mono.");
-    } else if (hardwareInputChannels > requestedInputChannels) {
+    } else if (!captureAllInputChannels && selectedInputChannel > 1) {
+        MKLogInfo(Audio, @"MKMacAudioDevice: Capturing %d hardware input channels to expose selected channel %d.",
+                  _recordMicChannels, selectedInputChannel);
+    } else if (captureAllInputChannels && hardwareInputChannels > requestedInputChannels) {
         MKLogInfo(Audio, @"MKMacAudioDevice: Capturing all %d hardware input channels; encoder will downmix to %d channel(s).",
               hardwareInputChannels, requestedInputChannels);
     }
