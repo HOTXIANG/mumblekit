@@ -484,8 +484,14 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     // 3. 设置硬件采样率 (推荐 48kHz)
     [session setPreferredSampleRate:48000.0 error:nil];
     
-    // 4. 设置 I/O Buffer (低延迟设置，0.02s = 20ms)
-    [session setPreferredIOBufferDuration:0.02 error:nil];
+    // 4. 设置 I/O Buffer
+    // iPad VPIO + MixWithOthers 组合 CPU 开销很大，使用更长的缓冲区（40ms）减轻负载
+    // iPhone 保持低延迟（20ms）
+    NSTimeInterval bufferDuration = 0.02;
+    if ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) {
+        bufferDuration = 0.04;
+    }
+    [session setPreferredIOBufferDuration:bufferDuration error:nil];
 #endif
 }
 
