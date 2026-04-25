@@ -812,6 +812,8 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
             [bridge setSidechainAudioOutput:nil];
         }
 
+        [_audioDevice setupInput:NULL];
+        [_audioDevice setupOutput:NULL];
         [_audioInput release];
         _audioInput = nil;
         [_audioOutput release];
@@ -881,6 +883,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #if TARGET_OS_OSX == 1
             _lastDeviceWasVPIO = [_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
 #endif
+            [_audioDevice setupInput:NULL];
+            [_audioDevice setupOutput:NULL];
+            [_audioInput release];
+            _audioInput = nil;
+            [_audioOutput release];
+            _audioOutput = nil;
             [_audioDevice teardownDevice];
             [_audioDevice release];
             _audioDevice = nil;
@@ -970,6 +978,8 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
         if (![_audioDevice startDevice]) {
             MKLogError(Audio, @"MKAudio: Failed to start audio device.");
+            [_audioDevice setupInput:NULL];
+            [_audioDevice setupOutput:NULL];
             [_audioOutput release];
             _audioOutput = nil;
             [_audioInput release];

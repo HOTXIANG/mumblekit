@@ -42,6 +42,8 @@
 static const NSUInteger MKUDPRebuildFailureThreshold = 3;
 static const uint64_t MKUDPRebuildCooldownUsec = 2ULL * 1000ULL * 1000ULL;
 static const uint64_t MKUDPReceiveStallThresholdUsec = 8ULL * 1000ULL * 1000ULL;
+static const uint64_t MKUDPProbeIntervalUsec = 15ULL * 1000ULL * 1000ULL;
+static const uint64_t MKTCPTunnelKeepaliveIntervalUsec = 5ULL * 1000ULL * 1000ULL;
 
 @interface MKConnection () {
     MKCryptState   *_crypt;
@@ -63,6 +65,9 @@ static const uint64_t MKUDPReceiveStallThresholdUsec = 8ULL * 1000ULL * 1000ULL;
     NSUInteger     _udpConsecutiveSendFailures;
     uint64_t       _lastUdpRebuildAttemptUsec;
     uint64_t       _lastUdpReceiveUsec;
+    uint64_t       _lastUdpProbeUsec;
+    uint64_t       _lastTcpTunnelKeepaliveUsec;
+    uint64_t       _lastTcpTunnelReceiveUsec;
     unsigned long  _connTime;
     NSTimer        *_pingTimer;
     NSOutputStream *_outputStream;
@@ -129,6 +134,9 @@ static const uint64_t MKUDPReceiveStallThresholdUsec = 8ULL * 1000ULL * 1000ULL;
 - (void) _udpDataReady:(NSData *)data;
 - (void) _udpMessageReceived:(NSData *)data;
 - (BOOL) _sendUDPMessage:(NSData *)data;
+- (BOOL) _sendUDPPingWithTimestamp:(uint64_t)timeStamp;
+- (BOOL) _shouldProbeUDPAtTime:(uint64_t)now;
+- (void) _sendTcpTunnelKeepaliveWithTimestamp:(uint64_t)timeStamp;
 - (void) _attemptUdpSocketRecoveryIfNeeded;
 - (void) _checkUdpLivenessAndRecoverIfNeeded;
 - (void) _notifyUDPTransportStateIfChanged:(MKUDPTransportState)newState;
@@ -286,6 +294,9 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
             _udpConsecutiveSendFailures = 0;
             _lastUdpRebuildAttemptUsec = 0;
             _lastUdpReceiveUsec = 0;
+            _lastUdpProbeUsec = 0;
+            _lastTcpTunnelKeepaliveUsec = 0;
+            _lastTcpTunnelReceiveUsec = 0;
             MKConnectionResetRunningStats(&_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
             MKConnectionResetRunningStats(&_tcpPingMeanMs, &_tcpPingM2Ms, &_tcpPingSamples);
             _udpPacketsSent = 0;
@@ -410,6 +421,9 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     _udpConsecutiveSendFailures = 0;
     _lastUdpRebuildAttemptUsec = 0;
     _lastUdpReceiveUsec = 0;
+    _lastUdpProbeUsec = 0;
+    _lastTcpTunnelKeepaliveUsec = 0;
+    _lastTcpTunnelReceiveUsec = 0;
     _rejected = NO;
     MKConnectionResetRunningStats(&_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
     MKConnectionResetRunningStats(&_tcpPingMeanMs, &_tcpPingM2Ms, &_tcpPingSamples);
@@ -621,6 +635,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     _udpAvailable = NO;
     _udpConsecutiveSendFailures = 0;
     _lastUdpReceiveUsec = [self _currentTimeStamp];
+    _lastUdpProbeUsec = 0;
     struct sockaddr_storage sa;
 
     socklen_t sl = sizeof(sa);
@@ -658,6 +673,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     _udpAvailable = NO;
     _udpConsecutiveSendFailures = 0;
     _lastUdpReceiveUsec = 0;
+    _lastUdpProbeUsec = 0;
     if (_udpSock) {
         CFSocketInvalidate(_udpSock);
         CFRelease(_udpSock);
@@ -768,7 +784,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         return NO;
     }
 
-    if (![_crypt valid] || !CFSocketIsValid(_udpSock)) {
+    if (![_crypt valid] || _udpSock == NULL || !CFSocketIsValid(_udpSock)) {
         MKLogWarning(Connection, @"MKConnection: Invalid CryptState or CFSocket.");
         _udpAvailable = NO;
         [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
@@ -801,6 +817,62 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         _udpPacketsSent += 1;
     }
     return YES;
+}
+
+- (BOOL) _sendUDPPingWithTimestamp:(uint64_t)timeStamp {
+    unsigned char buf[16];
+    MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:16];
+    buf[0] = UDPPingMessage << 5;
+    [pds addVarint:timeStamp];
+
+    BOOL sent = NO;
+    if ([pds valid]) {
+        NSData *data = [[NSData alloc] initWithBytesNoCopy:buf length:[pds size]+1 freeWhenDone:NO];
+        sent = [self _sendUDPMessage:data];
+        [data release];
+    }
+
+    [pds release];
+    return sent;
+}
+
+- (BOOL) _shouldProbeUDPAtTime:(uint64_t)now {
+    if (_forceTCP || _udpAvailable || _udpSock == NULL) {
+        return NO;
+    }
+
+    if (_lastUdpProbeUsec == 0) {
+        return YES;
+    }
+
+    return now - _lastUdpProbeUsec >= MKUDPProbeIntervalUsec;
+}
+
+- (void) _sendTcpTunnelKeepaliveWithTimestamp:(uint64_t)timeStamp {
+    if (!_connectionEstablished || !_readyVoice) {
+        return;
+    }
+
+    uint64_t now = [self _currentTimeStamp];
+    if (_lastTcpTunnelKeepaliveUsec != 0 &&
+        now - _lastTcpTunnelKeepaliveUsec < MKTCPTunnelKeepaliveIntervalUsec) {
+        return;
+    }
+
+    unsigned char buf[16];
+    MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:16];
+    buf[0] = UDPPingMessage << 5;
+    [pds addVarint:timeStamp];
+
+    if ([pds valid]) {
+        NSData *data = [[NSData alloc] initWithBytesNoCopy:buf length:[pds size]+1 freeWhenDone:NO];
+        _lastTcpTunnelKeepaliveUsec = now;
+        [self sendMessageWithType:UDPTunnelMessage data:data];
+        [data release];
+        MKLogDebug(Connection, @"MKConnection: Sent TCP tunnel keepalive while UDP is unavailable.");
+    }
+
+    [pds release];
 }
 
 - (void) _attemptUdpSocketRecoveryIfNeeded {
@@ -876,6 +948,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 - (void) _sendVoiceDataOnConnectionThread:(NSData *)data {
     if (!_readyVoice || !_connectionEstablished)
         return;
+    [self _checkUdpLivenessAndRecoverIfNeeded];
     if (!_forceTCP && _udpAvailable) {
         if ([self _sendUDPMessage:data]) {
             return;
@@ -907,6 +980,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
     _udpConsecutiveSendFailures = 0;
     _lastUdpReceiveUsec = [self _currentTimeStamp];
+    _lastUdpProbeUsec = 0;
 
     if ([crypted length] > 4) {
         NSData *plain = [_crypt decryptData:crypted];
@@ -980,25 +1054,28 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) _pingTimerFired:(NSTimer *)timer {
-    unsigned char buf[16];
     NSData *data;
-    uint64_t timeStamp = [self _currentTimeStamp] - _connTime;
+    uint64_t now = [self _currentTimeStamp];
+    uint64_t timeStamp = now - _connTime;
     Float32 udpVar = MKConnectionVarianceFromM2(_udpPingM2Ms, _udpPingSamples);
     Float32 tcpVar = MKConnectionVarianceFromM2(_tcpPingM2Ms, _tcpPingSamples);
 
     [self _checkUdpLivenessAndRecoverIfNeeded];
 
-    // UDP Ping
+    // UDP is only trusted after a bidirectional ping reply. While it is down,
+    // keep the voice path pinned to TCP tunnel and probe UDP sparingly.
     if (!_forceTCP) {
-        MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:16];
-        buf[0] = UDPPingMessage << 5;
-        [pds addVarint:timeStamp];
-        if ([pds valid]) {
-            data = [[NSData alloc] initWithBytesNoCopy:buf length:[pds size]+1 freeWhenDone:NO];
-            [self _sendUDPMessage:data];
-            [data release];
+        if (_udpAvailable) {
+            [self _sendUDPPingWithTimestamp:timeStamp];
+        } else {
+            if ([self _shouldProbeUDPAtTime:now]) {
+                _lastUdpProbeUsec = now;
+                [self _sendUDPPingWithTimestamp:timeStamp];
+            }
+            [self _sendTcpTunnelKeepaliveWithTimestamp:timeStamp];
         }
-        [pds release];
+    } else {
+        [self _sendTcpTunnelKeepaliveWithTimestamp:timeStamp];
     }
         
     // TCP Ping
@@ -1039,6 +1116,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
               (double)idleUsec / 1000000.0);
         _udpAvailable = NO;
         [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateStalled];
+        [self _sendTcpTunnelKeepaliveWithTimestamp:(now - _connTime)];
         _udpConsecutiveSendFailures = MKUDPRebuildFailureThreshold;
         _lastUdpRebuildAttemptUsec = 0;
         [self _attemptUdpSocketRecoveryIfNeeded];
@@ -1046,6 +1124,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 
     if (!_udpAvailable && idleUsec >= MKUDPReceiveStallThresholdUsec) {
+        [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
+        [self _sendTcpTunnelKeepaliveWithTimestamp:(now - _connTime)];
         _udpConsecutiveSendFailures = MKUDPRebuildFailureThreshold;
         [self _attemptUdpSocketRecoveryIfNeeded];
     }
@@ -1256,6 +1336,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         case UDPPingMessage: {
             uint64_t timeStamp = [pds getVarint];
             uint64_t now = [self _currentTimeStamp] - _connTime;
+            if (!_udpAvailable) {
+                MKLogVerbose(Connection, @"TCP tunnel ping response received while UDP is unavailable.");
+                break;
+            }
             if (now >= timeStamp) {
                 uint64_t rttUsec = now - timeStamp;
                 if (rttUsec <= 5ULL * 60ULL * 1000000ULL) {
@@ -1282,19 +1366,16 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
     switch (packetType) {
         case UDPTunnelMessage: {
+            _lastTcpTunnelReceiveUsec = [self _currentTimeStamp];
             [self _udpMessageReceived:data];
             break;
         }
         case ServerSyncMessage: {
-            if (_forceTCP) {
-                MKLogDebug(Connection, @"MKConnection: Sending dummy UDPTunnel message.");
-                NSMutableData *msg = [[NSMutableData alloc] initWithLength:3];
-                char *buf = [msg mutableBytes];
-                memset(buf, 0, 3);
-                [self sendMessageWithType:UDPTunnelMessage data:msg];
-                [msg release];
-            }
             _readyVoice = YES;
+            if (_forceTCP || !_udpAvailable) {
+                MKLogDebug(Connection, @"MKConnection: Priming TCP tunnel until UDP is confirmed.");
+                [self _sendTcpTunnelKeepaliveWithTimestamp:([self _currentTimeStamp] - _connTime)];
+            }
             MPServerSync *serverSync = [MPServerSync parseFromData:data];
             if ([_msgHandler respondsToSelector:@selector(connection:handleServerSyncMessage:)]) {
                 dispatch_async(main_queue, ^{
@@ -1495,5 +1576,12 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 - (NSUInteger) betaCodec { return _betaCodec; }
 - (BOOL) preferAlphaCodec { return _preferAlpha; }
 - (BOOL) shouldUseOpus { return _shouldUseOpus; }
+- (double) udpPingMeanMs { return _udpPingMeanMs; }
+- (double) udpPingVarianceMs { return (double)MKConnectionVarianceFromM2(_udpPingM2Ms, _udpPingSamples); }
+- (uint32_t) udpPingSamples { return _udpPingSamples; }
+- (uint32_t) lastGood { return _lastGood; }
+- (uint32_t) lastLate { return _lastLate; }
+- (uint32_t) lastLost { return _lastLost; }
+- (MKUDPTransportState) udpTransportState { return _udpTransportState; }
 
 @end

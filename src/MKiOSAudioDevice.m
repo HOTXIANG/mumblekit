@@ -330,10 +330,12 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 }
 
 - (void) setupOutput:(MKAudioDeviceOutputFunc)outf {
+    [_outputFunc release];
     _outputFunc = [outf copy];
 }
 
 - (void) setupInput:(MKAudioDeviceInputFunc)inf {
+    [_inputFunc release];
     _inputFunc = [inf copy];
 }
 
