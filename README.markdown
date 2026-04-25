@@ -13,6 +13,26 @@ systems. Visit its website at:
 
  <http://mumble.info/>
 
+Current integration notes
+-------------------------
+
+The app integration in this repository has moved away from creating an
+active iOS recording session when `MKAudio` is first touched. The current
+contract is:
+
+ * `MKAudio.sharedAudio` must not enter VoiceChat mode by itself.
+ * The app starts `MKAudio` only for a real server connection or for local
+   audio test surfaces such as first-run VAD onboarding, Input Setting, and
+   the Mixer.
+ * iOS stop resets the session back to Ambient/Default.
+ * AudioUnit devices are initialized by `setupDevice`, then started by
+   `startDevice` only after input/output callbacks are bound.
+ * Opus defaults enable constrained VBR, DTX, and in-band FEC. CELT-only mode
+   is not the default.
+
+See `../docs/CURRENT_STATUS.md` for the current app-level audio lifecycle and
+verification status.
+
 Fetching dependencies
 ---------------------
 

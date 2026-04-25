@@ -161,29 +161,15 @@
         frameSize = SAMPLE_RATE / 100;
         _opusEncoder = opus_encoder_create(SAMPLE_RATE, encodeChannels, OPUS_APPLICATION_VOIP, NULL);
 
-        // CBR (Constant Bitrate)
-        opus_encoder_ctl(_opusEncoder, OPUS_SET_VBR(0));
+        opus_encoder_ctl(_opusEncoder, OPUS_SET_VBR(1));
+        opus_encoder_ctl(_opusEncoder, OPUS_SET_VBR_CONSTRAINT(1));
+        opus_encoder_ctl(_opusEncoder, OPUS_SET_COMPLEXITY(5));
+        opus_encoder_ctl(_opusEncoder, OPUS_SET_INBAND_FEC(1));
+        opus_encoder_ctl(_opusEncoder, OPUS_SET_DTX(1));
+        opus_encoder_ctl(_opusEncoder, OPUS_SET_PACKET_LOSS_PERC(10));
 
-        // Weak Network Optimization (弱网优化)
-        //
-        // 注意：Mumble 的解码端不支持 Opus FEC 恢复（需要用下一包的 FEC 数据恢复上一包，
-        // 而 Mumble 协议/jitter buffer 架构不支持这种前向查看）。
-        // 因此 FEC 只会白白消耗 CBR 下的编码预算，降低主信号质量。
-        //
-        // 弱网模式下唯一有效的编码器优化是提高 complexity：
-        // - complexity 10 让 Opus 内部 PLC（丢包隐藏）生成更高质量的补偿帧
-        // - 解码端丢包时 opus_decode(NULL,0,...) 使用内部 PLC，质量取决于编码复杂度
-        {
-            opus_int32 complexity = _settings.enableWeakNetworkMode ? 10 : 5;
-            opus_encoder_ctl(_opusEncoder, OPUS_SET_COMPLEXITY(complexity));
-            // 显式关闭 FEC 和 DTX
-            opus_encoder_ctl(_opusEncoder, OPUS_SET_INBAND_FEC(0));
-            opus_encoder_ctl(_opusEncoder, OPUS_SET_DTX(0));
-            opus_encoder_ctl(_opusEncoder, OPUS_SET_PACKET_LOSS_PERC(0));
-        }
-
-        MKLogInfo(Audio, @"MKAudioInput: %i bits/s, %d Hz, %d sample Opus (%d ch) weakNetwork=%d",
-                 _settings.quality, sampleRate, frameSize, encodeChannels, _settings.enableWeakNetworkMode ? 1 : 0);
+        MKLogInfo(Audio, @"MKAudioInput: %i bits/s, %d Hz, %d sample Opus (%d ch, constrained VBR, DTX, FEC)",
+                 _settings.quality, sampleRate, frameSize, encodeChannels);
     } else if (_settings.codec == MKCodecFormatCELT) {
         sampleRate = SAMPLE_RATE;
         frameSize = SAMPLE_RATE / 100;
@@ -852,84 +838,6 @@
 
 - (void) setInputMonitorEnabled:(BOOL)enabled {
     _settings.enableSideTone = enabled;
-}
-
-#pragma mark - Weak Network Adaptive Bitrate (弱网自适应码率)
-
-- (int) calculateAdaptiveBitrate {
-    // 从连接获取网络质量指标
-    if (!_connection) {
-        return _settings.weakNetworkMinBitrate;
-    }
-
-    // 获取 UDP ping 统计
-    double udpPingMean = [_connection udpPingMeanMs];
-    double udpPingVariance = [_connection udpPingVarianceMs];
-    uint32_t udpPingSamples = [_connection udpPingSamples];
-
-    // 标准差 = sqrt(variance)
-    double udpPingStdDev = sqrt(udpPingVariance);
-
-    // 计算延迟因子 (0.0 - 1.0, 越高表示网络越差)
-    double latencyFactor = 0.0;
-    if (udpPingSamples >= 5) {
-        // 使用 mean + 1*stdDev 作为有效延迟指标
-        double effectiveLatency = udpPingMean + udpPingStdDev;
-
-        if (effectiveLatency > 300) {
-            latencyFactor = 1.0;  // 极高延迟
-        } else if (effectiveLatency > 150) {
-            latencyFactor = 0.6 + (effectiveLatency - 150) / 150 * 0.4;  // 0.6-1.0
-        } else if (effectiveLatency > 80) {
-            latencyFactor = 0.3 + (effectiveLatency - 80) / 70 * 0.3;  // 0.3-0.6
-        } else if (effectiveLatency > 50) {
-            latencyFactor = (effectiveLatency - 50) / 30 * 0.3;  // 0-0.3
-        }
-    }
-
-    // 获取丢包率统计 (从 connection 的 lastGood/lastLate/lastLost)
-    double packetLossFactor = 0.0;
-    uint32_t lastGood = [_connection lastGood];
-    uint32_t lastLate = [_connection lastLate];
-    uint32_t lastLost = [_connection lastLost];
-    uint32_t totalPackets = lastGood + lastLate + lastLost;
-
-    if (totalPackets > 10) {
-        double lossRate = (double)(lastLate + lastLost) / (double)totalPackets;
-        packetLossFactor = MIN(1.0, lossRate * 2.0);  // 50% 丢包率=1.0
-    }
-
-    // 综合网络质量因子 (0.0 = 好网络，1.0 = 极差网络)
-    double networkQualityFactor = MAX(latencyFactor, packetLossFactor);
-
-    // 根据网络质量计算目标码率
-    int minBitrate = _settings.weakNetworkMinBitrate > 0 ? _settings.weakNetworkMinBitrate : 16000;
-    int maxBitrate = _settings.weakNetworkMaxBitrate > 0 ? _settings.weakNetworkMaxBitrate : 64000;
-
-    // 线性插值：网络越好码率越高，网络越差码率越低
-    int targetBitrate = (int)((1.0 - networkQualityFactor) * (maxBitrate - minBitrate) + minBitrate);
-
-    // 限制在范围内
-    targetBitrate = MAX(minBitrate, MIN(maxBitrate, targetBitrate));
-
-    // 平滑过渡：避免码率突变
-    static int lastTargetBitrate = -1;
-    if (lastTargetBitrate < 0) {
-        lastTargetBitrate = targetBitrate;
-    } else {
-        // 每次最多变化 8kbps
-        int maxChange = 8000;
-        int delta = targetBitrate - lastTargetBitrate;
-        if (delta > maxChange) delta = maxChange;
-        if (delta < -maxChange) delta = -maxChange;
-        targetBitrate = lastTargetBitrate + delta;
-        lastTargetBitrate = targetBitrate;
-    }
-
-    MKLogVerbose(Audio, @"WeakNetwork: adaptive bitrate -- latency=%.1fms, loss=%.1f%%, factor=%.2f, target=%dbps",
-                udpPingMean, packetLossFactor * 50.0, networkQualityFactor, targetBitrate);
-
-    return targetBitrate;
 }
 
 @end

@@ -313,12 +313,17 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         return NO;
     }
     
-    err = AudioOutputUnitStart(_audioUnit);
+    return YES;
+}
+
+- (BOOL) startDevice {
+    OSStatus err = AudioOutputUnitStart(_audioUnit);
     if (err != noErr) {
         MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to start AudioUnit. err=%d", (int)err);
         return NO;
     }
-    
+
+    MKLogInfo(Audio, @"MKVoiceProcessingDevice: AudioUnit started.");
     return YES;
 }
 

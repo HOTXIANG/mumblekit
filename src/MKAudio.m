@@ -119,12 +119,6 @@ typedef struct _MKAudioPreviewGainProcessorState {
     NSUInteger _inputMonitorPPChannels;
     NSUInteger _inputMonitorPPSampleRate;
 
-    // Weak Network Mode state (弱网模式状态)
-    BOOL                     _weakNetworkModeEnabled;
-    NSDictionary             *_weakNetworkStatistics;
-    NSNumber                 *_weakNetworkLastBitrate;
-    NSNumber                 *_weakNetworkLastLatency;
-    NSNumber                 *_weakNetworkLastPacketLoss;
 }
 #if TARGET_OS_OSX == 1
 - (void)startObservingDefaultInputDeviceChanges;
@@ -306,7 +300,6 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
     dispatch_once(&pred, ^{
         audio = [[MKAudio alloc] init];
-        [audio setupAudioSession]; // ✅ 初始化现代音频会话
     });
 
     return audio;
@@ -495,9 +488,36 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #endif
 }
 
+- (void)resetAudioSessionToIdle {
+#if TARGET_OS_IPHONE == 1
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSError *error = nil;
+
+    [session setActive:NO
+           withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                 error:&error];
+    if (error) {
+        MKLogWarning(Audio, @"MKAudio: Failed to deactivate session while resetting idle category: %@", error.localizedDescription);
+        error = nil;
+    }
+
+    BOOL success = [session setCategory:AVAudioSessionCategoryAmbient
+                                   mode:AVAudioSessionModeDefault
+                                options:AVAudioSessionCategoryOptionMixWithOthers
+                                  error:&error];
+    if (!success) {
+        MKLogWarning(Audio, @"MKAudio: Failed to reset idle audio session category: %@", error.localizedDescription);
+    } else {
+        MKLogDebug(Audio, @"MKAudio: Reset audio session to idle Ambient/Default");
+    }
+#endif
+}
+
 - (void)updateAudioSessionSettings {
-    // 当设置改变时（例如用户切换了扬声器/听筒偏好），重新应用配置
-    [self setupAudioSession];
+    // 只有音频正在运行时才重新应用录音会话，避免未连接时进入 VoiceChat/通话模式。
+    if (_running) {
+        [self setupAudioSession];
+    }
 }
 
 #pragma mark - Notification Handlers
@@ -515,12 +535,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         // 不再依赖 ShouldResume 标志位。电话挂断后该标志经常不被设置，
         // 导致音频引擎永远无法恢复。只要中断结束且连接仍然活跃，就无条件重启。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self setupAudioSession];
-            NSError *error = nil;
-            [[AVAudioSession sharedInstance] setActive:YES withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:&error];
-            if (error) {
-                MKLogError(Audio, @"MKAudio: Failed to reactivate session after interruption: %@", error);
+            if (![self _audioShouldBeRunning]) {
+                MKLogInfo(Audio, @"MKAudio: Interruption ended but audio should stay idle.");
+                [self resetAudioSessionToIdle];
+                return;
             }
+
             [self restart];
         });
     }
@@ -554,7 +574,6 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     MKLogWarning(Audio, @"MKAudio: Media Services Reset (Audio daemon crashed). Re-initializing.");
     // 彻底重置
     [self stop];
-    [self setupAudioSession];
     if ([self _audioShouldBeRunning]) {
         [self start];
     }
@@ -758,7 +777,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     }
     
 #if TARGET_OS_IPHONE == 1
-    return [[UIApplication sharedApplication] applicationState] == UIApplicationStateActive;
+    return NO;
 #else
     return YES;
 #endif
@@ -827,8 +846,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     }
     
 #if TARGET_OS_IPHONE == 1
-    // ✅ 现代 API 关闭 Session
-    [[AVAudioSession sharedInstance] setActive:NO error:nil];
+    [self resetAudioSessionToIdle];
 #endif
 }
 
@@ -949,6 +967,23 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         [_remoteBusRackBridge2 setSidechainAudioOutput:_audioOutput];
 
         [self rebindRemoteTrackProcessorsToOutputLocked];
+
+        if (![_audioDevice startDevice]) {
+            MKLogError(Audio, @"MKAudio: Failed to start audio device.");
+            [_audioOutput release];
+            _audioOutput = nil;
+            [_audioInput release];
+            _audioInput = nil;
+            [_audioDevice teardownDevice];
+            [_audioDevice release];
+            _audioDevice = nil;
+            [connSnapshot release];
+            NSDictionary *info = @{@"message": @"Failed to start audio device. Check microphone permissions."};
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioErrorNotification object:nil userInfo:info];
+            });
+            return;
+        }
         
         _running = YES;
     }
@@ -1885,108 +1920,6 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     }
     os_unfair_lock_unlock(&_inputMonitorLock);
     return _inputMonitorReadBuffer;
-}
-
-#pragma mark - Weak Network Mode (弱网模式)
-
-- (void) setWeakNetworkModeEnabled:(BOOL)enabled {
-    _weakNetworkModeEnabled = enabled;
-
-    // 更新音频设置
-    MKAudioSettings settings = _audioSettings;
-    settings.enableWeakNetworkMode = enabled;
-
-    if (enabled) {
-        // 应用弱网默认配置
-        if (settings.weakNetworkJitterBufferMs <= 0)
-            settings.weakNetworkJitterBufferMs = 100;
-        if (settings.weakNetworkExpectedLoss <= 0)
-            settings.weakNetworkExpectedLoss = 20;
-        if (settings.weakNetworkMinBitrate <= 0)
-            settings.weakNetworkMinBitrate = 16000;
-        if (settings.weakNetworkMaxBitrate <= 0)
-            settings.weakNetworkMaxBitrate = 64000;
-        settings.weakNetworkAdaptiveBitrate = YES;
-        settings.weakNetworkEnhancedPLC = YES;
-    }
-
-    [self updateAudioSettings:&settings];
-
-    MKLogInfo(Audio, @"Weak Network Mode %@", enabled ? @"enabled" : @"disabled");
-}
-
-- (BOOL) isWeakNetworkModeEnabled {
-    return _weakNetworkModeEnabled;
-}
-
-- (NSDictionary *) copyNetworkQualityMetrics {
-    NSMutableDictionary *metrics = [NSMutableDictionary dictionary];
-
-    // 从连接获取网络指标
-    MKConnection *conn = _connection;
-    if (conn) {
-        double udpPingMean = [conn udpPingMeanMs];
-        double udpPingVariance = [conn udpPingVarianceMs];
-        uint32_t udpPingSamples = [conn udpPingSamples];
-        uint32_t lastGood = [conn lastGood];
-        uint32_t lastLate = [conn lastLate];
-        uint32_t lastLost = [conn lastLost];
-
-        metrics[@"udpPingMeanMs"] = @(udpPingMean);
-        metrics[@"udpPingVarianceMs"] = @(udpPingVariance);
-        metrics[@"udpPingSamples"] = @(udpPingSamples);
-        metrics[@"udpTransportState"] = (int)[conn udpTransportState];
-
-        // 计算丢包率
-        uint32_t totalPackets = lastGood + lastLate + lastLost;
-        if (totalPackets > 0) {
-            double lossRate = (double)(lastLate + lastLost) / (double)totalPackets * 100.0;
-            metrics[@"packetLossPercent"] = @(lossRate);
-        }
-
-        // 计算有效延迟 (mean + stddev)
-        double stddev = sqrt(udpPingVariance);
-        double effectiveLatency = udpPingMean + stddev;
-        metrics[@"effectiveLatencyMs"] = @(effectiveLatency);
-
-        // 网络质量评分 (0-100, 越高越好)
-        double qualityScore = 100.0;
-        if (udpPingSamples >= 5) {
-            if (effectiveLatency > 300) qualityScore -= 40;
-            else if (effectiveLatency > 150) qualityScore -= 20;
-            else if (effectiveLatency > 80) qualityScore -= 10;
-
-            if (totalPackets > 10) {
-                double lossRate = (double)(lastLate + lastLost) / (double)totalPackets;
-                qualityScore -= MIN(40, lossRate * 80);
-            }
-        }
-        metrics[@"qualityScore"] = @(MAX(0, qualityScore));
-    }
-
-    return [metrics copy];
-}
-
-- (NSDictionary *) copyWeakNetworkStatistics {
-    return @{
-        @"weakNetworkModeEnabled": @(_weakNetworkModeEnabled),
-        @"lastBitrate": _weakNetworkLastBitrate ?: @(0),
-        @"lastLatency": _weakNetworkLastLatency ?: @(0),
-        @"lastPacketLoss": _weakNetworkLastPacketLoss ?: @(0),
-    };
-}
-
-- (void) resetWeakNetworkStatistics {
-    _weakNetworkLastBitrate = @(0);
-    _weakNetworkLastLatency = @(0);
-    _weakNetworkLastPacketLoss = @(0);
-    MKLogInfo(Audio, @"Weak network statistics reset");
-}
-
-- (void) updateWeakNetworkStatisticsWithBitrate:(int)bitrate latency:(double)latency packetLoss:(double)packetLoss {
-    _weakNetworkLastBitrate = @(bitrate);
-    _weakNetworkLastLatency = @(latency);
-    _weakNetworkLastPacketLoss = @(packetLoss);
 }
 
 @end

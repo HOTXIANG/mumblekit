@@ -14,6 +14,10 @@
     return NO;
 }
 
+- (BOOL) startDevice {
+    return YES;
+}
+
 - (BOOL) teardownDevice {
     return NO;
 }

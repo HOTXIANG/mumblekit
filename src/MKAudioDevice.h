@@ -10,6 +10,7 @@ typedef BOOL (^MKAudioDeviceInputFunc)(short *frames, unsigned int nsamp);
 @interface MKAudioDevice : NSObject
 - (id) initWithSettings:(MKAudioSettings *)settings;
 - (BOOL) setupDevice;
+- (BOOL) startDevice;
 - (BOOL) teardownDevice;
 
 - (void) setupInput:(MKAudioDeviceInputFunc)inf;

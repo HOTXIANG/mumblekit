@@ -444,7 +444,6 @@ typedef struct {
         _sidechainMasterBus1Valid = YES;
         memcpy(_sidechainMasterBus2, mixBuffer2, bufferBytes);
         _sidechainMasterBus2Valid = YES;
-        MKLogInfo(Audio, @"MKAudioOutput: Captured post-track sidechain buffers for masterBus1/masterBus2/input/sidetone (%u frames, %u channels)", (unsigned)nsamp, (unsigned)_numChannels);
     }
 
     // 合并两个总线到最终输出，并用最终结果决定是否需要 CNG。
@@ -533,8 +532,7 @@ typedef struct {
             [outputUser release];
         }
         BOOL useStereoOutput = _settings.enableStereoOutput && _numChannels > 1;
-        int jitterMs = _settings.enableWeakNetworkMode ? _settings.weakNetworkJitterBufferMs : 0;
-        outputUser = [[MKAudioOutputSpeech alloc] initWithSession:session sampleRate:_mixerFrequency messageType:msgType useStereo:useStereoOutput jitterBufferMs:jitterMs];
+        outputUser = [[MKAudioOutputSpeech alloc] initWithSession:session sampleRate:_mixerFrequency messageType:msgType useStereo:useStereoOutput];
         [_outputLock lock];
         [_outputs setObject:outputUser forKey:sessionKey];
         if (![_remoteSessionOrder containsObject:sessionKey]) {

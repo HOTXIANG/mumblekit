@@ -12,7 +12,6 @@ struct MKAudioOutputSpeechPrivate;
 @interface MKAudioOutputSpeech : MKAudioOutputUser
 
 - (id) initWithSession:(NSUInteger)session sampleRate:(NSUInteger)freq messageType:(MKUDPMessageType)type useStereo:(BOOL)useStereo;
-- (id) initWithSession:(NSUInteger)session sampleRate:(NSUInteger)freq messageType:(MKUDPMessageType)type useStereo:(BOOL)useStereo jitterBufferMs:(int)jitterMs;
 - (void) dealloc;
 
 - (NSUInteger) userSession;

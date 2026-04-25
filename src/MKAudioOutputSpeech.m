@@ -71,10 +71,6 @@
 @implementation MKAudioOutputSpeech
 
 - (id) initWithSession:(NSUInteger)session sampleRate:(NSUInteger)freq messageType:(MKUDPMessageType)type useStereo:(BOOL)useStereo {
-    return [self initWithSession:session sampleRate:freq messageType:type useStereo:useStereo jitterBufferMs:0];
-}
-
-- (id) initWithSession:(NSUInteger)session sampleRate:(NSUInteger)freq messageType:(MKUDPMessageType)type useStereo:(BOOL)useStereo jitterBufferMs:(int)jitterMs {
     if ((self = [super init])) {
         _jitter = NULL;
         _speexDecoder = NULL;
@@ -131,15 +127,7 @@
         _jitterLock = [[NSLock alloc] init];
         _jitter = jitter_buffer_init((int)_frameSize);
 
-        // 弱网模式：使用用户配置的 jitter buffer margin 来缓冲网络抖动
-        // jitterMs <= 0 表示使用 Speex jitter buffer 默认值（自适应）
-        if (jitterMs > 0) {
-            int margin = jitterMs * (int)_frameSize / 10;
-            jitter_buffer_ctl(_jitter, JITTER_BUFFER_SET_MARGIN, &margin);
-            MKLogInfo(Audio, @"AudioOutputSpeech[%lu]: jitter buffer margin=%dms", (unsigned long)session, jitterMs);
-        }
-
-        _lastJitterMarginMs = jitterMs > 0 ? jitterMs : 0;
+        _lastJitterMarginMs = 0;
         _jitterMarginUpdateTime = 0;
 
         _fadeIn = malloc(sizeof(float) * _frameSize);
@@ -563,7 +551,7 @@ nextframe:
 }
 
 - (int) calculateTargetJitterMargin {
-    // 基础 margin: 100ms 适用于一般弱网
+    // Base margin for normal network jitter.
     int baseMarginMs = 100;
 
     // 根据连续丢包数增加 margin
