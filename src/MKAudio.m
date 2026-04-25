@@ -1121,17 +1121,17 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (float) speechProbablity {
     __block float result;
-    dispatch_sync(_accessQueue, ^{
+    @synchronized(self) {
         result = [_audioInput speechProbability];
-    });
+    }
     return result;
 }
 
 - (float) peakCleanMic {
     __block float result;
-    dispatch_sync(_accessQueue, ^{
+    @synchronized(self) {
         result = [_audioInput peakCleanMic];
-    });
+    }
     return result;
 }
 
