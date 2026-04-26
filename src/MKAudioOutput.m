@@ -233,7 +233,7 @@ typedef struct {
     _sidechainSidetoneFrameCount = 0;
     _sidechainSidetoneChannels = 0;
 
-    // Update post-input-track and post-sidetone-track sidechain snapshots from ping-pong buffers.
+    // Update input and sidetone sidechain snapshots from ping-pong buffers.
     {
         MKAudio *audio = [MKAudio sharedAudio];
         if (audio != nil) {
@@ -339,22 +339,32 @@ typedef struct {
         float *userBuffer = [ou buffer];
         NSUInteger sourceChannels = MAX((NSUInteger)1, [ou outputChannels]);
 
-        if (trackProcessor != NULL) {
-            trackProcessor(userBuffer, (NSUInteger)nsamp, sourceChannels, (NSUInteger)_mixerFrequency, trackContext);
-        }
-
-        // Sidechain: capture post-track per-user audio so multiple destinations can reuse it.
+        // Sidechain: capture the decoded per-user signal before this track's AU chain.
         if (nsamp <= MK_SIDECHAIN_MAX_FRAMES) {
             for (int si = 0; si < MK_SIDECHAIN_MAX_SESSIONS; si++) {
                 if (!_sidechainUserSlots[si].valid) {
+                    NSUInteger captureChannels = MIN(sourceChannels, (NSUInteger)2);
                     _sidechainUserSlots[si].session = sessionID;
                     _sidechainUserSlots[si].frameCount = nsamp;
-                    _sidechainUserSlots[si].channels = sourceChannels;
+                    _sidechainUserSlots[si].channels = captureChannels;
                     _sidechainUserSlots[si].valid = YES;
-                    memcpy(_sidechainUserSlots[si].buffer, userBuffer, sizeof(float) * nsamp * sourceChannels);
+                    if (captureChannels == sourceChannels) {
+                        memcpy(_sidechainUserSlots[si].buffer, userBuffer, sizeof(float) * nsamp * captureChannels);
+                    } else {
+                        for (NSUInteger frame = 0; frame < nsamp; frame++) {
+                            for (NSUInteger channel = 0; channel < captureChannels; channel++) {
+                                _sidechainUserSlots[si].buffer[(frame * captureChannels) + channel] =
+                                    userBuffer[(frame * sourceChannels) + channel];
+                            }
+                        }
+                    }
                     break;
                 }
             }
+        }
+
+        if (trackProcessor != NULL) {
+            trackProcessor(userBuffer, (NSUInteger)nsamp, sourceChannels, (NSUInteger)_mixerFrequency, trackContext);
         }
 
         BOOL usesTrackSendRouting = [[_sessionUsesTrackSendRouting objectForKey:sessionKey] boolValue];
@@ -430,20 +440,20 @@ typedef struct {
         }
     }
 
+    // Sidechain: capture pre-bus-plugin master mixes so bus AUs can use them in the same render pass.
+    if (nsamp <= MK_SIDECHAIN_MAX_FRAMES) {
+        memcpy(_sidechainMasterBus1, mixBuffer1, bufferBytes);
+        _sidechainMasterBus1Valid = YES;
+        memcpy(_sidechainMasterBus2, mixBuffer2, bufferBytes);
+        _sidechainMasterBus2Valid = YES;
+    }
+
     // 允许总线在没有远端用户时也渲染，这样轨道 send 可以直接进 master 轨。
     if (_remoteBusProcessor != NULL) {
         _remoteBusProcessor(mixBuffer1, (NSUInteger)nsamp, (NSUInteger)_numChannels, (NSUInteger)_mixerFrequency, _remoteBusProcessorContext);
     }
     if (_remoteBus2Processor != NULL) {
         _remoteBus2Processor(mixBuffer2, (NSUInteger)nsamp, (NSUInteger)_numChannels, (NSUInteger)_mixerFrequency, _remoteBus2ProcessorContext);
-    }
-
-    // Sidechain: capture post-track/post-bus signals after their plugins have run.
-    if (nsamp <= MK_SIDECHAIN_MAX_FRAMES) {
-        memcpy(_sidechainMasterBus1, mixBuffer1, bufferBytes);
-        _sidechainMasterBus1Valid = YES;
-        memcpy(_sidechainMasterBus2, mixBuffer2, bufferBytes);
-        _sidechainMasterBus2Valid = YES;
     }
 
     // 合并两个总线到最终输出，并用最终结果决定是否需要 CNG。

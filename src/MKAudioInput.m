@@ -443,11 +443,17 @@
     _preprocAvgItems = 0;
     _preprocRunningAvg = 0;
 
-    if (_preprocessorState)
+    if (_preprocessorState) {
         speex_preprocess_state_destroy(_preprocessorState);
+        _preprocessorState = NULL;
+    }
 
     _preprocessorState = speex_preprocess_state_init(frameSize, sampleRate);
     SpeexPreprocessState *state = _preprocessorState;
+    if (state == NULL) {
+        MKLogError(Audio, @"MKAudioInput: failed to initialize Speex preprocessor.");
+        return;
+    }
 
     iArg = 1;
     speex_preprocess_ctl(state, SPEEX_PREPROCESS_SET_VAD, &iArg);
@@ -561,6 +567,12 @@
         doResetPreprocessor = NO;
     }
 
+    SpeexPreprocessState *preprocessorState = _preprocessorState;
+    if (preprocessorState == NULL) {
+        MKLogWarning(Audio, @"MKAudioInput: skipping frame because Speex preprocessor is unavailable.");
+        return;
+    }
+
     int isSpeech = 0;
     BOOL resampled = micFrequency != sampleRate;
     short *frame = resampled ? psOut : psMic;
@@ -574,9 +586,9 @@
                 int mixed = ((int)frame[i * encodeChannels] + (int)frame[i * encodeChannels + 1]) / 2;
                 monoFrame[i] = (short)mixed;
             }
-            isSpeech = speex_preprocess_run(_preprocessorState, monoFrame);
+            isSpeech = speex_preprocess_run(preprocessorState, monoFrame);
         } else {
-            isSpeech = speex_preprocess_run(_preprocessorState, frame);
+            isSpeech = speex_preprocess_run(preprocessorState, frame);
         }
     } else {
         int i;
@@ -603,20 +615,18 @@
         }
     }
 
-    // Publish post-input-track signal for sidechain sends.
+    // Publish the input signal before the input-track AU chain, matching DAW sidechain semantics.
     {
         MKAudio *audio = [MKAudio sharedAudio];
         if (audio != nil) {
             float scBuf[MK_SIDECHAIN_MAX_FRAMES * 2];
             NSUInteger scCount = MIN((NSUInteger)frameSize, (NSUInteger)MK_SIDECHAIN_MAX_FRAMES);
-            if (_inputTrackProcessor != NULL) {
-                _inputTrackProcessor(frame, (NSUInteger)frameSize, (NSUInteger)encodeChannels, (NSUInteger)sampleRate, _inputTrackProcessorContext);
-            }
             for (NSUInteger si = 0; si < scCount * encodeChannels; si++) {
                 scBuf[si] = (float)frame[si] / 32768.0f;
             }
             [audio writeSidechainInputSamples:scBuf frameCount:scCount channels:encodeChannels];
-        } else if (_inputTrackProcessor != NULL) {
+        }
+        if (_inputTrackProcessor != NULL) {
             _inputTrackProcessor(frame, (NSUInteger)frameSize, (NSUInteger)encodeChannels, (NSUInteger)sampleRate, _inputTrackProcessorContext);
         }
     }
@@ -636,11 +646,11 @@
         peakSignal = -96.0f;
     
     spx_int32_t prob = 0;
-    speex_preprocess_ctl(_preprocessorState, SPEEX_PREPROCESS_GET_PROB, &prob);
+    speex_preprocess_ctl(preprocessorState, SPEEX_PREPROCESS_GET_PROB, &prob);
     _speechProbability = prob / 100.0f;
     
     int arg;
-    speex_preprocess_ctl(_preprocessorState, SPEEX_PREPROCESS_GET_AGC_GAIN, &arg);
+    speex_preprocess_ctl(preprocessorState, SPEEX_PREPROCESS_GET_AGC_GAIN, &arg);
     _peakCleanMic = peakSignal - (float)arg;
     if (-96.0f > _peakCleanMic) {
         _peakCleanMic = -96.0f;

@@ -61,7 +61,7 @@ typedef void (*MKAudioOutputFloatProcessCallback)(float *samples, NSUInteger fra
 /// DSP Observability - Query per-track DSP status and I/O levels
 - (NSDictionary *) copyDSPStatusForSession:(NSUInteger)session;
 
-/// Sidechain buffer pool - retrieve post-track snapshots by source key
+/// Sidechain buffer pool - retrieve pre-plugin/pre-bus snapshots by source key
 /// Keys: @"session:NNN" (per-user), @"masterBus1", @"masterBus2", @"sidetone", @"input"
 - (const float *) sidechainBufferForSourceKey:(NSString *)key
                                    frameCount:(NSUInteger *)outFrameCount

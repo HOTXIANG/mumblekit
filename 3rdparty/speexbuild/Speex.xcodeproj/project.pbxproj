@@ -431,6 +431,9 @@
 		28498F2A138AB6DB000509DD /* BetaDist */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
+				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
+				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			};
 			name = BetaDist;
@@ -457,6 +460,9 @@
 		28A2AED31478AA3200F3B83F /* AppStore */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
+				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
+				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			};
 			name = AppStore;
@@ -493,6 +499,9 @@
 		28D1DAF3132AEB1500456ED6 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
+				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
+				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			};
 			name = Debug;
@@ -500,6 +509,9 @@
 		28D1DAF4132AEB1500456ED6 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
+				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
+				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			};
 			name = Release;

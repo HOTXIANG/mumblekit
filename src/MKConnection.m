@@ -635,7 +635,6 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     _udpAvailable = NO;
     _udpConsecutiveSendFailures = 0;
     _lastUdpReceiveUsec = [self _currentTimeStamp];
-    _lastUdpProbeUsec = 0;
     struct sockaddr_storage sa;
 
     socklen_t sl = sizeof(sa);
@@ -673,7 +672,6 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     _udpAvailable = NO;
     _udpConsecutiveSendFailures = 0;
     _lastUdpReceiveUsec = 0;
-    _lastUdpProbeUsec = 0;
     if (_udpSock) {
         CFSocketInvalidate(_udpSock);
         CFRelease(_udpSock);
@@ -890,7 +888,11 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 
     _lastUdpRebuildAttemptUsec = now;
-    [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateRecovering];
+    BOOL shouldSurfaceRecovery = (_udpTransportState == MKUDPTransportStateAvailable ||
+                                  _udpTransportState == MKUDPTransportStateStalled);
+    if (shouldSurfaceRecovery) {
+        [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateRecovering];
+    }
     MKLogWarning(Connection, @"MKConnection: Rebuilding UDP socket after %lu consecutive failures.",
           (unsigned long)_udpConsecutiveSendFailures);
     [self _teardownUdpSock];

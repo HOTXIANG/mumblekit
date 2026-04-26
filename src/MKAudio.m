@@ -129,6 +129,7 @@ typedef struct _MKAudioPreviewGainProcessorState {
 - (void)rebindRemoteTrackProcessorsToOutputLocked;
 - (NSUInteger)currentOutputProcessingSampleRateLocked;
 - (MKAudioRemoteTrackRackBridge *)remoteTrackRackBridgeForSessionLocked:(NSUInteger)session createIfNeeded:(BOOL)create;
+- (void)teardownAudioDeviceGraphLocked;
 @end
 
 #if TARGET_OS_OSX == 1
@@ -787,6 +788,35 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     return _running;
 }
 
+- (void)teardownAudioDeviceGraphLocked {
+    if (_audioDevice != nil) {
+        [_audioDevice teardownDevice];
+    }
+
+    [_audioDevice setupInput:NULL];
+    [_audioDevice setupOutput:NULL];
+
+    [_inputTrackRackBridge setSidechainAudioOutput:nil];
+    [_sidetoneRackBridge setSidechainAudioOutput:nil];
+    [_remoteBusRackBridge setSidechainAudioOutput:nil];
+    [_remoteBusRackBridge2 setSidechainAudioOutput:nil];
+    for (NSNumber *sessionKey in _remoteTrackRackBridges) {
+        MKAudioRemoteTrackRackBridge *bridge = [_remoteTrackRackBridges objectForKey:sessionKey];
+        [bridge setSidechainAudioOutput:nil];
+    }
+
+    [_audioInput clearInputTrackProcessor];
+    [_audioInput clearSidetoneTrackProcessor];
+    [_audioInput release];
+    _audioInput = nil;
+    [_audioOutput release];
+    _audioOutput = nil;
+    [_audioDevice release];
+    _audioDevice = nil;
+    [_sidetoneOutput release];
+    _sidetoneOutput = nil;
+}
+
 - (void) stop {
     dispatch_sync(_accessQueue, ^{
         for (NSValue *value in [_remoteTrackPreviewStates allValues]) {
@@ -802,27 +832,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #if TARGET_OS_OSX == 1
         _lastDeviceWasVPIO = [_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
 #endif
-        // Clear sidechain references before tearing down audio output
-        [_inputTrackRackBridge setSidechainAudioOutput:nil];
-        [_sidetoneRackBridge setSidechainAudioOutput:nil];
-        [_remoteBusRackBridge setSidechainAudioOutput:nil];
-        [_remoteBusRackBridge2 setSidechainAudioOutput:nil];
-        for (NSNumber *sessionKey in _remoteTrackRackBridges) {
-            MKAudioRemoteTrackRackBridge *bridge = [_remoteTrackRackBridges objectForKey:sessionKey];
-            [bridge setSidechainAudioOutput:nil];
-        }
-
-        [_audioDevice setupInput:NULL];
-        [_audioDevice setupOutput:NULL];
-        [_audioInput release];
-        _audioInput = nil;
-        [_audioOutput release];
-        _audioOutput = nil;
-        [_audioDevice teardownDevice];
-        [_audioDevice release];
-        _audioDevice = nil;
-        [_sidetoneOutput release];
-        _sidetoneOutput = nil;
+        [self teardownAudioDeviceGraphLocked];
         os_unfair_lock_lock(&_sidechainInputLock);
         _sidechainInputReadPos = 0;
         _sidechainInputWritePos = 0;
@@ -883,15 +893,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #if TARGET_OS_OSX == 1
             _lastDeviceWasVPIO = [_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
 #endif
-            [_audioDevice setupInput:NULL];
-            [_audioDevice setupOutput:NULL];
-            [_audioInput release];
-            _audioInput = nil;
-            [_audioOutput release];
-            _audioOutput = nil;
-            [_audioDevice teardownDevice];
-            [_audioDevice release];
-            _audioDevice = nil;
+            [self teardownAudioDeviceGraphLocked];
         }
 
 #if TARGET_OS_IPHONE == 1
@@ -978,15 +980,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
         if (![_audioDevice startDevice]) {
             MKLogError(Audio, @"MKAudio: Failed to start audio device.");
-            [_audioDevice setupInput:NULL];
-            [_audioDevice setupOutput:NULL];
-            [_audioOutput release];
-            _audioOutput = nil;
-            [_audioInput release];
-            _audioInput = nil;
-            [_audioDevice teardownDevice];
-            [_audioDevice release];
-            _audioDevice = nil;
+            [self teardownAudioDeviceGraphLocked];
             [connSnapshot release];
             NSDictionary *info = @{@"message": @"Failed to start audio device. Check microphone permissions."};
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -1010,13 +1004,17 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
                        dispatch_get_main_queue(), ^{
             [self start];
-            [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
+            });
         });
         return;
     }
 #endif
     [self start];
-    [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
+    });
 }
 
 #pragma mark - Properties & Accessors

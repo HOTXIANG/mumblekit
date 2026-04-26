@@ -7,11 +7,12 @@ import AudioToolbox
 final class MKAudioRemoteBusRack: NSObject {
     // Sidechain provider callback type
     public typealias SidechainProvider = (_ key: String) -> (UnsafePointer<Float>, Int, Int)?
+    typealias ObjCSidechainProvider = @convention(block) (NSString) -> NSDictionary?
 
     private final class StageHost {
         let audioUnit: AVAudioUnit
         let auAudioUnit: AUAudioUnit
-        let wetDryMix: Float
+        private var wetDryMix: Float
         let renderLock = NSLock()
         private var isShutdown = false
 
@@ -239,15 +240,21 @@ final class MKAudioRemoteBusRack: NSObject {
             return "in=\(configuredInputFormat.channelCount)ch@\(Int(configuredInputFormat.sampleRate))/\(inLayout) out=\(configuredOutputFormat.channelCount)ch@\(Int(configuredOutputFormat.sampleRate))/\(outLayout) host=\(hostMode) max=\(maximumFramesToRender)\(scInfo)"
         }
 
+        func matches(audioUnit: AVAudioUnit) -> Bool {
+            self.audioUnit === audioUnit
+        }
+
+        func updateConfiguration(wetDryMix: Float, sidechainSourceKey key: String?) {
+            renderLock.lock()
+            self.wetDryMix = min(max(wetDryMix, 0.0), 1.0)
+            sidechainSourceKey = key.flatMap { $0.isEmpty ? nil : $0 }
+            renderLock.unlock()
+        }
+
         private func configureHost() throws {
             let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
 
             try configureSidechainBusIfNeeded(componentName: componentName)
-
-            if sidechainBuffer != nil {
-                try configureDirectRenderHost(componentName: componentName)
-                return
-            }
             try configureEngineGraph(componentName: componentName)
         }
 
@@ -311,10 +318,11 @@ final class MKAudioRemoteBusRack: NSObject {
         }
 
         private func configureSidechainBusIfNeeded(componentName: String) throws {
-            guard let scKey = sidechainSourceKey, !scKey.isEmpty, auAudioUnit.inputBusses.count > 1 else {
+            guard auAudioUnit.inputBusses.count > 1 else {
                 return
             }
 
+            let scKey = sidechainSourceKey ?? "none"
             let scBus = auAudioUnit.inputBusses[1]
 
             // Enable the sidechain bus — many AUs have bus 1 disabled by default.
@@ -694,6 +702,20 @@ final class MKAudioRemoteBusRack: NSObject {
             }
         }
 
+        func matches(audioUnit: AVAudioUnit) -> Bool {
+            switch self {
+            case .audioUnit(let host):
+                return host.matches(audioUnit: audioUnit)
+            }
+        }
+
+        func updateConfiguration(wetDryMix: Float, sidechainSourceKey key: String?) {
+            switch self {
+            case .audioUnit(let host):
+                host.updateConfiguration(wetDryMix: wetDryMix, sidechainSourceKey: key)
+            }
+        }
+
         func shutdown() {
             switch self {
             case .audioUnit(let host):
@@ -733,8 +755,28 @@ final class MKAudioRemoteBusRack: NSObject {
         }
     }
 
-    func setSidechainProvider(_ provider: Any?) {
-        guard let block = provider as? (String) -> NSDictionary? else {
+    private func updateExistingHostsIfReusable(_ configurations: [StageConfiguration]) -> Bool {
+        guard configurations.count == stageHosts.count else { return false }
+        for (index, configuration) in configurations.enumerated() {
+            switch configuration.processor {
+            case .audioUnit(let audioUnit):
+                guard stageHosts[index].matches(audioUnit: audioUnit) else {
+                    return false
+                }
+            }
+        }
+        stageConfigurations = configurations
+        for (index, configuration) in configurations.enumerated() {
+            stageHosts[index].updateConfiguration(
+                wetDryMix: configuration.wetDryMix,
+                sidechainSourceKey: configuration.sidechainSourceKey
+            )
+        }
+        return true
+    }
+
+    func setSidechainProvider(_ provider: ObjCSidechainProvider?) {
+        guard let block = provider else {
             stateLock.lock()
             sidechainProvider = nil
             let rebuildConfigurations = stageConfigurations
@@ -754,7 +796,7 @@ final class MKAudioRemoteBusRack: NSObject {
             return
         }
         let translatedProvider: SidechainProvider = { key in
-            guard let dict = block(key),
+            guard let dict = block(key as NSString),
                   let ptrValue = dict["ptr"] as? NSValue,
                   let frames = dict["frames"] as? Int,
                   let channels = dict["channels"] as? Int else {
@@ -799,8 +841,14 @@ final class MKAudioRemoteBusRack: NSObject {
     func updateAudioUnitChain(_ stages: NSArray?, sampleRate: UInt) {
         let normalized = normalizeStages(stages)
         stateLock.lock()
+        let targetSampleRate = sampleRate > 0 ? Double(sampleRate) : configuredSampleRate
+        if abs(configuredSampleRate - targetSampleRate) <= 0.5,
+           updateExistingHostsIfReusable(normalized) {
+            stateLock.unlock()
+            return
+        }
         stageConfigurations = normalized
-        configuredSampleRate = sampleRate > 0 ? Double(sampleRate) : configuredSampleRate
+        configuredSampleRate = targetSampleRate
         let rebuildSampleRate = configuredSampleRate
         let rebuildBufferFrames = hostBufferFrames
         let oldHosts = stageHosts

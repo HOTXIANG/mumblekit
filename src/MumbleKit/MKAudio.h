@@ -311,7 +311,7 @@ typedef struct _MKAudioSettings {
 - (NSDictionary *)copyDSPStatus:(NSUInteger)session;
 
 /// Input track sidechain ping-pong buffer API
-/// Called by MKAudioInput on input thread to write post-input-track signal for sidechain use.
+/// Called by MKAudioInput on input thread to write the pre-input-track-AU signal for sidechain use.
 - (void) writeSidechainInputSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels;
 
 /// Called by MKAudioOutput on output thread to dequeue up to one render-aligned block
@@ -321,7 +321,7 @@ typedef struct _MKAudioSettings {
                                                    channels:(NSUInteger *)outChannels;
 
 /// Sidetone track sidechain ping-pong buffer API
-/// Called by MKAudioInput on input thread to write post-sidetone-track signal for sidechain use.
+/// Called by MKAudioInput on input thread to write the sidetone-track signal for sidechain use.
 - (void) writeSidetoneSidechainSamples:(const float *)samples frameCount:(NSUInteger)frameCount channels:(NSUInteger)channels;
 
 /// Called by MKAudioOutput on output thread to dequeue up to one render-aligned block

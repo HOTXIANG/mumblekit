@@ -535,7 +535,7 @@ nextframe:
     int targetMarginMs = [self calculateTargetJitterMargin];
 
     // 如果变化超过 20ms 才更新，避免频繁调整
-    if (abs(targetMarginMs - _lastJitterMarginMs) >= 20) {
+    if (labs((long)targetMarginMs - (long)_lastJitterMarginMs) >= 20) {
         [_jitterLock lock];
         int marginFrames = targetMarginMs / 10;  // 假设每帧 10ms
         marginFrames = MAX(3, MIN(50, marginFrames));  // 限制 30ms-500ms
