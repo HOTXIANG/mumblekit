@@ -234,6 +234,16 @@
         jbp.span = (spx_uint32_t)samples;
         jbp.timestamp = (spx_uint32_t)_frameSize * (spx_uint32_t)seq;
 
+        if (!_lastAlive) {
+            _lastAlive = YES;
+            _missCount = 0;
+            _consecutiveMissCount = 0;
+            _flags = 0;
+            jitter_buffer_reset(_jitter);
+            MKLogDebug(Audio, @"MKAudioOutputSpeech: Reactivated session %lu after new voice packet.",
+                       (unsigned long)_userSession);
+        }
+
         jitter_buffer_put(_jitter, &jbp);
     }
 

@@ -1249,6 +1249,26 @@
 #pragma mark Mute/deafen operations
 
 - (void) setSelfMuted:(BOOL)selfMuted andSelfDeafened:(BOOL)selfDeafened {
+    if (_connectedUser) {
+        BOOL previousMuted = [_connectedUser isSelfMuted];
+        BOOL previousDeafened = [_connectedUser isSelfDeafened];
+
+        [_connectedUser setSelfMuted:selfMuted];
+        [_connectedUser setSelfDeafened:selfDeafened];
+        [[MKAudio sharedAudio] setSelfMuted:[_connectedUser isSelfMuted]];
+
+        if (previousMuted != [_connectedUser isSelfMuted] || previousDeafened != [_connectedUser isSelfDeafened]) {
+            if ([_connectedUser isSelfMuted] && [_connectedUser isSelfDeafened]) {
+                [_delegate serverModel:self userSelfMutedAndDeafened:_connectedUser];
+            } else if ([_connectedUser isSelfMuted]) {
+                [_delegate serverModel:self userSelfMuted:_connectedUser];
+            } else {
+                [_delegate serverModel:self userRemovedSelfMute:_connectedUser];
+            }
+            [_delegate serverModel:self userSelfMuteDeafenStateChanged:_connectedUser];
+        }
+    }
+
     MPUserState_Builder *mpus = [MPUserState builder];
     [mpus setSelfMute:selfMuted];
     [mpus setSelfDeaf:selfDeafened];

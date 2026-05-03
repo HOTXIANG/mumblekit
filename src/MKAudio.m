@@ -81,6 +81,9 @@ typedef struct _MKAudioPreviewGainProcessorState {
     CFAbsoluteTime           _lastDefaultOutputSwitchTime;
     BOOL                     _isRestartingForDeviceChange;
     BOOL                     _lastDeviceWasVPIO;
+#elif TARGET_OS_IPHONE == 1
+    BOOL                     _isRestartingForRouteChange;
+    CFAbsoluteTime           _lastRouteChangeRestartTime;
 #endif
     
     // P0 修复：使用串行队列替代 @synchronized，提升性能
@@ -130,6 +133,8 @@ typedef struct _MKAudioPreviewGainProcessorState {
 - (NSUInteger)currentOutputProcessingSampleRateLocked;
 - (MKAudioRemoteTrackRackBridge *)remoteTrackRackBridgeForSessionLocked:(NSUInteger)session createIfNeeded:(BOOL)create;
 - (void)teardownAudioDeviceGraphLocked;
+- (void)configureIdleAudioSessionCategory;
+- (void)stopNotifyingOthers:(BOOL)notifyOthers;
 @end
 
 #if TARGET_OS_OSX == 1
@@ -372,6 +377,8 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         _inputMonitorPPSampleRate = 0;
 
 #if TARGET_OS_IOS
+        [self configureIdleAudioSessionCategory];
+
         // 注册通知监听 (替代旧的 C 回调)
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(handleInterruption:)
@@ -489,29 +496,44 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #endif
 }
 
-- (void)resetAudioSessionToIdle {
+- (void)configureIdleAudioSessionCategory {
+#if TARGET_OS_IPHONE == 1
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSError *error = nil;
+    BOOL success = [session setCategory:AVAudioSessionCategoryAmbient
+                                   mode:AVAudioSessionModeDefault
+                                options:AVAudioSessionCategoryOptionMixWithOthers
+                                  error:&error];
+    if (!success) {
+        MKLogWarning(Audio, @"MKAudio: Failed to configure idle Ambient/MixWithOthers session category: %@", error.localizedDescription);
+    }
+#endif
+}
+
+- (void)resetAudioSessionToIdleNotifyingOthers:(BOOL)notifyOthers {
 #if TARGET_OS_IPHONE == 1
     AVAudioSession *session = [AVAudioSession sharedInstance];
     NSError *error = nil;
 
+    AVAudioSessionSetActiveOptions activeOptions = 0;
+    if (notifyOthers) {
+        activeOptions = AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation;
+    }
     [session setActive:NO
-           withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+           withOptions:activeOptions
                  error:&error];
     if (error) {
         MKLogWarning(Audio, @"MKAudio: Failed to deactivate session while resetting idle category: %@", error.localizedDescription);
         error = nil;
     }
 
-    BOOL success = [session setCategory:AVAudioSessionCategoryAmbient
-                                   mode:AVAudioSessionModeDefault
-                                options:AVAudioSessionCategoryOptionMixWithOthers
-                                  error:&error];
-    if (!success) {
-        MKLogWarning(Audio, @"MKAudio: Failed to reset idle audio session category: %@", error.localizedDescription);
-    } else {
-        MKLogDebug(Audio, @"MKAudio: Reset audio session to idle Ambient/Default");
-    }
+    [self configureIdleAudioSessionCategory];
+    MKLogDebug(Audio, @"MKAudio: Reset audio session to idle Ambient/Default");
 #endif
+}
+
+- (void)resetAudioSessionToIdle {
+    [self resetAudioSessionToIdleNotifyingOthers:YES];
 }
 
 - (void)updateAudioSessionSettings {
@@ -562,8 +584,28 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         case AVAudioSessionRouteChangeReasonOldDeviceUnavailable: // 拔出耳机
             // 只有音频引擎已经在运行时才重启，避免在未连接服务器时激活麦克风
             if (_running) {
+                if (![self _audioShouldBeRunning]) {
+                    MKLogInfo(Audio, @"MKAudio: Route changed while audio should be idle. Stopping instead of restarting.");
+                    [self stop];
+                    break;
+                }
+
+                CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+                if (_isRestartingForRouteChange || (now - _lastRouteChangeRestartTime) < 1.0) {
+                    MKLogDebug(Audio, @"MKAudio: Route-change restart suppressed by throttle.");
+                    break;
+                }
+
+                _isRestartingForRouteChange = YES;
+                _lastRouteChangeRestartTime = now;
                 MKLogInfo(Audio, @"MKAudio: Restarting audio due to device change.");
-                [self restart];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(350 * NSEC_PER_MSEC)),
+                               dispatch_get_main_queue(), ^{
+                    if (self->_running && [self _audioShouldBeRunning]) {
+                        [self restart];
+                    }
+                    self->_isRestartingForRouteChange = NO;
+                });
             }
             break;
         default:
@@ -818,6 +860,10 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 }
 
 - (void) stop {
+    [self stopNotifyingOthers:YES];
+}
+
+- (void) stopNotifyingOthers:(BOOL)notifyOthers {
     dispatch_sync(_accessQueue, ^{
         for (NSValue *value in [_remoteTrackPreviewStates allValues]) {
             MKAudioPreviewGainProcessorState *state = (MKAudioPreviewGainProcessorState *)[value pointerValue];
@@ -858,7 +904,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     }
     
 #if TARGET_OS_IPHONE == 1
-    [self resetAudioSessionToIdle];
+    [self resetAudioSessionToIdleNotifyingOthers:notifyOthers];
 #endif
 }
 
@@ -996,7 +1042,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 }
 
 - (void) restart {
-    [self stop];
+    [self stopNotifyingOthers:NO];
 #if TARGET_OS_OSX == 1
     if (_lastDeviceWasVPIO) {
         _lastDeviceWasVPIO = NO;

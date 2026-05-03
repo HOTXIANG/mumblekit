@@ -251,6 +251,12 @@ final class MKAudioRemoteBusRack: NSObject {
             renderLock.unlock()
         }
 
+        func updateSidechainProvider(_ provider: SidechainProvider?) {
+            renderLock.lock()
+            sidechainProvider = provider
+            renderLock.unlock()
+        }
+
         private func configureHost() throws {
             let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
 
@@ -716,6 +722,13 @@ final class MKAudioRemoteBusRack: NSObject {
             }
         }
 
+        func updateSidechainProvider(_ provider: SidechainProvider?) {
+            switch self {
+            case .audioUnit(let host):
+                host.updateSidechainProvider(provider)
+            }
+        }
+
         func shutdown() {
             switch self {
             case .audioUnit(let host):
@@ -776,52 +789,30 @@ final class MKAudioRemoteBusRack: NSObject {
     }
 
     func setSidechainProvider(_ provider: ObjCSidechainProvider?) {
-        guard let block = provider else {
-            stateLock.lock()
-            sidechainProvider = nil
-            let rebuildConfigurations = stageConfigurations
-            let rebuildSampleRate = configuredSampleRate
-            let rebuildBufferFrames = hostBufferFrames
-            let oldHosts = stageHosts
-            stageHosts = []
-            stateLock.unlock()
-
-            shutdownStageHosts(oldHosts)
-            let newHosts = buildStageHosts(from: rebuildConfigurations,
-                                           sampleRate: rebuildSampleRate,
-                                           hostBufferFrames: rebuildBufferFrames)
-            stateLock.lock()
-            stageHosts = newHosts
-            stateLock.unlock()
-            return
-        }
-        let translatedProvider: SidechainProvider = { key in
-            guard let dict = block(key as NSString),
-                  let ptrValue = dict["ptr"] as? NSValue,
-                  let frames = dict["frames"] as? Int,
-                  let channels = dict["channels"] as? Int else {
-                return nil
+        let translatedProvider: SidechainProvider?
+        if let block = provider {
+            translatedProvider = { key in
+                guard let dict = block(key as NSString),
+                      let ptrValue = dict["ptr"] as? NSValue,
+                      let frames = dict["frames"] as? Int,
+                      let channels = dict["channels"] as? Int else {
+                    return nil
+                }
+                let ptr = ptrValue.pointerValue!.assumingMemoryBound(to: Float.self)
+                return (UnsafePointer(ptr), frames, channels)
             }
-            let ptr = ptrValue.pointerValue!.assumingMemoryBound(to: Float.self)
-            return (UnsafePointer(ptr), frames, channels)
+        } else {
+            translatedProvider = nil
         }
 
         stateLock.lock()
         sidechainProvider = translatedProvider
-        let rebuildConfigurations = stageConfigurations
-        let rebuildSampleRate = configuredSampleRate
-        let rebuildBufferFrames = hostBufferFrames
-        let oldHosts = stageHosts
-        stageHosts = []
+        let hosts = stageHosts
         stateLock.unlock()
 
-        shutdownStageHosts(oldHosts)
-        let newHosts = buildStageHosts(from: rebuildConfigurations,
-                                       sampleRate: rebuildSampleRate,
-                                       hostBufferFrames: rebuildBufferFrames)
-        stateLock.lock()
-        stageHosts = newHosts
-        stateLock.unlock()
+        for host in hosts {
+            host.updateSidechainProvider(translatedProvider)
+        }
     }
 
     func setPreviewGain(_ gain: Float, enabled: Bool) {
