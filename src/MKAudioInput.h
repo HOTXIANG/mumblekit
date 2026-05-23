@@ -14,6 +14,7 @@ typedef void (*MKAudioInputInt16ProcessCallback)(short *samples, NSUInteger fram
 - (void) dealloc;
 
 - (void) setMainConnectionForAudio:(MKConnection *)conn;
+- (void) refreshRoutingWithSettings:(MKAudioSettings *)settings;
 
 - (void) initializeMixer;
 

@@ -81,6 +81,7 @@ typedef struct _MKAudioPreviewGainProcessorState {
     CFAbsoluteTime           _lastDefaultOutputSwitchTime;
     BOOL                     _isRestartingForDeviceChange;
     BOOL                     _lastDeviceWasVPIO;
+    NSUInteger               _macRestartGeneration;
 #elif TARGET_OS_IPHONE == 1
     BOOL                     _isRestartingForRouteChange;
     CFAbsoluteTime           _lastRouteChangeRestartTime;
@@ -1044,23 +1045,50 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 - (void) restart {
     [self stopNotifyingOthers:NO];
 #if TARGET_OS_OSX == 1
-    if (_lastDeviceWasVPIO) {
-        _lastDeviceWasVPIO = NO;
+    BOOL lastDeviceWasVPIO = _lastDeviceWasVPIO;
+    _lastDeviceWasVPIO = NO;
+    NSUInteger restartGeneration = ++_macRestartGeneration;
+    uint64_t restartDelayMs = lastDeviceWasVPIO ? 700 : 650;
+    if (lastDeviceWasVPIO) {
         MKLogInfo(Audio, @"MKAudio: VPIO teardown detected, delaying start for pipeline release...");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
-                       dispatch_get_main_queue(), ^{
-            [self start];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
-            });
-        });
-        return;
+    } else {
+        MKLogInfo(Audio, @"MKAudio: macOS audio restart delayed %llu ms for HAL IOProc release.", restartDelayMs);
     }
-#endif
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(restartDelayMs * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+        if (restartGeneration != self->_macRestartGeneration) {
+            MKLogDebug(Audio, @"MKAudio: Skipping stale macOS audio restart.");
+            return;
+        }
+        [self start];
+        if ([self isRunning]) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
+            return;
+        }
+
+        MKLogWarning(Audio, @"MKAudio: macOS audio restart did not start. Retrying once after HAL backoff.");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(900 * NSEC_PER_MSEC)),
+                       dispatch_get_main_queue(), ^{
+            if (restartGeneration != self->_macRestartGeneration) {
+                MKLogDebug(Audio, @"MKAudio: Skipping stale macOS audio restart retry.");
+                return;
+            }
+            [self start];
+            if ([self isRunning]) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
+            } else {
+                MKLogError(Audio, @"MKAudio: macOS audio restart retry failed.");
+            }
+        });
+    });
+    return;
+#else
     [self start];
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
     });
+#endif
 }
 
 #pragma mark - Properties & Accessors
@@ -1116,6 +1144,20 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     });
     // 如果设置改变（如切换扬声器），可能需要刷新 Session 配置
     // 注意：这里没有自动 restart，调用者通常会在更新设置后手动 restart
+}
+
+- (void) refreshInputRoutingSettings {
+    __block MKAudioSettings settingsSnapshot;
+    dispatch_sync(_accessQueue, ^{
+        memcpy(&settingsSnapshot, &_audioSettings, sizeof(MKAudioSettings));
+    });
+    MKAudioNormalizeSettings(&settingsSnapshot);
+
+    @synchronized(self) {
+        if (_audioInput != nil) {
+            [_audioInput refreshRoutingWithSettings:&settingsSnapshot];
+        }
+    }
 }
 
 - (void) setMainConnectionForAudio:(MKConnection *)conn {

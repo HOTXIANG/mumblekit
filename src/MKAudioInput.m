@@ -276,6 +276,69 @@
     }
 }
 
+- (void) refreshRoutingWithSettings:(MKAudioSettings *)settings {
+    if (settings == NULL) return;
+
+    @synchronized(self) {
+        memcpy(&_settings, settings, sizeof(MKAudioSettings));
+
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        captureAllInputChannels = [defaults boolForKey:@"AudioCaptureAllInputChannels"];
+        selectedInputChannel = (int)MAX((NSInteger)1, [defaults integerForKey:@"AudioSelectedInputChannel"]);
+        selectedLeftInputChannel = (int)MAX((NSInteger)1, [defaults integerForKey:@"AudioSelectedInputChannelLeft"]);
+        selectedRightInputChannel = (int)MAX((NSInteger)1, [defaults integerForKey:@"AudioSelectedInputChannelRight"]);
+
+        micFrequency = [_device inputSampleRate];
+        numMicChannels = MAX(1, [_device numberOfInputChannels]);
+        selectedInputChannel = MIN(selectedInputChannel, numMicChannels);
+        selectedLeftInputChannel = MIN(selectedLeftInputChannel, numMicChannels);
+        selectedRightInputChannel = MIN(selectedRightInputChannel, numMicChannels);
+
+        int requestedChannels = _settings.enableStereoInput ? 2 : 1;
+        int newEncodeChannels = MIN(requestedChannels, numMicChannels);
+        if (!captureAllInputChannels || _settings.codec == MKCodecFormatSpeex) {
+            newEncodeChannels = 1;
+        }
+        if (newEncodeChannels < 1) {
+            newEncodeChannels = 1;
+        }
+
+        if (newEncodeChannels != encodeChannels) {
+            MKLogInfo(Audio, @"MKAudioInput: Reconfiguring input route from %d to %d encode channel(s) without restarting HAL.", encodeChannels, newEncodeChannels);
+
+            encodeChannels = newEncodeChannels;
+            micFilled = 0;
+            _bufferedFrames = 0;
+            [frameList removeAllObjects];
+            [_opusBuffer setLength:0];
+
+            if (_opusEncoder != NULL) {
+                opus_encoder_destroy(_opusEncoder);
+                _opusEncoder = NULL;
+            }
+            if (_settings.codec == MKCodecFormatOpus || _settings.codec == MKCodecFormatCELT) {
+                _opusEncoder = opus_encoder_create(SAMPLE_RATE, encodeChannels, OPUS_APPLICATION_VOIP, NULL);
+                opus_encoder_ctl(_opusEncoder, OPUS_SET_VBR(1));
+                opus_encoder_ctl(_opusEncoder, OPUS_SET_VBR_CONSTRAINT(1));
+                opus_encoder_ctl(_opusEncoder, OPUS_SET_COMPLEXITY(5));
+                opus_encoder_ctl(_opusEncoder, OPUS_SET_INBAND_FEC(1));
+                opus_encoder_ctl(_opusEncoder, OPUS_SET_DTX(1));
+                opus_encoder_ctl(_opusEncoder, OPUS_SET_PACKET_LOSS_PERC(10));
+            }
+
+            [self initializeMixer];
+        } else {
+            MKLogInfo(Audio, @"MKAudioInput: Updated input channel routing without restarting HAL.");
+        }
+
+        if (!captureAllInputChannels) {
+            MKLogInfo(Audio, @"MKAudioInput: Using hardware input channel %d as mono encode source.", selectedInputChannel);
+        } else if (_settings.enableStereoInput && encodeChannels > 1) {
+            MKLogInfo(Audio, @"MKAudioInput: Stereo input mapped to hardware channels L=%d R=%d.", selectedLeftInputChannel, selectedRightInputChannel);
+        }
+    }
+}
+
 - (void) initializeMixer {
     int err;
     
@@ -292,13 +355,19 @@
 
     micLength = (frameSize * micFrequency) / sampleRate;
 
-    if (_micResampler)
+    if (_micResampler) {
         speex_resampler_destroy(_micResampler);
+        _micResampler = NULL;
+    }
 
-    if (psMic)
+    if (psMic) {
         free(psMic);
-    if (psOut)
+        psMic = NULL;
+    }
+    if (psOut) {
         free(psOut);
+        psOut = NULL;
+    }
 
     if (micFrequency != sampleRate) {
         _micResampler = speex_resampler_init(encodeChannels, micFrequency, sampleRate, 3, &err);
@@ -316,6 +385,7 @@
 - (void) addMicrophoneDataWithBuffer:(short *)input amount:(NSUInteger)nsamp {
     int i;
 
+    @synchronized(self) {
     while (nsamp > 0) {
         NSUInteger left = MIN(nsamp, micLength - micFilled);
 
@@ -396,6 +466,7 @@
 
             [self processAndEncodeAudioFrame];
         }
+    }
     }
 }
 

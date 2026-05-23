@@ -182,6 +182,7 @@ typedef struct _MKAudioSettings {
 ///
 /// @param settings  A pointer to a MKAudioSettings struct with the new audio subsystem settings.
 - (void) updateAudioSettings:(MKAudioSettings *)settings;
+- (void) refreshInputRoutingSettings;
 
 ///-------------------
 /// @name Transmission
