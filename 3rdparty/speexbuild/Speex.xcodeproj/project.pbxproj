@@ -432,6 +432,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
 				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -444,6 +446,8 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 			};
@@ -461,6 +465,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
 				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -473,6 +479,8 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 			};
@@ -500,6 +508,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
 				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -510,6 +520,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
 				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -522,6 +534,8 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 			};
@@ -533,6 +547,8 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 			};

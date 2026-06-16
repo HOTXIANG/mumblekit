@@ -1469,7 +1469,14 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (void) setSidetoneTrackSendSourceKeys:(NSArray<NSString *> *)trackKeys {
     dispatch_async(_accessQueue, ^{
-        [_sidetoneRackBridge setSendSourceKeys:trackKeys];
+        NSMutableArray<NSString *> *filteredTrackKeys = [NSMutableArray arrayWithCapacity:[trackKeys count]];
+        for (NSString *trackKey in trackKeys) {
+            if (![trackKey isKindOfClass:[NSString class]] || [trackKey isEqualToString:@"input"]) {
+                continue;
+            }
+            [filteredTrackKeys addObject:trackKey];
+        }
+        [_sidetoneRackBridge setSendSourceKeys:filteredTrackKeys];
     });
 }
 
@@ -1987,7 +1994,8 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (const float *) readInputMonitorBufferWithMaxFrameCount:(NSUInteger)maxFrameCount
                                            outFrameCount:(NSUInteger *)outFrameCount
-                                                channels:(NSUInteger *)outChannels {
+                                                channels:(NSUInteger *)outChannels
+                                              sampleRate:(NSUInteger *)outSampleRate {
     os_unfair_lock_lock(&_inputMonitorLock);
     if (maxFrameCount == 0 || _inputMonitorBufferedFrames < maxFrameCount || _inputMonitorPPSampleRate != SAMPLE_RATE || _inputMonitorPPChannels == 0) {
         os_unfair_lock_unlock(&_inputMonitorLock);
@@ -2013,6 +2021,9 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     }
     if (outChannels != NULL) {
         *outChannels = channels;
+    }
+    if (outSampleRate != NULL) {
+        *outSampleRate = _inputMonitorPPSampleRate;
     }
     os_unfair_lock_unlock(&_inputMonitorLock);
     return _inputMonitorReadBuffer;

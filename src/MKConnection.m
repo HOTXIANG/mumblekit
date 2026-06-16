@@ -44,6 +44,17 @@ static const uint64_t MKUDPRebuildCooldownUsec = 2ULL * 1000ULL * 1000ULL;
 static const uint64_t MKUDPReceiveStallThresholdUsec = 8ULL * 1000ULL * 1000ULL;
 static const uint64_t MKUDPProbeIntervalUsec = 15ULL * 1000ULL * 1000ULL;
 static const uint64_t MKTCPTunnelKeepaliveIntervalUsec = 5ULL * 1000ULL * 1000ULL;
+static const int MKConnectionVoiceDSCPTrafficClass = 46 << 2;
+
+static int MKConnectionSocketFamily(CFSocketNativeHandle nativeSocket) {
+    struct sockaddr_storage address;
+    socklen_t addressLength = sizeof(address);
+    memset(&address, 0, sizeof(address));
+    if (getsockname(nativeSocket, (struct sockaddr *)&address, &addressLength) == 0) {
+        return address.ss_family;
+    }
+    return AF_UNSPEC;
+}
 
 @interface MKConnection () {
     MKCryptState   *_crypt;
@@ -60,6 +71,7 @@ static const uint64_t MKTCPTunnelKeepaliveIntervalUsec = 5ULL * 1000ULL * 1000UL
     BOOL           _reconnect;
 
     BOOL           _forceTCP;
+    BOOL           _enableQoS;
     BOOL           _udpAvailable;
     MKUDPTransportState _udpTransportState;
     NSUInteger     _udpConsecutiveSendFailures;
@@ -131,6 +143,10 @@ static const uint64_t MKTCPTunnelKeepaliveIntervalUsec = 5ULL * 1000ULL * 1000UL
 - (void) _setupUdpSock;
 - (void) _teardownUdpSock;
 - (void) _applyForceTCPOnConnectionThread:(NSNumber *)flagNumber;
+- (void) _applyQoSOnConnectionThread:(NSNumber *)flagNumber;
+- (void) _applyQoSToNativeSocket:(CFSocketNativeHandle)nativeSocket name:(NSString *)socketName;
+- (void) _applyQoSToTCPSocketIfAvailable;
+- (void) _applyQoSToUDPSocketIfAvailable;
 - (void) _udpDataReady:(NSData *)data;
 - (void) _udpMessageReceived:(NSData *)data;
 - (BOOL) _sendUDPMessage:(NSData *)data;
@@ -217,6 +233,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         return nil;
 
     _ignoreSSLVerification = NO;
+    _enableQoS = YES;
     _shouldUseOpus = [[MKVersion sharedVersion] isOpusEnabled];
 
     return self;
@@ -554,6 +571,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
             if (_socket != -1) {
                 int val = 1;
                 setsockopt(_socket, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
+                [self _applyQoSToTCPSocketIfAvailable];
             }
 
             if (_forceTCP) {
@@ -655,6 +673,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         return;
     }
 
+    [self _applyQoSToUDPSocketIfAvailable];
+
     CFRunLoopSourceRef src = CFSocketCreateRunLoopSource(NULL, _udpSock, 0);
     CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopDefaultMode);
     CFRelease(src);
@@ -751,6 +771,68 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
 - (BOOL) peerCertificateChainTrusted {
     return _trustedChain;
+}
+
+- (void) setQoSEnabled:(BOOL)flag {
+    if ([NSThread currentThread] != self) {
+        [self performSelector:@selector(_applyQoSOnConnectionThread:) onThread:self withObject:@(flag) waitUntilDone:NO];
+        return;
+    }
+
+    [self _applyQoSOnConnectionThread:@(flag)];
+}
+
+- (BOOL) qosEnabled {
+    return _enableQoS;
+}
+
+- (void) _applyQoSOnConnectionThread:(NSNumber *)flagNumber {
+    _enableQoS = [flagNumber boolValue];
+    [self _applyQoSToTCPSocketIfAvailable];
+    [self _applyQoSToUDPSocketIfAvailable];
+}
+
+- (void) _applyQoSToNativeSocket:(CFSocketNativeHandle)nativeSocket name:(NSString *)socketName {
+    if (nativeSocket == -1) {
+        return;
+    }
+
+#if defined(SO_NET_SERVICE_TYPE) && defined(NET_SERVICE_TYPE_VO)
+    int serviceType = _enableQoS ? NET_SERVICE_TYPE_VO : 0;
+# if defined(NET_SERVICE_TYPE_BE)
+    if (!_enableQoS) {
+        serviceType = NET_SERVICE_TYPE_BE;
+    }
+# endif
+    if (setsockopt(nativeSocket, SOL_SOCKET, SO_NET_SERVICE_TYPE, &serviceType, sizeof(serviceType)) != 0) {
+        MKLogWarning(Connection, @"MKConnection: failed to apply %@ SO_NET_SERVICE_TYPE=%d", socketName, serviceType);
+    }
+#endif
+
+    int trafficClass = _enableQoS ? MKConnectionVoiceDSCPTrafficClass : 0;
+    int family = MKConnectionSocketFamily(nativeSocket);
+    if (family == AF_INET || family == AF_UNSPEC) {
+        if (setsockopt(nativeSocket, IPPROTO_IP, IP_TOS, &trafficClass, sizeof(trafficClass)) != 0 && family == AF_INET) {
+            MKLogWarning(Connection, @"MKConnection: failed to apply %@ IPv4 DSCP=%d", socketName, trafficClass);
+        }
+    }
+    if (family == AF_INET6 || family == AF_UNSPEC) {
+        if (setsockopt(nativeSocket, IPPROTO_IPV6, IPV6_TCLASS, &trafficClass, sizeof(trafficClass)) != 0 && family == AF_INET6) {
+            MKLogWarning(Connection, @"MKConnection: failed to apply %@ IPv6 DSCP=%d", socketName, trafficClass);
+        }
+    }
+}
+
+- (void) _applyQoSToTCPSocketIfAvailable {
+    if (_socket != -1) {
+        [self _applyQoSToNativeSocket:_socket name:@"TCP"];
+    }
+}
+
+- (void) _applyQoSToUDPSocketIfAvailable {
+    if (_udpSock != NULL && CFSocketIsValid(_udpSock)) {
+        [self _applyQoSToNativeSocket:CFSocketGetNative(_udpSock) name:@"UDP"];
+    }
 }
 
 - (void) setForceTCP:(BOOL)flag {

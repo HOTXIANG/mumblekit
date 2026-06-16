@@ -1285,7 +1285,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = macosx;
@@ -1312,7 +1312,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = macosx;
@@ -1342,7 +1342,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
 				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
@@ -1368,7 +1368,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = macosx;
@@ -1400,7 +1400,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
 				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
@@ -1429,7 +1429,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = macosx;
@@ -1471,7 +1471,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
 				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
@@ -1496,7 +1496,7 @@
 					"$(SRCROOT)/3rdparty/speex/include",
 					"$(SRCROOT)/3rdparty/opus/include",
 				);
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
 				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";

@@ -338,6 +338,7 @@ typedef struct _MKAudioSettings {
 /// post-input-track monitor audio for sidetone playback.
 - (const float *) readInputMonitorBufferWithMaxFrameCount:(NSUInteger)maxFrameCount
                                            outFrameCount:(NSUInteger *)outFrameCount
-                                                channels:(NSUInteger *)outChannels;
+                                                channels:(NSUInteger *)outChannels
+                                              sampleRate:(NSUInteger *)outSampleRate;
 
 @end

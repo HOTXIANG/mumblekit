@@ -431,6 +431,14 @@ typedef enum {
 ///          is being tunelled through a TCP connection. Returns NO otherwise.
 - (BOOL) forceTCP;
 
+/// Set whether outgoing voice traffic should request Voice network QoS.
+/// This applies Apple socket service type and DSCP traffic class hints to
+/// the TCP control/tunnel socket and the UDP voice socket.
+- (void) setQoSEnabled:(BOOL)enabled;
+
+/// Returns whether Voice network QoS is enabled for this connection.
+- (BOOL) qosEnabled;
+
 ///----------------------------------------
 /// @name Sending data to the remote server
 ///----------------------------------------

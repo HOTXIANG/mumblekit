@@ -16,6 +16,8 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <os/lock.h>
 
+#include <speex/speex_resampler.h>
+
 typedef struct {
     os_unfair_lock lock;
     float inputPeak;
@@ -79,6 +81,13 @@ typedef struct {
     NSUInteger   _sidechainFrameCount;
     NSUInteger   _sidechainChannels;
     NSUInteger   _inputMonitorLastSequence;
+
+    SpeexResamplerState *_inputMonitorResampler;
+    float               *_inputMonitorResamplerOutput;
+    NSUInteger           _inputMonitorResamplerOutputCapacityFrames;
+    NSUInteger           _inputMonitorResamplerSourceRate;
+    NSUInteger           _inputMonitorResamplerTargetRate;
+    NSUInteger           _inputMonitorResamplerChannels;
 }
 @end
 
@@ -167,7 +176,94 @@ typedef struct {
     [_sessionUsesTrackSendRouting release];
     [_sessionTrackSendBusMasks release];
     [_sessionDSPStatuses release];
+    if (_inputMonitorResampler) {
+        speex_resampler_destroy(_inputMonitorResampler);
+        _inputMonitorResampler = NULL;
+    }
+    free(_inputMonitorResamplerOutput);
+    _inputMonitorResamplerOutput = NULL;
     [super dealloc];
+}
+
+- (const float *)resampledInputMonitorBuffer:(const float *)buffer
+                                  frameCount:(NSUInteger)frameCount
+                                    channels:(NSUInteger)channels
+                                  sourceRate:(NSUInteger)sourceRate
+                                  targetRate:(NSUInteger)targetRate
+                         targetFrameCapacity:(NSUInteger)targetFrameCapacity
+                              outFrameCount:(NSUInteger *)outFrameCount {
+    if (outFrameCount != NULL) {
+        *outFrameCount = 0;
+    }
+    if (buffer == NULL || frameCount == 0 || channels == 0 || channels > 2 || sourceRate == 0 || targetRate == 0 || targetFrameCapacity == 0) {
+        return NULL;
+    }
+    if (sourceRate == targetRate) {
+        if (outFrameCount != NULL) {
+            *outFrameCount = MIN(frameCount, targetFrameCapacity);
+        }
+        return buffer;
+    }
+
+    if (_inputMonitorResampler == NULL ||
+        _inputMonitorResamplerSourceRate != sourceRate ||
+        _inputMonitorResamplerTargetRate != targetRate ||
+        _inputMonitorResamplerChannels != channels) {
+        if (_inputMonitorResampler) {
+            speex_resampler_destroy(_inputMonitorResampler);
+            _inputMonitorResampler = NULL;
+        }
+
+        int err = RESAMPLER_ERR_SUCCESS;
+        _inputMonitorResampler = speex_resampler_init((spx_uint32_t)channels,
+                                                      (spx_uint32_t)sourceRate,
+                                                      (spx_uint32_t)targetRate,
+                                                      3,
+                                                      &err);
+        if (_inputMonitorResampler == NULL || err != RESAMPLER_ERR_SUCCESS) {
+            MKLogWarning(Audio, @"MKAudioOutput: Unable to create sidetone resampler %luHz -> %luHz (err=%d).", (unsigned long)sourceRate, (unsigned long)targetRate, err);
+            return NULL;
+        }
+        _inputMonitorResamplerSourceRate = sourceRate;
+        _inputMonitorResamplerTargetRate = targetRate;
+        _inputMonitorResamplerChannels = channels;
+        MKLogInfo(Audio, @"MKAudioOutput: Sidetone monitor resampling %luHz -> %luHz (%lu ch).", (unsigned long)sourceRate, (unsigned long)targetRate, (unsigned long)channels);
+    }
+
+    if (_inputMonitorResamplerOutputCapacityFrames < targetFrameCapacity) {
+        float *newBuffer = realloc(_inputMonitorResamplerOutput, targetFrameCapacity * channels * sizeof(float));
+        if (newBuffer == NULL) {
+            return NULL;
+        }
+        _inputMonitorResamplerOutput = newBuffer;
+        _inputMonitorResamplerOutputCapacityFrames = targetFrameCapacity;
+    }
+
+    spx_uint32_t inFrames = (spx_uint32_t)frameCount;
+    spx_uint32_t outFrames = (spx_uint32_t)targetFrameCapacity;
+    int status;
+    if (channels > 1) {
+        status = speex_resampler_process_interleaved_float(_inputMonitorResampler,
+                                                           buffer,
+                                                           &inFrames,
+                                                           _inputMonitorResamplerOutput,
+                                                           &outFrames);
+    } else {
+        status = speex_resampler_process_float(_inputMonitorResampler,
+                                               0,
+                                               buffer,
+                                               &inFrames,
+                                               _inputMonitorResamplerOutput,
+                                               &outFrames);
+    }
+    if (status != RESAMPLER_ERR_SUCCESS || outFrames == 0) {
+        return NULL;
+    }
+
+    if (outFrameCount != NULL) {
+        *outFrameCount = outFrames;
+    }
+    return _inputMonitorResamplerOutput;
 }
 
 - (NSDictionary *) audioOutputDebugDescription:(id)ou {
@@ -250,15 +346,31 @@ typedef struct {
         }
     }
 
-    NSUInteger inputMonitorFrameCount = 0, inputMonitorChannels = 0;
+    NSUInteger inputMonitorFrameCount = 0, inputMonitorChannels = 0, inputMonitorSampleRate = 0;
     const float *inputMonitorBuffer = NULL;
     BOOL hasInputMonitorFrame = NO;
     {
         MKAudio *audio = [MKAudio sharedAudio];
         if (audio != nil && _settings.enableSideTone && _settings.sidetoneVolume > 0.0001f) {
-            inputMonitorBuffer = [audio readInputMonitorBufferWithMaxFrameCount:(NSUInteger)nsamp
-                                                                  outFrameCount:&inputMonitorFrameCount
-                                                                       channels:&inputMonitorChannels];
+            NSUInteger sourceFramesNeeded = (NSUInteger)nsamp;
+            if (_mixerFrequency > 0 && _mixerFrequency != SAMPLE_RATE) {
+                sourceFramesNeeded = (((NSUInteger)nsamp * (NSUInteger)SAMPLE_RATE) + (NSUInteger)_mixerFrequency - 1) / (NSUInteger)_mixerFrequency;
+                sourceFramesNeeded = MIN(MAX(sourceFramesNeeded + 8, (NSUInteger)1), (NSUInteger)MK_SIDECHAIN_MAX_FRAMES);
+            }
+
+            const float *rawInputMonitorBuffer = [audio readInputMonitorBufferWithMaxFrameCount:sourceFramesNeeded
+                                                                                  outFrameCount:&inputMonitorFrameCount
+                                                                                       channels:&inputMonitorChannels
+                                                                                     sampleRate:&inputMonitorSampleRate];
+            if (rawInputMonitorBuffer != NULL) {
+                inputMonitorBuffer = [self resampledInputMonitorBuffer:rawInputMonitorBuffer
+                                                             frameCount:inputMonitorFrameCount
+                                                               channels:inputMonitorChannels
+                                                             sourceRate:inputMonitorSampleRate
+                                                             targetRate:(NSUInteger)_mixerFrequency
+                                                    targetFrameCapacity:(NSUInteger)nsamp
+                                                         outFrameCount:&inputMonitorFrameCount];
+            }
             hasInputMonitorFrame = (inputMonitorBuffer != NULL);
         }
     }

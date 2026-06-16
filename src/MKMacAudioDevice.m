@@ -148,6 +148,21 @@ static Float64 MUNominalSampleRate(AudioDeviceID devId) {
     return sampleRate;
 }
 
+static AudioDeviceID MUDefaultOutputDevice(void) {
+    AudioDeviceID devId = kAudioObjectUnknown;
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = kAudioHardwarePropertyDefaultOutputDevice;
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    addr.mElement = kAudioObjectPropertyElementMain;
+
+    UInt32 size = sizeof(AudioDeviceID);
+    OSStatus err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &devId);
+    if (err != noErr || devId == kAudioObjectUnknown) {
+        return kAudioObjectUnknown;
+    }
+    return devId;
+}
+
 static UInt32 MUAudioQueueInputBufferByteSize(int sampleRate, int channels) {
     int framesPerBuffer = MAX(256, sampleRate / 50);
     return (UInt32)(framesPerBuffer * MAX(1, channels) * sizeof(short));
@@ -496,7 +511,19 @@ static void inputQueueCallback(void *udata,
         return NO;
     }
     
-    _playbackFrequency = (int) 48000;
+    AudioDeviceID outputDevId = MUDefaultOutputDevice();
+    NSString *outputName = nil;
+    NSString *outputUID = nil;
+    if (outputDevId != kAudioObjectUnknown) {
+        outputName = MUCopyAudioDeviceName(outputDevId);
+        outputUID = MUCopyAudioDeviceUID(outputDevId);
+    }
+
+    Float64 outputSampleRate = outputDevId != kAudioObjectUnknown ? MUNominalSampleRate(outputDevId) : fmt.mSampleRate;
+    if (outputSampleRate <= 0.0) {
+        outputSampleRate = 48000.0;
+    }
+    _playbackFrequency = (int)lrint(outputSampleRate);
     int hardwareOutputChannels = (int)MAX((UInt32)1, fmt.mChannelsPerFrame);
     int requestedOutputChannels = _settings.enableStereoOutput ? 2 : 1;
     _playbackChannels = MIN(requestedOutputChannels, hardwareOutputChannels);
@@ -508,7 +535,7 @@ static void inputQueueCallback(void *udata,
     fmt.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
     fmt.mBitsPerChannel = sizeof(short) * 8;
     
-    MKLogInfo(Audio, @"MKMacAudioDevice: Output device currently configured as %iHz sample rate, %i channels, %i sample size", _playbackFrequency, _playbackChannels, _playbackSampleSize);
+    MKLogInfo(Audio, @"MKMacAudioDevice: Using output device: %@ (%@), %iHz, %i channel(s), %i sample size", outputName ?: @"Unknown", outputUID ?: @"No UID", _playbackFrequency, _playbackChannels, _playbackSampleSize);
     
     fmt.mFormatID = kAudioFormatLinearPCM;
     fmt.mSampleRate = (float) _playbackFrequency;
