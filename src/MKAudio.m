@@ -77,16 +77,22 @@ typedef struct _MKAudioPreviewGainProcessorState {
     NSUInteger               _pluginHostBufferFrames;
 #if TARGET_OS_OSX == 1
     BOOL                     _isObservingDefaultInputDevice;
+    BOOL                     _isObservingCurrentAudioDevices;
+    AudioDeviceID            _observedInputDeviceID;
+    AudioDeviceID            _observedOutputDeviceID;
     CFAbsoluteTime           _lastDefaultInputSwitchTime;
     CFAbsoluteTime           _lastDefaultOutputSwitchTime;
+    CFAbsoluteTime           _lastCurrentDeviceConfigurationChangeTime;
+    CFAbsoluteTime           _suppressCurrentDeviceConfigurationChangesUntil;
     BOOL                     _isRestartingForDeviceChange;
     BOOL                     _lastDeviceWasVPIO;
     NSUInteger               _macRestartGeneration;
+    NSUInteger               _macDeviceRecoveryGeneration;
 #elif TARGET_OS_IPHONE == 1
     BOOL                     _isRestartingForRouteChange;
     CFAbsoluteTime           _lastRouteChangeRestartTime;
 #endif
-    
+
     // P0 修复：使用串行队列替代 @synchronized，提升性能
     dispatch_queue_t         _accessQueue;
 
@@ -127,8 +133,13 @@ typedef struct _MKAudioPreviewGainProcessorState {
 #if TARGET_OS_OSX == 1
 - (void)startObservingDefaultInputDeviceChanges;
 - (void)stopObservingDefaultInputDeviceChanges;
+- (void)updateCurrentAudioDeviceObservers;
+- (void)removeCurrentAudioDeviceObservers;
 - (void)handleDefaultInputDeviceChanged;
 - (void)handleDefaultOutputDeviceChanged;
+- (void)handleCurrentAudioDeviceConfigurationChanged;
+- (void)scheduleMacAudioRecoveryRestartWithReason:(NSString *)reason delay:(NSTimeInterval)delay;
+- (void)suppressCurrentAudioDeviceConfigurationChangesForDuration:(NSTimeInterval)duration;
 #endif
 - (void)rebindRemoteTrackProcessorsToOutputLocked;
 - (NSUInteger)currentOutputProcessingSampleRateLocked;
@@ -159,12 +170,25 @@ static OSStatus MKAudioDefaultOutputDeviceChangedCallback(AudioObjectID inObject
     return noErr;
 }
 
+static OSStatus MKAudioCurrentDeviceConfigurationChangedCallback(AudioObjectID inObjectID,
+                                                                 UInt32 inNumberAddresses,
+                                                                 const AudioObjectPropertyAddress inAddresses[],
+                                                                 void *inClientData) {
+    (void)inObjectID;
+    (void)inNumberAddresses;
+    (void)inAddresses;
+    MKAudio *audio = (MKAudio *)inClientData;
+    if (!audio) return noErr;
+    [audio handleCurrentAudioDeviceConfigurationChanged];
+    return noErr;
+}
+
 static BOOL MKAudioDeviceHasInputStreams(AudioDeviceID devId) {
     AudioObjectPropertyAddress addr;
     addr.mSelector = kAudioDevicePropertyStreams;
     addr.mScope = kAudioDevicePropertyScopeInput;
     addr.mElement = kAudioObjectPropertyElementMain;
-    
+
     UInt32 size = 0;
     OSStatus err = AudioObjectGetPropertyDataSize(devId, &addr, 0, NULL, &size);
     return (err == noErr && size > 0);
@@ -175,7 +199,7 @@ static NSString *MKAudioCopyDeviceUID(AudioDeviceID devId) {
     addr.mSelector = kAudioDevicePropertyDeviceUID;
     addr.mScope = kAudioObjectPropertyScopeGlobal;
     addr.mElement = kAudioObjectPropertyElementMain;
-    
+
     CFStringRef uidRef = NULL;
     UInt32 size = sizeof(CFStringRef);
     OSStatus err = AudioObjectGetPropertyData(devId, &addr, 0, NULL, &size, &uidRef);
@@ -189,28 +213,28 @@ static NSString *MKAudioCopyDeviceUID(AudioDeviceID devId) {
 
 static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
     if (uid == nil || [uid length] == 0) return NO;
-    
+
     AudioObjectPropertyAddress addr;
     addr.mSelector = kAudioHardwarePropertyDevices;
     addr.mScope = kAudioObjectPropertyScopeGlobal;
     addr.mElement = kAudioObjectPropertyElementMain;
-    
+
     UInt32 size = 0;
     OSStatus err = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &addr, 0, NULL, &size);
     if (err != noErr || size < sizeof(AudioDeviceID)) {
         return NO;
     }
-    
+
     UInt32 count = size / sizeof(AudioDeviceID);
     AudioDeviceID *devIds = (AudioDeviceID *)calloc(count, sizeof(AudioDeviceID));
     if (devIds == NULL) return NO;
-    
+
     err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, devIds);
     if (err != noErr) {
         free(devIds);
         return NO;
     }
-    
+
     BOOL found = NO;
     for (UInt32 i = 0; i < count; i++) {
         AudioDeviceID candidate = devIds[i];
@@ -221,24 +245,113 @@ static BOOL MKAudioInputDeviceExistsForUID(NSString *uid) {
             break;
         }
     }
-    
+
     free(devIds);
     return found;
 }
 
-static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
+static BOOL MKAudioFindInputDeviceByUID(NSString *uid, AudioDeviceID *outDevId) {
+    if (uid == nil || [uid length] == 0 || outDevId == NULL) return NO;
+
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = kAudioHardwarePropertyDevices;
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    addr.mElement = kAudioObjectPropertyElementMain;
+
+    UInt32 size = 0;
+    OSStatus err = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &addr, 0, NULL, &size);
+    if (err != noErr || size < sizeof(AudioDeviceID)) {
+        return NO;
+    }
+
+    UInt32 count = size / sizeof(AudioDeviceID);
+    AudioDeviceID *devIds = (AudioDeviceID *)calloc(count, sizeof(AudioDeviceID));
+    if (devIds == NULL) return NO;
+
+    err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, devIds);
+    if (err != noErr) {
+        free(devIds);
+        return NO;
+    }
+
+    BOOL found = NO;
+    for (UInt32 i = 0; i < count; i++) {
+        AudioDeviceID candidate = devIds[i];
+        if (!MKAudioDeviceHasInputStreams(candidate)) continue;
+        NSString *candidateUID = MKAudioCopyDeviceUID(candidate);
+        if (candidateUID && [candidateUID isEqualToString:uid]) {
+            *outDevId = candidate;
+            found = YES;
+            break;
+        }
+    }
+
+    free(devIds);
+    return found;
+}
+
+static AudioDeviceID MKAudioSystemDefaultInputDevice(void) {
     AudioDeviceID devId = kAudioObjectUnknown;
     AudioObjectPropertyAddress addr;
     addr.mSelector = kAudioHardwarePropertyDefaultInputDevice;
     addr.mScope = kAudioObjectPropertyScopeGlobal;
     addr.mElement = kAudioObjectPropertyElementMain;
+
     UInt32 size = sizeof(AudioDeviceID);
-    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &devId) != noErr) {
+    OSStatus err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &devId);
+    if (err != noErr) {
+        return kAudioObjectUnknown;
+    }
+    return devId;
+}
+
+static AudioDeviceID MKAudioSystemDefaultOutputDevice(void) {
+    AudioDeviceID devId = kAudioObjectUnknown;
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = kAudioHardwarePropertyDefaultOutputDevice;
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    addr.mElement = kAudioObjectPropertyElementMain;
+
+    UInt32 size = sizeof(AudioDeviceID);
+    OSStatus err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &devId);
+    if (err != noErr) {
+        return kAudioObjectUnknown;
+    }
+    return devId;
+}
+
+static AudioDeviceID MKAudioSelectedInputDevice(void) {
+    AudioDeviceID devId = MKAudioSystemDefaultInputDevice();
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL followSystem = YES;
+    if ([defaults objectForKey:@"AudioFollowSystemInputDevice"] != nil) {
+        followSystem = [defaults boolForKey:@"AudioFollowSystemInputDevice"];
+    }
+
+    if (!followSystem) {
+        NSString *preferredUID = [[defaults stringForKey:@"AudioPreferredInputDeviceUID"]
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        AudioDeviceID preferredDevId = kAudioObjectUnknown;
+        if ([preferredUID length] > 0 && MKAudioFindInputDeviceByUID(preferredUID, &preferredDevId)) {
+            devId = preferredDevId;
+        }
+    }
+
+    return devId;
+}
+
+static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
+    AudioDeviceID devId = MKAudioSystemDefaultInputDevice();
+    if (devId == kAudioObjectUnknown) {
         return NO;
     }
+    AudioObjectPropertyAddress addr;
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    addr.mElement = kAudioObjectPropertyElementMain;
     addr.mSelector = kAudioDevicePropertyTransportType;
     UInt32 transportType = 0;
-    size = sizeof(UInt32);
+    UInt32 size = sizeof(UInt32);
     if (AudioObjectGetPropertyData(devId, &addr, 0, NULL, &size, &transportType) != noErr) {
         return NO;
     }
@@ -250,7 +363,7 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
 
 static void MKAudioNormalizeSettings(MKAudioSettings *settings) {
     if (settings == NULL) return;
-    
+
     if (settings->codec != MKCodecFormatSpeex
         && settings->codec != MKCodecFormatCELT
         && settings->codec != MKCodecFormatOpus) {
@@ -318,7 +431,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         // P0 修复：创建串行队列用于线程安全访问，替代 @synchronized
         NSString *queueName = [NSString stringWithFormat:@"com.mumble.audio.%p", self];
         _accessQueue = dispatch_queue_create([queueName UTF8String], DISPATCH_QUEUE_SERIAL);
-        
+
         // 安全默认值：避免首个设置更新尚未应用时读取到未定义配置。
         memset(&_audioSettings, 0, sizeof(MKAudioSettings));
         _audioSettings.codec = MKCodecFormatOpus;
@@ -385,12 +498,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                                                  selector:@selector(handleInterruption:)
                                                      name:AVAudioSessionInterruptionNotification
                                                    object:nil];
-        
+
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(handleRouteChange:)
                                                      name:AVAudioSessionRouteChangeNotification
                                                    object:nil];
-        
+
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(handleMediaServicesReset:)
                                                      name:AVAudioSessionMediaServicesWereResetNotification
@@ -398,6 +511,10 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #elif TARGET_OS_OSX == 1
         _lastDefaultInputSwitchTime = 0;
         _lastDefaultOutputSwitchTime = 0;
+        _lastCurrentDeviceConfigurationChangeTime = 0;
+        _suppressCurrentDeviceConfigurationChangesUntil = 0;
+        _observedInputDeviceID = kAudioObjectUnknown;
+        _observedOutputDeviceID = kAudioObjectUnknown;
         [self startObservingDefaultInputDeviceChanges];
 #endif
     }
@@ -409,7 +526,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     [self stopObservingDefaultInputDeviceChanges];
 #endif
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    
+
     // P0 修复：清理访问队列
     if (_accessQueue) {
         dispatch_release(_accessQueue);
@@ -423,7 +540,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     }
     [_remoteTrackPreviewStates release];
     _remoteTrackPreviewStates = nil;
-    
+
     [_inputTrackRackBridge release];
     _inputTrackRackBridge = nil;
     [_sidetoneRackBridge release];
@@ -451,7 +568,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #if TARGET_OS_IPHONE == 1
     AVAudioSession *session = [AVAudioSession sharedInstance];
     NSError *error = nil;
-    
+
     // 1. 确定 Category Options
     // 默认允许蓝牙 (A2DP/HFP) 和 与其他应用混音 (MixWithOthers)
     AVAudioSessionCategoryOptions options = AVAudioSessionCategoryOptionAllowBluetoothHFP |
@@ -463,7 +580,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     // 注意：在 VoiceChat 模式下，如果不加 DefaultToSpeaker，默认会走听筒
     MKAudioSettings settings;
     [self readAudioSettings:&settings];
-    
+
     if (!settings.preferReceiverOverSpeaker) {
         options |= AVAudioSessionCategoryOptionDefaultToSpeaker;
     }
@@ -478,14 +595,14 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                                    mode:AVAudioSessionModeVoiceChat
                                 options:options
                                   error:&error];
-    
+
     if (!success) {
         MKLogError(Audio, @"MKAudio: Failed to set session category: %@", error.localizedDescription);
     }
 
     // 3. 设置硬件采样率 (推荐 48kHz)
     [session setPreferredSampleRate:48000.0 error:nil];
-    
+
     // 4. 设置 I/O Buffer
     // iPad VPIO + MixWithOthers 组合 CPU 开销很大，使用更长的缓冲区（40ms）减轻负载
     // iPhone 保持低延迟（20ms）
@@ -573,13 +690,13 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 - (void)handleRouteChange:(NSNotification *)notification {
     NSDictionary *userInfo = notification.userInfo;
     AVAudioSessionRouteChangeReason reason = [userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
-    
+
     MKLogInfo(Audio, @"MKAudio: Route Changed. Reason: %lu", (unsigned long)reason);
-    
+
     // 以下情况通常不需要重启：
     // kAudioSessionRouteChangeReasonOverride (我们自己代码改的)
     // kAudioSessionRouteChangeReasonCategoryChange (Category 改变)
-    
+
     switch (reason) {
         case AVAudioSessionRouteChangeReasonNewDeviceAvailable: // 插入耳机
         case AVAudioSessionRouteChangeReasonOldDeviceUnavailable: // 拔出耳机
@@ -627,12 +744,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #if TARGET_OS_OSX == 1
 - (void)startObservingDefaultInputDeviceChanges {
     if (_isObservingDefaultInputDevice) return;
-    
+
     AudioObjectPropertyAddress defaultInputAddr;
     defaultInputAddr.mSelector = kAudioHardwarePropertyDefaultInputDevice;
     defaultInputAddr.mScope = kAudioObjectPropertyScopeGlobal;
     defaultInputAddr.mElement = kAudioObjectPropertyElementMain;
-    
+
     OSStatus err = AudioObjectAddPropertyListener(kAudioObjectSystemObject,
                                                   &defaultInputAddr,
                                                   MKAudioDefaultInputDeviceChangedCallback,
@@ -641,12 +758,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         MKLogWarning(Audio, @"MKAudio: Failed to observe default input device changes (%d).", (int)err);
         return;
     }
-    
+
     AudioObjectPropertyAddress devicesAddr;
     devicesAddr.mSelector = kAudioHardwarePropertyDevices;
     devicesAddr.mScope = kAudioObjectPropertyScopeGlobal;
     devicesAddr.mElement = kAudioObjectPropertyElementMain;
-    
+
     OSStatus devicesErr = AudioObjectAddPropertyListener(kAudioObjectSystemObject,
                                                          &devicesAddr,
                                                          MKAudioDefaultInputDeviceChangedCallback,
@@ -659,12 +776,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         MKLogWarning(Audio, @"MKAudio: Failed to observe device list changes (%d).", (int)devicesErr);
         return;
     }
-    
+
     AudioObjectPropertyAddress defaultOutputAddr;
     defaultOutputAddr.mSelector = kAudioHardwarePropertyDefaultOutputDevice;
     defaultOutputAddr.mScope = kAudioObjectPropertyScopeGlobal;
     defaultOutputAddr.mElement = kAudioObjectPropertyElementMain;
-    
+
     OSStatus outputErr = AudioObjectAddPropertyListener(kAudioObjectSystemObject,
                                                         &defaultOutputAddr,
                                                         MKAudioDefaultOutputDeviceChangedCallback,
@@ -681,19 +798,22 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         MKLogWarning(Audio, @"MKAudio: Failed to observe default output device changes (%d).", (int)outputErr);
         return;
     }
-    
+
     _isObservingDefaultInputDevice = YES;
+    [self updateCurrentAudioDeviceObservers];
     MKLogInfo(Audio, @"MKAudio: Observing default input/output and device list changes.");
 }
 
 - (void)stopObservingDefaultInputDeviceChanges {
     if (!_isObservingDefaultInputDevice) return;
-    
+
+    [self removeCurrentAudioDeviceObservers];
+
     AudioObjectPropertyAddress defaultInputAddr;
     defaultInputAddr.mSelector = kAudioHardwarePropertyDefaultInputDevice;
     defaultInputAddr.mScope = kAudioObjectPropertyScopeGlobal;
     defaultInputAddr.mElement = kAudioObjectPropertyElementMain;
-    
+
     OSStatus err = AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
                                                      &defaultInputAddr,
                                                      MKAudioDefaultInputDeviceChangedCallback,
@@ -701,12 +821,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     if (err != noErr) {
         MKLogWarning(Audio, @"MKAudio: Failed to remove default input device observer (%d).", (int)err);
     }
-    
+
     AudioObjectPropertyAddress devicesAddr;
     devicesAddr.mSelector = kAudioHardwarePropertyDevices;
     devicesAddr.mScope = kAudioObjectPropertyScopeGlobal;
     devicesAddr.mElement = kAudioObjectPropertyElementMain;
-    
+
     OSStatus devicesErr = AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
                                                             &devicesAddr,
                                                             MKAudioDefaultInputDeviceChangedCallback,
@@ -714,12 +834,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     if (devicesErr != noErr) {
         MKLogWarning(Audio, @"MKAudio: Failed to remove device list observer (%d).", (int)devicesErr);
     }
-    
+
     AudioObjectPropertyAddress defaultOutputAddr;
     defaultOutputAddr.mSelector = kAudioHardwarePropertyDefaultOutputDevice;
     defaultOutputAddr.mScope = kAudioObjectPropertyScopeGlobal;
     defaultOutputAddr.mElement = kAudioObjectPropertyElementMain;
-    
+
     OSStatus outputErr = AudioObjectRemovePropertyListener(kAudioObjectSystemObject,
                                                            &defaultOutputAddr,
                                                            MKAudioDefaultOutputDeviceChangedCallback,
@@ -727,8 +847,190 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     if (outputErr != noErr) {
         MKLogWarning(Audio, @"MKAudio: Failed to remove default output device observer (%d).", (int)outputErr);
     }
-    
+
     _isObservingDefaultInputDevice = NO;
+}
+
+- (void)addCurrentDeviceListenerForDevice:(AudioDeviceID)deviceID
+                                 selector:(AudioObjectPropertySelector)selector
+                                    scope:(AudioObjectPropertyScope)scope {
+    if (deviceID == kAudioObjectUnknown) return;
+
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = selector;
+    addr.mScope = scope;
+    addr.mElement = kAudioObjectPropertyElementMain;
+
+    OSStatus err = AudioObjectAddPropertyListener(deviceID,
+                                                  &addr,
+                                                  MKAudioCurrentDeviceConfigurationChangedCallback,
+                                                  self);
+    if (err != noErr) {
+        MKLogDebug(Audio, @"MKAudio: Failed to observe current device property selector=%u scope=%u device=%u err=%d.",
+                   (unsigned int)selector,
+                   (unsigned int)scope,
+                   (unsigned int)deviceID,
+                   (int)err);
+    }
+}
+
+- (void)removeCurrentDeviceListenerForDevice:(AudioDeviceID)deviceID
+                                    selector:(AudioObjectPropertySelector)selector
+                                       scope:(AudioObjectPropertyScope)scope {
+    if (deviceID == kAudioObjectUnknown) return;
+
+    AudioObjectPropertyAddress addr;
+    addr.mSelector = selector;
+    addr.mScope = scope;
+    addr.mElement = kAudioObjectPropertyElementMain;
+
+    AudioObjectRemovePropertyListener(deviceID,
+                                      &addr,
+                                      MKAudioCurrentDeviceConfigurationChangedCallback,
+                                      self);
+}
+
+- (void)addCurrentDeviceConfigurationObserversForDevice:(AudioDeviceID)deviceID
+                                           inputStreams:(BOOL)inputStreams
+                                          outputStreams:(BOOL)outputStreams {
+    if (deviceID == kAudioObjectUnknown) return;
+
+    [self addCurrentDeviceListenerForDevice:deviceID selector:kAudioDevicePropertyDeviceIsAlive scope:kAudioObjectPropertyScopeGlobal];
+    [self addCurrentDeviceListenerForDevice:deviceID selector:kAudioDevicePropertyDeviceHasChanged scope:kAudioObjectPropertyScopeGlobal];
+    [self addCurrentDeviceListenerForDevice:deviceID selector:kAudioDevicePropertyNominalSampleRate scope:kAudioObjectPropertyScopeGlobal];
+
+    if (inputStreams) {
+        [self addCurrentDeviceListenerForDevice:deviceID selector:kAudioDevicePropertyStreamConfiguration scope:kAudioDevicePropertyScopeInput];
+    }
+    if (outputStreams) {
+        [self addCurrentDeviceListenerForDevice:deviceID selector:kAudioDevicePropertyStreamConfiguration scope:kAudioDevicePropertyScopeOutput];
+    }
+}
+
+- (void)removeCurrentDeviceConfigurationObserversForDevice:(AudioDeviceID)deviceID
+                                              inputStreams:(BOOL)inputStreams
+                                             outputStreams:(BOOL)outputStreams {
+    if (deviceID == kAudioObjectUnknown) return;
+
+    [self removeCurrentDeviceListenerForDevice:deviceID selector:kAudioDevicePropertyDeviceIsAlive scope:kAudioObjectPropertyScopeGlobal];
+    [self removeCurrentDeviceListenerForDevice:deviceID selector:kAudioDevicePropertyDeviceHasChanged scope:kAudioObjectPropertyScopeGlobal];
+    [self removeCurrentDeviceListenerForDevice:deviceID selector:kAudioDevicePropertyNominalSampleRate scope:kAudioObjectPropertyScopeGlobal];
+
+    if (inputStreams) {
+        [self removeCurrentDeviceListenerForDevice:deviceID selector:kAudioDevicePropertyStreamConfiguration scope:kAudioDevicePropertyScopeInput];
+    }
+    if (outputStreams) {
+        [self removeCurrentDeviceListenerForDevice:deviceID selector:kAudioDevicePropertyStreamConfiguration scope:kAudioDevicePropertyScopeOutput];
+    }
+}
+
+- (void)updateCurrentAudioDeviceObservers {
+    AudioDeviceID inputDeviceID = MKAudioSelectedInputDevice();
+    AudioDeviceID outputDeviceID = MKAudioSystemDefaultOutputDevice();
+
+    if (_isObservingCurrentAudioDevices
+        && inputDeviceID == _observedInputDeviceID
+        && outputDeviceID == _observedOutputDeviceID) {
+        return;
+    }
+
+    [self removeCurrentAudioDeviceObservers];
+
+    _observedInputDeviceID = inputDeviceID;
+    _observedOutputDeviceID = outputDeviceID;
+
+    BOOL sameDevice = (inputDeviceID != kAudioObjectUnknown && inputDeviceID == outputDeviceID);
+    if (sameDevice) {
+        [self addCurrentDeviceConfigurationObserversForDevice:inputDeviceID inputStreams:YES outputStreams:YES];
+    } else {
+        [self addCurrentDeviceConfigurationObserversForDevice:inputDeviceID inputStreams:YES outputStreams:NO];
+        [self addCurrentDeviceConfigurationObserversForDevice:outputDeviceID inputStreams:NO outputStreams:YES];
+    }
+
+    _isObservingCurrentAudioDevices = (inputDeviceID != kAudioObjectUnknown || outputDeviceID != kAudioObjectUnknown);
+    MKLogInfo(Audio, @"MKAudio: Observing current input/output device configuration. input=%u output=%u",
+              (unsigned int)inputDeviceID,
+              (unsigned int)outputDeviceID);
+}
+
+- (void)removeCurrentAudioDeviceObservers {
+    if (!_isObservingCurrentAudioDevices) return;
+
+    BOOL sameDevice = (_observedInputDeviceID != kAudioObjectUnknown && _observedInputDeviceID == _observedOutputDeviceID);
+    if (sameDevice) {
+        [self removeCurrentDeviceConfigurationObserversForDevice:_observedInputDeviceID inputStreams:YES outputStreams:YES];
+    } else {
+        [self removeCurrentDeviceConfigurationObserversForDevice:_observedInputDeviceID inputStreams:YES outputStreams:NO];
+        [self removeCurrentDeviceConfigurationObserversForDevice:_observedOutputDeviceID inputStreams:NO outputStreams:YES];
+    }
+
+    _observedInputDeviceID = kAudioObjectUnknown;
+    _observedOutputDeviceID = kAudioObjectUnknown;
+    _isObservingCurrentAudioDevices = NO;
+}
+
+- (void)handleCurrentAudioDeviceConfigurationChanged {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now < _suppressCurrentDeviceConfigurationChangesUntil) {
+        _lastCurrentDeviceConfigurationChangeTime = now;
+        MKLogDebug(Audio, @"MKAudio: Suppressing current-device configuration change during audio graph settle.");
+        return;
+    }
+    if (now - _lastCurrentDeviceConfigurationChangeTime < 0.5) {
+        return;
+    }
+    _lastCurrentDeviceConfigurationChangeTime = now;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self updateCurrentAudioDeviceObservers];
+        [self scheduleMacAudioRecoveryRestartWithReason:@"current audio device configuration changed" delay:1.2];
+    });
+}
+
+- (void)suppressCurrentAudioDeviceConfigurationChangesForDuration:(NSTimeInterval)duration {
+    CFAbsoluteTime until = CFAbsoluteTimeGetCurrent() + duration;
+    if (until > _suppressCurrentDeviceConfigurationChangesUntil) {
+        _suppressCurrentDeviceConfigurationChangesUntil = until;
+    }
+}
+
+- (void)scheduleMacAudioRecoveryRestartWithReason:(NSString *)reason delay:(NSTimeInterval)delay {
+    if (!_running) {
+        return;
+    }
+    if (_isRestartingForDeviceChange) {
+        return;
+    }
+    if (![self _audioShouldBeRunning]) {
+        MKLogInfo(Audio, @"MKAudio: %@ while audio should be idle. Stopping instead of restarting.", reason);
+        [self stop];
+        return;
+    }
+
+    _isRestartingForDeviceChange = YES;
+    NSUInteger recoveryGeneration = ++_macDeviceRecoveryGeneration;
+    [self suppressCurrentAudioDeviceConfigurationChangesForDuration:delay + 3.0];
+    MKLogInfo(Audio, @"MKAudio: %@. Scheduling macOS audio recovery restart.", reason);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (recoveryGeneration != self->_macDeviceRecoveryGeneration) {
+            MKLogDebug(Audio, @"MKAudio: Skipping stale macOS audio recovery restart.");
+            return;
+        }
+
+        if (self->_running && [self _audioShouldBeRunning]) {
+            [self suppressCurrentAudioDeviceConfigurationChangesForDuration:3.0];
+            [self restart];
+        }
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (recoveryGeneration == self->_macDeviceRecoveryGeneration) {
+                self->_isRestartingForDeviceChange = NO;
+            }
+        });
+    });
 }
 
 - (void)handleDefaultInputDeviceChanged {
@@ -738,16 +1040,17 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         return;
     }
     _lastDefaultInputSwitchTime = now;
-    
+
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioInputDevicesChangedNotification object:nil];
-        
+        [self updateCurrentAudioDeviceObservers];
+
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         BOOL followSystemInput = YES;
         if ([defaults objectForKey:@"AudioFollowSystemInputDevice"] != nil) {
             followSystemInput = [defaults boolForKey:@"AudioFollowSystemInputDevice"];
         }
-        
+
         if (!followSystemInput) {
             NSString *preferredUID = [[defaults stringForKey:@"AudioPreferredInputDeviceUID"]
                 stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -755,13 +1058,13 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                 // 固定设备仍存在时，忽略系统默认设备变化
                 return;
             }
-            
+
             // 固定设备已经不存在，自动回退到“跟随系统”
             [defaults setBool:YES forKey:@"AudioFollowSystemInputDevice"];
             [defaults setObject:@"" forKey:@"AudioPreferredInputDeviceUID"];
             MKLogInfo(Audio, @"MKAudio: Preferred input device missing. Auto-fallback to follow system default.");
         }
-        
+
         if (!self->_running) {
             return;
         }
@@ -772,11 +1075,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         BOOL wasVPIO = [self->_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
         BOOL nowExternal = !MKAudioSystemDefaultInputIsBuiltInOrBluetooth();
         MKLogInfo(Audio, @"MKAudio: Default input device changed. Restarting audio to apply new microphone.");
+        [self suppressCurrentAudioDeviceConfigurationChangesForDuration:4.0];
         [self restart];
         if (wasVPIO && nowExternal) {
             [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioVPIOToHALTransitionNotification object:self];
         }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             self->_isRestartingForDeviceChange = NO;
         });
     });
@@ -789,8 +1093,9 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         return;
     }
     _lastDefaultOutputSwitchTime = now;
-    
+
     dispatch_async(dispatch_get_main_queue(), ^{
+        [self updateCurrentAudioDeviceObservers];
         if (!self->_running) {
             return;
         }
@@ -799,8 +1104,9 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         }
         self->_isRestartingForDeviceChange = YES;
         MKLogInfo(Audio, @"MKAudio: Default output device changed. Restarting audio to apply new speaker/output.");
+        [self suppressCurrentAudioDeviceConfigurationChangesForDuration:4.0];
         [self restart];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             self->_isRestartingForDeviceChange = NO;
         });
     });
@@ -815,11 +1121,11 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     dispatch_sync(_accessQueue, ^{
         delegate = _delegate;
     });
-    
+
     if ([(id)delegate respondsToSelector:@selector(audioShouldBeRunning:)]) {
         return [delegate audioShouldBeRunning:self];
     }
-    
+
 #if TARGET_OS_IPHONE == 1
     return NO;
 #else
@@ -903,7 +1209,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         os_unfair_lock_unlock(&_inputMonitorLock);
         _running = NO;
     }
-    
+
 #if TARGET_OS_IPHONE == 1
     [self resetAudioSessionToIdleNotifyingOthers:notifyOthers];
 #endif
@@ -914,7 +1220,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     // ✅ 现代 API 激活 Session
     // 每次开始前，重新应用一次设置以确保 Option 正确（如扬声器设置）
     [self setupAudioSession];
-    
+
     NSError *error = nil;
     [[AVAudioSession sharedInstance] setActive:YES error:&error];
     if (error) {
@@ -926,7 +1232,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         return;
     }
 #endif
-    
+
     __block MKAudioSettings settingsSnapshot;
     __block MKConnection *connSnapshot = nil;
     dispatch_sync(_accessQueue, ^{
@@ -934,7 +1240,11 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         connSnapshot = [_connection retain];
     });
     MKAudioNormalizeSettings(&settingsSnapshot);
-    
+
+#if TARGET_OS_OSX == 1
+    [self suppressCurrentAudioDeviceConfigurationChangesForDuration:3.0];
+#endif
+
     @synchronized(self) {
         if (_running) {
 #if TARGET_OS_OSX == 1
@@ -970,7 +1280,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #else
 # error Missing MKAudioDevice
 #endif
-        
+
         BOOL setupSuccess = [_audioDevice setupDevice];
 #if TARGET_OS_OSX == 1
         if (!setupSuccess && ![_audioDevice isKindOfClass:[MKMacAudioDevice class]]) {
@@ -1002,11 +1312,11 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         [_sidetoneRackBridge updatePreviewGain:1.0f enabled:NO];
         [_sidetoneRackBridge updateSampleRate:MKAudioInputProcessingSampleRateForSettings(&settingsSnapshot)];
         [_audioInput setSidetoneTrackProcessor:MKAudioInputRackBridgeProcess context:_sidetoneRackBridge];
-        
+
         [_audioInput setSelfMuted:_cachedSelfMuted];
         [_audioInput setSuppressed:_cachedSuppressed];
         [_audioInput setMuted:_cachedMuted];
-        
+
         _audioOutput = [[MKAudioOutput alloc] initWithDevice:_audioDevice andSettings:&settingsSnapshot];
         [_remoteBusRackBridge updateHostBufferFrames:_pluginHostBufferFrames];
         [_remoteBusRackBridge updatePreviewGain:_remoteBusPreviewState.gain enabled:_remoteBusPreviewState.enabled];
@@ -1035,16 +1345,20 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
             });
             return;
         }
-        
+
         _running = YES;
+#if TARGET_OS_OSX == 1
+        [self suppressCurrentAudioDeviceConfigurationChangesForDuration:2.5];
+#endif
     }
-    
+
     [connSnapshot release];
 }
 
 - (void) restart {
     [self stopNotifyingOthers:NO];
 #if TARGET_OS_OSX == 1
+    [self suppressCurrentAudioDeviceConfigurationChangesForDuration:4.0];
     BOOL lastDeviceWasVPIO = _lastDeviceWasVPIO;
     _lastDeviceWasVPIO = NO;
     NSUInteger restartGeneration = ++_macRestartGeneration;
@@ -1125,12 +1439,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (void) updateAudioSettings:(MKAudioSettings *)settings {
     if (settings == NULL) return;
-    
+
     // 关键修复：避免异步 block 捕获调用方栈指针，导致设置结构体损坏。
     MKAudioSettings settingsCopy;
     memcpy(&settingsCopy, settings, sizeof(MKAudioSettings));
     MKAudioNormalizeSettings(&settingsCopy);
-    
+
     dispatch_async(_accessQueue, ^{
         memcpy(&_audioSettings, &settingsCopy, sizeof(MKAudioSettings));
         [_audioInput setInputMonitorEnabled:settingsCopy.enableSideTone];

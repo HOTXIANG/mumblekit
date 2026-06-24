@@ -16,6 +16,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <os/lock.h>
 
+#include <math.h>
 #include <speex/speex_resampler.h>
 
 typedef struct {
@@ -25,6 +26,27 @@ typedef struct {
     OSStatus lastRenderStatus;
     NSUInteger frameCount;
 } MKAudioDSPStatus;
+
+static const float MKAudioOutputMinimumAudibleVolumeDB = -60.0f;
+static const float MKAudioOutputBoostDBPer100Percent = 6.0f;
+
+static float MKAudioOutputPerceptualVolumeGain(float volume) {
+    if (!isfinite(volume) || volume <= 0.0f) {
+        return 0.0f;
+    }
+
+    float dB;
+    if (volume < 1.0f) {
+        // Below 100%, use a logarithmic taper so the low end does not jump
+        // from hard mute to a loud signal: 1% ~= -59.4 dB, 50% = -30 dB.
+        dB = MKAudioOutputMinimumAudibleVolumeDB * (1.0f - volume);
+    } else {
+        // Above 100%, keep the existing boost semantics:
+        // 100% = 0 dB, 200% = +6 dB, 300% = +12 dB.
+        dB = (volume - 1.0f) * MKAudioOutputBoostDBPer100Percent;
+    }
+    return powf(10.0f, dB / 20.0f);
+}
 
 @interface MKAudioOutput () {
     MKAudioDevice        *_device;
@@ -102,7 +124,7 @@ typedef struct {
         _mixerFrequency = 0;
         _outputLock = [[NSLock alloc] init];
         _outputs = [[NSMutableDictionary alloc] init];
-        
+
         _sessionVolumes = [[NSMutableDictionary alloc] init];
         _sessionMutes = [[NSMutableDictionary alloc] init];
         _remoteSessionOrder = [[NSMutableArray alloc] init];
@@ -127,7 +149,7 @@ typedef struct {
         }
         _numChannels = [_device numberOfOutputChannels];
         _sampleSize = _numChannels * sizeof(short);
-        
+
         _cngRegister1 = 0x67452301;
         _cngRegister2 = 0xefcdab89;
         _cngEnabled = settings->enableComfortNoise;
@@ -135,21 +157,21 @@ typedef struct {
         _cngAmpliScaler *= 0.00150;
         _cngAmpliScaler *= settings->comfortNoiseLevel;
         _cngLastSample = 0.0;
-            
+
        if (_speakerVolume) {
             free(_speakerVolume);
         }
         _speakerVolume = malloc(sizeof(float)*_numChannels);
-        
+
         int i;
         for (i = 0; i < _numChannels; ++i) {
             _speakerVolume[i] = 1.0f;
         }
-        
+
         [_device setupOutput:^BOOL(short *frames, unsigned int nsamp) {
             return [self mixFrames:frames amount:nsamp];
         }];
-        
+
         _mixerInfo = [[NSDictionary dictionaryWithObjectsAndKeys:
                 [NSDate date], @"last-update",
                 [NSArray array], @"sources",
@@ -269,7 +291,7 @@ typedef struct {
 - (NSDictionary *) audioOutputDebugDescription:(id)ou {
     if ([ou isKindOfClass:[MKAudioOutputSpeech class]]) {
         MKAudioOutputSpeech *ous = (MKAudioOutputSpeech *)ou;
-        
+
         NSString *msgType = nil;
         switch ([ous messageType]) {
             case UDPVoiceCELTAlphaMessage:
@@ -288,7 +310,7 @@ typedef struct {
                 msgType = @"unknown";
                 break;
         }
-        
+
         return [NSDictionary dictionaryWithObjectsAndKeys:
                 @"user", @"kind",
                 [NSString stringWithFormat:@"session %lu codec %@", (unsigned long) [ous userSession], msgType], @"identifier",
@@ -309,10 +331,7 @@ typedef struct {
 - (BOOL) mixFrames:(void *)frames amount:(unsigned int)nsamp {
     unsigned int i, s;
     BOOL retVal = NO;
-    float globalVolume = _settings.volume;
-    if (globalVolume < 0.0f) {
-        globalVolume = 0.0f;
-    }
+    float globalVolume = MKAudioOutputPerceptualVolumeGain(_settings.volume);
 
     // Sidechain: invalidate all slots at start of each cycle
     for (int si = 0; si < MK_SIDECHAIN_MAX_SESSIONS; si++) {
@@ -391,7 +410,7 @@ typedef struct {
             [mix addObject:ou];
         }
     }
-    
+
     if (_settings.audioMixerDebug) {
         NSMutableDictionary *mixerInfo = [[[NSMutableDictionary alloc] init] autorelease];
         NSMutableArray *sources = [[[NSMutableArray alloc] init] autorelease];
@@ -404,17 +423,17 @@ typedef struct {
             [removed addObject:[self audioOutputDebugDescription:ou]];
         }
 
-    
+
         [mixerInfo setObject:[NSDate date] forKey:@"last-update"];
         [mixerInfo setObject:sources forKey:@"sources"];
         [mixerInfo setObject:removed forKey:@"removed"];
-    
+
         [_mixerInfoLock lock];
         [_mixerInfo release];
         _mixerInfo = [mixerInfo retain];
         [_mixerInfoLock unlock];
     }
-    
+
     const size_t bufferBytes = sizeof(float) * _numChannels * nsamp;
     float *mixBuffer1 = alloca(bufferBytes);
     float *mixBuffer2 = alloca(bufferBytes);
@@ -434,7 +453,7 @@ typedef struct {
         float volMultiplier = 1.0f;
         NSNumber *customVol = [_sessionVolumes objectForKey:sessionKey];
         if (customVol) {
-            volMultiplier = [customVol floatValue];
+            volMultiplier = MKAudioOutputPerceptualVolumeGain([customVol floatValue]);
         }
 
         MKAudioOutputFloatProcessCallback trackProcessor = NULL;
@@ -597,10 +616,10 @@ typedef struct {
 
     if(!retVal && _cngEnabled) {
         short *outputBuffer = (short *)frames;
-        
+
         for (i = 0; i < nsamp * _numChannels; ++i) {
             float    runningvalue;
-            
+
             _cngRegister1 ^= _cngRegister2;
             runningvalue = (float)_cngRegister2 * _cngAmpliScaler;
             runningvalue *= globalVolume;
@@ -608,7 +627,7 @@ typedef struct {
             runningvalue *= 0.5;            //one pole smoother
             _cngLastSample = runningvalue;
             _cngRegister2 += _cngRegister1;
-            
+
             if (runningvalue >= 1.0f) {
                 outputBuffer[i] = 32767;
             } else if (runningvalue < -1.0f) {

@@ -9,7 +9,7 @@
 #import <AudioUnit/AudioUnit.h>
 #import <AudioUnit/AUComponent.h>
 #import <AudioToolbox/AudioToolbox.h>
-#include <pthread.h>
+#include <dispatch/dispatch.h>
 #if defined(TARGET_OS_VISION) && TARGET_OS_VISION
     #define IS_UIDEVICE_AVAILABLE 1
 #elif TARGET_OS_IOS || TARGET_OS_TV || TARGET_OS_MACCATALYST
@@ -45,6 +45,16 @@
 
 static MKAudioPerfStats sInputPerfStats;
 static MKAudioPerfStats sOutputPerfStats;
+
+static dispatch_queue_t MKVoiceProcessingDisposeQueue(void) {
+    static dispatch_once_t onceToken;
+    static dispatch_queue_t queue;
+    dispatch_once(&onceToken, ^{
+        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_DEFAULT, 0);
+        queue = dispatch_queue_create("com.mumble.voice-processing.dispose", attr);
+    });
+    return queue;
+}
 
 static void MKAudioPerfLogAndReset(NSString *label, MKAudioPerfStats *stats) {
     if (stats->sampledCount == 0) {
@@ -328,45 +338,49 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 }
 
 - (BOOL) teardownDevice {
-    OSStatus err;
+    OSStatus err = noErr;
+    OSStatus finalErr = noErr;
 
     MKAudioPerfLogAndReset(@"voice_processing_input", &sInputPerfStats);
     MKAudioPerfLogAndReset(@"voice_processing_output", &sOutputPerfStats);
 
+    AudioUnit audioUnit = _audioUnit;
+    _audioUnit = NULL;
+    if (audioUnit == NULL) {
+        return YES;
+    }
+
     AURenderCallbackStruct nullCb = {0};
-    AudioUnitSetProperty(_audioUnit, kAudioOutputUnitProperty_SetInputCallback,
+    AudioUnitSetProperty(audioUnit, kAudioOutputUnitProperty_SetInputCallback,
                          kAudioUnitScope_Global, 0, &nullCb, sizeof(nullCb));
-    AudioUnitSetProperty(_audioUnit, kAudioUnitProperty_SetRenderCallback,
+    AudioUnitSetProperty(audioUnit, kAudioUnitProperty_SetRenderCallback,
                          kAudioUnitScope_Global, 0, &nullCb, sizeof(nullCb));
 
-    qos_class_t origQoS;
-    int origRP;
-    pthread_get_qos_class_np(pthread_self(), &origQoS, &origRP);
-    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-
-    err = AudioOutputUnitStop(_audioUnit);
+    err = AudioOutputUnitStop(audioUnit);
     if (err != noErr) {
         MKLogError(Audio, @"MKVoiceProcessingDevice: unable to stop AudioUnit. err=%d", (int)err);
+        finalErr = err;
     }
 
-    err = AudioUnitUninitialize(_audioUnit);
+    err = AudioUnitUninitialize(audioUnit);
     if (err != noErr) {
         MKLogError(Audio, @"MKVoiceProcessingDevice: unable to uninitialize AudioUnit. err=%d", (int)err);
+        finalErr = err;
     }
 
-    err = AudioComponentInstanceDispose(_audioUnit);
-    if (err != noErr) {
-        MKLogError(Audio, @"MKVoiceProcessingDevice: unable to dispose of AudioUnit. err=%d", (int)err);
-    }
-
-    pthread_set_qos_class_self_np(origQoS, origRP);
+    dispatch_async(MKVoiceProcessingDisposeQueue(), ^{
+        OSStatus disposeErr = AudioComponentInstanceDispose(audioUnit);
+        if (disposeErr != noErr) {
+            MKLogError(Audio, @"MKVoiceProcessingDevice: unable to dispose of AudioUnit. err=%d", (int)disposeErr);
+        }
+    });
 
     AudioBuffer *b = _buflist.mBuffers;
     if (b && b->mData)
         free(b->mData);
 
     MKLogInfo(Audio, @"MKVoiceProcessingDevice: teardown finished.");
-    return (err == noErr);
+    return (finalErr == noErr);
 }
 
 - (void) setupOutput:(MKAudioDeviceOutputFunc)outf {

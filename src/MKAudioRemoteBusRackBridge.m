@@ -1,4 +1,5 @@
 #import "MKAudioRemoteBusRackBridge.h"
+#import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 @protocol MKAudioRemoteBusRackExports <NSObject>
 - (void)setPreviewGain:(float)gain enabled:(BOOL)enabled;
@@ -112,10 +113,10 @@ void MKAudioRemoteBusRackBridgeProcess(float *samples,
         _remoteBusRackConsecutiveFailures = 0;
     } @catch (NSException *exception) {
         _remoteBusRackConsecutiveFailures++;
-        NSLog(@"MKAudioRemoteBusRackBridge: Exception in processSamples (%d): %@ - %@",
-              _remoteBusRackConsecutiveFailures, exception.name, exception.reason);
+        MKLogError(Plugin, @"MKAudioRemoteBusRackBridge: Exception in processSamples (%d): %@ - %@",
+                   _remoteBusRackConsecutiveFailures, exception.name, exception.reason);
         if (_remoteBusRackConsecutiveFailures >= 3 && !_remoteBusRackCleanupScheduled) {
-            NSLog(@"MKAudioRemoteBusRackBridge: Too many consecutive failures, scheduling plugin chain cleanup");
+            MKLogWarning(Plugin, @"MKAudioRemoteBusRackBridge: Too many consecutive failures, scheduling plugin chain cleanup");
             _remoteBusRackCleanupScheduled = YES;
             dispatch_async(dispatch_get_main_queue(), ^{
                 [bridge updateAudioUnitChain:nil sampleRate:sampleRate];

@@ -159,7 +159,7 @@ final class MKAudioRemoteTrackRack: NSObject {
                                          pullInputBlock)
                 if status != noErr {
                     let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
-                    print("MKAudioRack: Remote Track direct render failed \(componentName): \(status)")
+                    MKAudioRackLog(MU_LOG_LEVEL_WARNING, "MKAudioRack: Remote Track direct render failed \(componentName): \(status)")
                     return
                 }
                 renderSampleTime += Int64(frameCount)
@@ -169,12 +169,12 @@ final class MKAudioRemoteTrackRack: NSObject {
                     let status = try engine.renderOffline(AVAudioFrameCount(frameCount), to: outputBuffer)
                     if status != .success {
                         let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
-                        print("MKAudioRack: Remote Track stage render incomplete \(componentName) (\(status.rawValue))")
+                        MKAudioRackLog(MU_LOG_LEVEL_WARNING, "MKAudioRack: Remote Track stage render incomplete \(componentName) (\(status.rawValue))")
                         return
                     }
                 } catch {
                     let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
-                    print("MKAudioRack: Remote Track stage render failed \(componentName): \(error)")
+                    MKAudioRackLog(MU_LOG_LEVEL_ERROR, "MKAudioRack: Remote Track stage render failed \(componentName): \(error)")
                     return
                 }
             }
@@ -289,7 +289,7 @@ final class MKAudioRemoteTrackRack: NSObject {
             // never pulls sidechain data during rendering.
             if !scBus.isEnabled {
                 scBus.isEnabled = true
-                print("[Sidechain] AU '\(componentName)' bus 1 was disabled, enabling it")
+                MKAudioRackLog(MU_LOG_LEVEL_DEBUG, "[Sidechain] AU '\(componentName)' bus 1 was disabled, enabling it")
             }
 
             let scFormat: AVAudioFormat
@@ -313,7 +313,7 @@ final class MKAudioRemoteTrackRack: NSObject {
                 throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudio_ParamError))
             }
             sidechainBuffer = scInputBuf
-            print("[Sidechain] AU '\(componentName)' configured with sidechain source='\(scKey)', bus1 format=\(scFormat.channelCount)ch @ \(Int(scFormat.sampleRate))Hz interleaved=\(scFormat.isInterleaved)")
+            MKAudioRackLog(MU_LOG_LEVEL_DEBUG, "[Sidechain] AU '\(componentName)' configured with sidechain source='\(scKey)', bus1 format=\(scFormat.channelCount)ch @ \(Int(scFormat.sampleRate))Hz interleaved=\(scFormat.isInterleaved)")
         }
 
         private static func configureFormats(for auAudioUnit: AUAudioUnit, preferredChannels: AVAudioChannelCount, sampleRate: Double) throws -> (input: AVAudioFormat, output: AVAudioFormat) {
@@ -950,7 +950,7 @@ final class MKAudioRemoteTrackRack: NSObject {
                 case .audioUnit(let audioUnit):
                     componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
                 }
-                print("MKAudioRack: Failed to configure Remote Track stage \(componentName): \(error)")
+                MKAudioRackLog(MU_LOG_LEVEL_ERROR, "MKAudioRack: Failed to configure Remote Track stage \(componentName): \(error)")
             }
         }
         return hosts

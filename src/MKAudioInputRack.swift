@@ -1,6 +1,14 @@
 import Foundation
 import AVFoundation
 
+func MKAudioRackLog(_ level: Int32,
+                    _ message: String,
+                    file: StaticString = #fileID,
+                    function: StaticString = #function,
+                    line: Int = #line) {
+    MumbleLogMessage(level, "Plugin", message, "\(file)", "\(function)", Int32(line))
+}
+
 @objc(MKAudioInputRack)
 @objcMembers
 final class MKAudioInputRack: NSObject {
@@ -163,7 +171,7 @@ final class MKAudioInputRack: NSObject {
                                          pullInputBlock)
                 if status != noErr {
                     let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
-                    print("MKAudioRack: Input Track direct render failed \(componentName): \(status)")
+                    MKAudioRackLog(MU_LOG_LEVEL_WARNING, "MKAudioRack: Input Track direct render failed \(componentName): \(status)")
                     return
                 }
                 renderSampleTime += Int64(frameCount)
@@ -173,12 +181,12 @@ final class MKAudioInputRack: NSObject {
                     let status = try engine.renderOffline(AVAudioFrameCount(frameCount), to: outputBuffer)
                     if status != .success {
                         let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
-                        print("MKAudioRack: Input Track stage render incomplete \(componentName) (\(status.rawValue))")
+                        MKAudioRackLog(MU_LOG_LEVEL_WARNING, "MKAudioRack: Input Track stage render incomplete \(componentName) (\(status.rawValue))")
                         return
                     }
                 } catch {
                     let componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
-                    print("MKAudioRack: Input Track stage render failed \(componentName): \(error)")
+                    MKAudioRackLog(MU_LOG_LEVEL_ERROR, "MKAudioRack: Input Track stage render failed \(componentName): \(error)")
                     return
                 }
             }
@@ -295,7 +303,7 @@ final class MKAudioInputRack: NSObject {
             // never pulls sidechain data during rendering.
             if !scBus.isEnabled {
                 scBus.isEnabled = true
-                print("[Sidechain] AU '\(componentName)' bus 1 was disabled, enabling it")
+                MKAudioRackLog(MU_LOG_LEVEL_DEBUG, "[Sidechain] AU '\(componentName)' bus 1 was disabled, enabling it")
             }
 
             let scFormat: AVAudioFormat
@@ -319,7 +327,7 @@ final class MKAudioInputRack: NSObject {
                 throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudio_ParamError))
             }
             sidechainBuffer = scInputBuf
-            print("[Sidechain] AU '\(componentName)' configured with sidechain source='\(scKey)', bus1 format=\(scFormat.channelCount)ch @ \(Int(scFormat.sampleRate))Hz interleaved=\(scFormat.isInterleaved)")
+            MKAudioRackLog(MU_LOG_LEVEL_DEBUG, "[Sidechain] AU '\(componentName)' configured with sidechain source='\(scKey)', bus1 format=\(scFormat.channelCount)ch @ \(Int(scFormat.sampleRate))Hz interleaved=\(scFormat.isInterleaved)")
         }
 
         private static func configureFormats(for auAudioUnit: AUAudioUnit,
@@ -1045,7 +1053,7 @@ final class MKAudioInputRack: NSObject {
                 case .audioUnit(let audioUnit):
                     componentName = audioUnit.auAudioUnit.componentName ?? "Unknown AU"
                 }
-                print("MKAudioRack: Failed to configure Input Track stage \(componentName): \(error)")
+                MKAudioRackLog(MU_LOG_LEVEL_ERROR, "MKAudioRack: Failed to configure Input Track stage \(componentName): \(error)")
             }
         }
         return hosts
