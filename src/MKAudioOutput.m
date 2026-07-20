@@ -27,23 +27,22 @@ typedef struct {
     NSUInteger frameCount;
 } MKAudioDSPStatus;
 
-static const float MKAudioOutputMinimumAudibleVolumeDB = -60.0f;
-static const float MKAudioOutputBoostDBPer100Percent = 6.0f;
+static const float MKAudioOutputMinimumVolumeDB = -30.0f;
+static const float MKAudioOutputMaximumVolumeDB = 30.0f;
 
 static float MKAudioOutputPerceptualVolumeGain(float volume) {
-    if (!isfinite(volume) || volume <= 0.0f) {
-        return 0.0f;
+    if (!isfinite(volume)) {
+        return 1.0f;
     }
 
+    float clampedVolume = fminf(fmaxf(volume, 0.0f), 3.0f);
     float dB;
-    if (volume < 1.0f) {
-        // Below 100%, use a logarithmic taper so the low end does not jump
-        // from hard mute to a loud signal: 1% ~= -59.4 dB, 50% = -30 dB.
-        dB = MKAudioOutputMinimumAudibleVolumeDB * (1.0f - volume);
+    if (clampedVolume < 1.0f) {
+        // 0% = -30 dB, 100% = 0 dB.
+        dB = MKAudioOutputMinimumVolumeDB * (1.0f - clampedVolume);
     } else {
-        // Above 100%, keep the existing boost semantics:
-        // 100% = 0 dB, 200% = +6 dB, 300% = +12 dB.
-        dB = (volume - 1.0f) * MKAudioOutputBoostDBPer100Percent;
+        // 100% = 0 dB, 300% = +30 dB.
+        dB = ((clampedVolume - 1.0f) / 2.0f) * MKAudioOutputMaximumVolumeDB;
     }
     return powf(10.0f, dB / 20.0f);
 }

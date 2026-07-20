@@ -91,6 +91,7 @@ typedef struct _MKAudioPreviewGainProcessorState {
 #elif TARGET_OS_IPHONE == 1
     BOOL                     _isRestartingForRouteChange;
     CFAbsoluteTime           _lastRouteChangeRestartTime;
+    dispatch_queue_t         _audioSessionQueue;
 #endif
 
     // P0 修复：使用串行队列替代 @synchronized，提升性能
@@ -145,6 +146,7 @@ typedef struct _MKAudioPreviewGainProcessorState {
 - (NSUInteger)currentOutputProcessingSampleRateLocked;
 - (MKAudioRemoteTrackRackBridge *)remoteTrackRackBridgeForSessionLocked:(NSUInteger)session createIfNeeded:(BOOL)create;
 - (void)teardownAudioDeviceGraphLocked;
+- (BOOL)setAudioSessionActive:(BOOL)active options:(AVAudioSessionSetActiveOptions)options error:(NSError **)outError;
 - (void)configureIdleAudioSessionCategory;
 - (void)stopNotifyingOthers:(BOOL)notifyOthers;
 @end
@@ -361,6 +363,10 @@ static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
 }
 #endif
 
+#if TARGET_OS_IPHONE == 1
+static void *kMKAudioSessionQueueKey = &kMKAudioSessionQueueKey;
+#endif
+
 static void MKAudioNormalizeSettings(MKAudioSettings *settings) {
     if (settings == NULL) return;
 
@@ -431,6 +437,10 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         // P0 修复：创建串行队列用于线程安全访问，替代 @synchronized
         NSString *queueName = [NSString stringWithFormat:@"com.mumble.audio.%p", self];
         _accessQueue = dispatch_queue_create([queueName UTF8String], DISPATCH_QUEUE_SERIAL);
+#if TARGET_OS_IPHONE == 1
+        _audioSessionQueue = dispatch_queue_create("com.mumble.audio.session", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_set_specific(_audioSessionQueue, kMKAudioSessionQueueKey, kMKAudioSessionQueueKey, NULL);
+#endif
 
         // 安全默认值：避免首个设置更新尚未应用时读取到未定义配置。
         memset(&_audioSettings, 0, sizeof(MKAudioSettings));
@@ -532,6 +542,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         dispatch_release(_accessQueue);
         _accessQueue = NULL;
     }
+#if TARGET_OS_IPHONE == 1
+    if (_audioSessionQueue) {
+        dispatch_release(_audioSessionQueue);
+        _audioSessionQueue = NULL;
+    }
+#endif
     for (NSValue *value in [_remoteTrackPreviewStates allValues]) {
         MKAudioPreviewGainProcessorState *state = (MKAudioPreviewGainProcessorState *)[value pointerValue];
         if (state != NULL) {
@@ -614,6 +630,39 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #endif
 }
 
+- (BOOL)setAudioSessionActive:(BOOL)active options:(AVAudioSessionSetActiveOptions)options error:(NSError **)outError {
+#if TARGET_OS_IPHONE == 1
+    __block BOOL success = NO;
+    __block NSError *localError = nil;
+    dispatch_block_t block = ^{
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        if (active) {
+            success = [session setActive:YES error:&localError];
+        } else {
+            success = [session setActive:NO withOptions:options error:&localError];
+        }
+    };
+
+    if (dispatch_get_specific(kMKAudioSessionQueueKey)) {
+        block();
+    } else {
+        dispatch_sync(_audioSessionQueue, block);
+    }
+
+    if (outError != NULL) {
+        *outError = localError;
+    }
+    return success;
+#else
+    (void)active;
+    (void)options;
+    if (outError != NULL) {
+        *outError = nil;
+    }
+    return YES;
+#endif
+}
+
 - (void)configureIdleAudioSessionCategory {
 #if TARGET_OS_IPHONE == 1
     AVAudioSession *session = [AVAudioSession sharedInstance];
@@ -630,17 +679,14 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (void)resetAudioSessionToIdleNotifyingOthers:(BOOL)notifyOthers {
 #if TARGET_OS_IPHONE == 1
-    AVAudioSession *session = [AVAudioSession sharedInstance];
     NSError *error = nil;
 
     AVAudioSessionSetActiveOptions activeOptions = 0;
     if (notifyOthers) {
         activeOptions = AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation;
     }
-    [session setActive:NO
-           withOptions:activeOptions
-                 error:&error];
-    if (error) {
+    BOOL success = [self setAudioSessionActive:NO options:activeOptions error:&error];
+    if (!success || error) {
         MKLogWarning(Audio, @"MKAudio: Failed to deactivate session while resetting idle category: %@", error.localizedDescription);
         error = nil;
     }
@@ -1222,8 +1268,8 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     [self setupAudioSession];
 
     NSError *error = nil;
-    [[AVAudioSession sharedInstance] setActive:YES error:&error];
-    if (error) {
+    BOOL success = [self setAudioSessionActive:YES options:0 error:&error];
+    if (!success || error) {
         MKLogError(Audio, @"MKAudio: Failed to activate AVAudioSession: %@", error);
         NSDictionary *info = @{@"message": [NSString stringWithFormat:@"Audio session activation failed: %@", error.localizedDescription]};
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1447,6 +1493,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
     dispatch_async(_accessQueue, ^{
         memcpy(&_audioSettings, &settingsCopy, sizeof(MKAudioSettings));
+        [_audioInput updateVoiceActivationSettings:&settingsCopy];
         [_audioInput setInputMonitorEnabled:settingsCopy.enableSideTone];
         if (_audioOutput != nil) {
             [_audioOutput setMasterVolume:settingsCopy.volume];

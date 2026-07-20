@@ -276,6 +276,30 @@
     }
 }
 
+- (void) updateVoiceActivationSettings:(const MKAudioSettings *)settings {
+    if (settings == NULL) return;
+
+    @synchronized(self) {
+        BOOL preprocessorModeChanged = _settings.enablePreprocessor != settings->enablePreprocessor;
+        _settings.transmitType = settings->transmitType;
+        _settings.vadKind = settings->vadKind;
+        _settings.vadMin = settings->vadMin;
+        _settings.vadMax = settings->vadMax;
+        _settings.enablePreprocessor = settings->enablePreprocessor;
+        _settings.enableVadGate = settings->enableVadGate;
+        _settings.vadGateTimeSeconds = settings->vadGateTimeSeconds;
+        _settings.micBoost = settings->micBoost;
+        _vadGateEnabled = settings->enableVadGate;
+        _vadGateTimeSeconds = settings->vadGateTimeSeconds;
+        if (!_vadGateEnabled) {
+            _vadOpenLastTime = [[NSDate date] timeIntervalSince1970];
+        }
+        if (preprocessorModeChanged) {
+            doResetPreprocessor = YES;
+        }
+    }
+}
+
 - (void) refreshRoutingWithSettings:(MKAudioSettings *)settings {
     if (settings == NULL) return;
 
