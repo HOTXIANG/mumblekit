@@ -1501,6 +1501,7 @@
 				OTHER_LDFLAGS = "-no_warning_for_no_symbols";
 				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
 				SKIP_INSTALL = YES;
+				STRIP_INSTALLED_PRODUCT = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_INSTALL_OBJC_HEADER = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "src/MumbleKit-Bridging-Header.h";

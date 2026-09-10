@@ -60,6 +60,11 @@ using namespace MumbleClient;
 	
 }
 
+- (NSData *) encryptIV {
+	if (!_cs->isValid()) return nil;
+	return [NSData dataWithBytes:_cs->encryptIV() length:AES_BLOCK_SIZE];
+}
+
 - (NSData *) encryptData:(NSData *)data {
 	if ([data length] > UINT_MAX) {
 		return nil;

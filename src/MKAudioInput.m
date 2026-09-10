@@ -248,6 +248,7 @@
 - (void) dealloc {
     [_device setupInput:NULL];
     [_device release];
+    [_connection release];
 
     [frameList release];
     [_opusBuffer release];
@@ -272,7 +273,17 @@
 
 - (void) setMainConnectionForAudio:(MKConnection *)conn {
     @synchronized(self) {
+        [conn retain];
+        [_connection release];
         _connection = conn;
+        // Never transmit a packet assembled for a previous connection.
+        [frameList removeAllObjects];
+        [_opusBuffer setLength:0];
+        _bufferedFrames = 0;
+        _lastTransmit = NO;
+        _forceTransmit = NO;
+        frameCounter = 0;
+        micFilled = 0;
     }
 }
 

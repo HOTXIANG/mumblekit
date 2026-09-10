@@ -157,6 +157,11 @@ typedef struct _MKAudioSettings {
 ///----------------------------
 
 /// Returns whether or not the MumbleKit audio subsystem is currently running.
+/// Health of completed microphone/playback callbacks, independent of engine flags.
+- (NSDictionary *)healthSnapshot;
+#if DEBUG
+- (void)simulateDeviceCallbackStallForTesting;
+#endif
 - (BOOL) isRunning;
 
 /// Starts the MumbleKit audio subsytem.
@@ -216,7 +221,13 @@ typedef struct _MKAudioSettings {
 /// @param  conn  The MKConnection to set as the main connection
 ///               for audio purposes.
 - (void) setMainConnectionForAudio:(MKConnection *)conn;
+/// Clears a closing connection without detaching a newer connection.
+- (void)clearMainConnectionForAudioIfMatches:(MKConnection *)conn;
 - (void) addFrameToBufferWithSession:(NSUInteger)session data:(NSData *)data sequence:(NSUInteger)seq type:(MKUDPMessageType)msgType;
+/// Only accepts packets from the currently attached connection.
+- (void)addFrameToBufferWithSession:(NSUInteger)session data:(NSData *)data sequence:(NSUInteger)seq
+                             type:(MKUDPMessageType)msgType connection:(MKConnection *)connection;
+
 - (MKAudioOutputSidetone *) sidetoneOutput;
 - (float) speechProbablity;
 - (float) peakCleanMic;

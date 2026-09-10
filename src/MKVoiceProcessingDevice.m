@@ -27,6 +27,7 @@
 #endif
 
 #import "MKAudioPerfStats.h"
+#import "MKAudioDeviceIO.h"
 #import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 @interface MKVoiceProcessingDevice () {
@@ -34,6 +35,9 @@
     MKAudioSettings              _settings;
     AudioUnit                    _audioUnit;
     AudioBufferList              _buflist;
+    UInt32                       _inputBufferCapacity;
+    MKAudioPerfStats              _inputPerfStats;
+    MKAudioPerfStats              _outputPerfStats;
     int                          _micFrequency;
     int                          _micSampleSize;
     int                          _numMicChannels;
@@ -42,19 +46,6 @@
     MKAudioDeviceInputFunc       _inputFunc;
 }
 @end
-
-static MKAudioPerfStats sInputPerfStats;
-static MKAudioPerfStats sOutputPerfStats;
-
-static dispatch_queue_t MKVoiceProcessingDisposeQueue(void) {
-    static dispatch_once_t onceToken;
-    static dispatch_queue_t queue;
-    dispatch_once(&onceToken, ^{
-        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_DEFAULT, 0);
-        queue = dispatch_queue_create("com.mumble.voice-processing.dispose", attr);
-    });
-    return queue;
-}
 
 static void MKAudioPerfLogAndReset(NSString *label, MKAudioPerfStats *stats) {
     if (stats->sampledCount == 0) {
@@ -76,48 +67,33 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
                               UInt32 busnum, UInt32 nframes, AudioBufferList *buflist) {
     MKVoiceProcessingDevice *dev = (MKVoiceProcessingDevice *)udata;
     OSStatus err;
-    bool shouldSample = MKAudioPerfShouldSample(&sInputPerfStats);
+    bool shouldSample = MKAudioPerfShouldSample(&dev->_inputPerfStats);
     uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
         
-    if (! dev->_buflist.mBuffers->mData) {
-        MKLogDebug(Audio, @"MKVoiceProcessingDevice: No buffer allocated. Allocating for %d frames.", (int)nframes);
-        dev->_buflist.mNumberBuffers = 1;
-        AudioBuffer *b = dev->_buflist.mBuffers;
-        b->mNumberChannels = dev->_numMicChannels;
-        b->mDataByteSize = dev->_micSampleSize * nframes;
-        b->mData = calloc(1, b->mDataByteSize);
+    if (dev->_audioUnit == NULL || dev->_buflist.mBuffers[0].mData == NULL ||
+        dev->_micSampleSize <= 0 || nframes > dev->_inputBufferCapacity / dev->_micSampleSize) {
+        return kAudioUnitErr_TooManyFramesToProcess;
     }
-    
-    if (dev->_buflist.mBuffers->mDataByteSize < (dev->_micSampleSize * nframes)) {
-        MKLogDebug(Audio, @"MKVoiceProcessingDevice: Buffer too small. Allocating more space for %d frames.", (int)nframes);
-        AudioBuffer *b = dev->_buflist.mBuffers;
-        free(b->mData);
-        b->mDataByteSize = dev->_micSampleSize * nframes;
-        b->mData = calloc(1, b->mDataByteSize);
-    }
-        
-    /*
-     AudioUnitRender modifies the mDataByteSize members with the
-     actual read bytes count. We need to write it back otherwise
-     we'll reallocate the buffer even if not needed.
-     */
-    UInt32 dataByteSize = dev->_buflist.mBuffers->mDataByteSize;
+    AudioBuffer *inputBuffer = &dev->_buflist.mBuffers[0];
+    UInt32 expectedBytes = nframes * dev->_micSampleSize;
+    inputBuffer->mDataByteSize = expectedBytes;
     err = AudioUnitRender(dev->_audioUnit, flags, ts, busnum, nframes, &dev->_buflist);
-    if (err != noErr) {
-        MKLogError(Audio, @"MKVoiceProcessingDevice: AudioUnitRender failed. err = %d", (int)err);
-        return err;
+    if (err != noErr) return err;
+    if (inputBuffer->mDataByteSize < expectedBytes) {
+        // Short input must not expose samples left over from an earlier callback.
+        return noErr;
     }
-    dev->_buflist.mBuffers->mDataByteSize = dataByteSize;
-    
+
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     short *buf = (short *) dev->_buflist.mBuffers->mData;
     MKAudioDeviceInputFunc inputFunc = dev->_inputFunc;
     if (inputFunc) {
         inputFunc(buf, nframes);
+        if (nframes > 0) MKAudioHealthRecord(&dev->_callbackHealth.inputCompleted);
     }
     [pool release];
     if (shouldSample) {
-        MKAudioPerfRecordTicks(&sInputPerfStats, MKAudioPerfNowTicks() - startTicks);
+        MKAudioPerfRecordTicks(&dev->_inputPerfStats, MKAudioPerfNowTicks() - startTicks);
     }
     
     return noErr;
@@ -125,26 +101,20 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
 
 static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts,
                                UInt32 busnum, UInt32 nframes, AudioBufferList *buflist) {
-    MKVoiceProcessingDevice *dev = (MKVoiceProcessingDevice *) udata;
-    AudioBuffer *buf = buflist->mBuffers;
-    MKAudioDeviceOutputFunc outputFunc = dev->_outputFunc;
-    bool shouldSample = MKAudioPerfShouldSample(&sOutputPerfStats);
-    uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
-
-    if (outputFunc == NULL) {
-        memset(buf->mData, 0, buf->mDataByteSize);
+    MKVoiceProcessingDevice *dev = (MKVoiceProcessingDevice *)udata;
+    if (!MKAudioDeviceCanRender(buflist, nframes, dev->_numOutputChannels) || dev->_outputFunc == NULL) {
+        MKAudioDeviceSilence(buflist, flags);
         return noErr;
     }
-
+    bool shouldSample = MKAudioPerfShouldSample(&dev->_outputPerfStats);
+    uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    BOOL done = outputFunc(buf->mData, nframes);
-    if (!done) {
-        memset(buf->mData, 0, buf->mDataByteSize);
+    if (!dev->_outputFunc(buflist->mBuffers[0].mData, nframes)) {
+        MKAudioDeviceSilence(buflist, flags);
     }
+    MKAudioHealthRecord(&dev->_callbackHealth.outputCompleted);
     [pool release];
-    if (shouldSample) {
-        MKAudioPerfRecordTicks(&sOutputPerfStats, MKAudioPerfNowTicks() - startTicks);
-    }
+    if (shouldSample) MKAudioPerfRecordTicks(&dev->_outputPerfStats, MKAudioPerfNowTicks() - startTicks);
     return noErr;
 }
 
@@ -158,12 +128,14 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 }
 
 - (void) dealloc {
+    [self teardownDevice];
     [_inputFunc release];
     [_outputFunc release];
     [super dealloc];
 }
 
 - (BOOL) setupDevice {
+    if (_audioUnit != NULL) [self teardownDevice];
     UInt32 len;
     UInt32 val;
     OSStatus err;
@@ -172,8 +144,8 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     AudioStreamBasicDescription inputFmt;
     AudioStreamBasicDescription outputFmt;
 
-    MKAudioPerfReset(&sInputPerfStats);
-    MKAudioPerfReset(&sOutputPerfStats);
+    MKAudioPerfReset(&_inputPerfStats);
+    MKAudioPerfReset(&_outputPerfStats);
     
     desc.componentType = kAudioUnitType_Output;
     desc.componentSubType = kAudioUnitSubType_VoiceProcessingIO;
@@ -317,6 +289,23 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         MKLogWarning(Audio, @"MKVoiceProcessingDevice: unable to unmute output. err=%d", (int)err);
     }
     
+    // Background and route changes can increase the slice size. Allocate on
+    // the control thread before callbacks are enabled, with a bounded fallback.
+    UInt32 maximumFrames = 4096;
+    len = sizeof(maximumFrames);
+    if (AudioUnitGetProperty(_audioUnit, kAudioUnitProperty_MaximumFramesPerSlice,
+                             kAudioUnitScope_Global, 0, &maximumFrames, &len) != noErr) {
+        maximumFrames = 4096;
+    }
+    maximumFrames = MAX(maximumFrames, (UInt32)4096);
+    if (maximumFrames > 65536) return NO;
+    _inputBufferCapacity = maximumFrames * _micSampleSize;
+    _buflist.mNumberBuffers = 1;
+    _buflist.mBuffers[0].mNumberChannels = _numMicChannels;
+    _buflist.mBuffers[0].mDataByteSize = _inputBufferCapacity;
+    _buflist.mBuffers[0].mData = calloc(1, _inputBufferCapacity);
+    if (_buflist.mBuffers[0].mData == NULL) return NO;
+
     err = AudioUnitInitialize(_audioUnit);
     if (err != noErr) {
         MKLogError(Audio, @"MKVoiceProcessingDevice: Unable to initialize AudioUnit. err=%d", (int)err);
@@ -338,49 +327,27 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 }
 
 - (BOOL) teardownDevice {
-    OSStatus err = noErr;
-    OSStatus finalErr = noErr;
-
-    MKAudioPerfLogAndReset(@"voice_processing_input", &sInputPerfStats);
-    MKAudioPerfLogAndReset(@"voice_processing_output", &sOutputPerfStats);
-
-    AudioUnit audioUnit = _audioUnit;
-    _audioUnit = NULL;
-    if (audioUnit == NULL) {
-        return YES;
-    }
-
-    AURenderCallbackStruct nullCb = {0};
-    AudioUnitSetProperty(audioUnit, kAudioOutputUnitProperty_SetInputCallback,
-                         kAudioUnitScope_Global, 0, &nullCb, sizeof(nullCb));
-    AudioUnitSetProperty(audioUnit, kAudioUnitProperty_SetRenderCallback,
-                         kAudioUnitScope_Global, 0, &nullCb, sizeof(nullCb));
-
-    err = AudioOutputUnitStop(audioUnit);
-    if (err != noErr) {
-        MKLogError(Audio, @"MKVoiceProcessingDevice: unable to stop AudioUnit. err=%d", (int)err);
-        finalErr = err;
-    }
-
-    err = AudioUnitUninitialize(audioUnit);
-    if (err != noErr) {
-        MKLogError(Audio, @"MKVoiceProcessingDevice: unable to uninitialize AudioUnit. err=%d", (int)err);
-        finalErr = err;
-    }
-
-    dispatch_async(MKVoiceProcessingDisposeQueue(), ^{
-        OSStatus disposeErr = AudioComponentInstanceDispose(audioUnit);
-        if (disposeErr != noErr) {
-            MKLogError(Audio, @"MKVoiceProcessingDevice: unable to dispose of AudioUnit. err=%d", (int)disposeErr);
+    BOOL ok = YES;
+    AudioUnit unit = _audioUnit;
+    if (unit != NULL) {
+        // Keep the refCon and buffers alive until disposal has drained callbacks.
+        // In particular, a media-services reset may make Stop/Uninitialize fail;
+        // cleanup must still reach Dispose rather than releasing a live refCon.
+        OSStatus stopError = AudioOutputUnitStop(unit);
+        AudioUnitUninitialize(unit);
+        OSStatus disposeError = AudioComponentInstanceDispose(unit);
+        _audioUnit = NULL;
+        ok = (disposeError == noErr);
+        if (stopError != noErr || disposeError != noErr) {
+            MKLogWarning(Audio, @"MKVoiceProcessingDevice: teardown stop=%d dispose=%d", (int)stopError, (int)disposeError);
         }
-    });
-
-    AudioBuffer *b = _buflist.mBuffers;
-    if (b && b->mData)
-        free(b->mData);
-
-    MKLogInfo(Audio, @"MKVoiceProcessingDevice: teardown finished.");
-    return (finalErr == noErr);
+    }
+    MKAudioPerfLogAndReset(@"voice_processing_input", &_inputPerfStats);
+    MKAudioPerfLogAndReset(@"voice_processing_output", &_outputPerfStats);
+    free(_buflist.mBuffers[0].mData);
+    memset(&_buflist, 0, sizeof(_buflist));
+    _inputBufferCapacity = 0;
+    return ok;
 }
 
 - (void) setupOutput:(MKAudioDeviceOutputFunc)outf {

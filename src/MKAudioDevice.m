@@ -6,6 +6,14 @@
 
 @implementation MKAudioDevice
 
+- (id)init {
+    if ((self = [super init])) {
+        atomic_init(&_callbackHealth.inputCompleted, 0);
+        atomic_init(&_callbackHealth.outputCompleted, 0);
+    }
+    return self;
+}
+
 - (id) initWithSettings:(MKAudioSettings *)settings {
     return nil;
 }

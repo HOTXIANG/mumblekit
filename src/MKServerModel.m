@@ -156,6 +156,8 @@
 // Removes all model items (MKUsers and MKChannels), and
 // deallocates the internal containers for them.
 - (void) removeAllModelItems {
+    // The map owns this user. Clear the borrowed pointer before releasing it.
+    _connectedUser = nil;
     [self removeAllUsersFromChannel:_rootChannel];
     [_userMap release];
     _userMap = nil;

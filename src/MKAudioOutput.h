@@ -28,6 +28,7 @@ typedef void (*MKAudioOutputFloatProcessCallback)(float *samples, NSUInteger fra
 - (id) initWithDevice:(MKAudioDevice *)device andSettings:(MKAudioSettings *)settings;
 - (void) dealloc;
 
+- (void)resetConnectionState;
 - (void) removeBuffer:(MKAudioOutputUser *)u;
 - (BOOL) mixFrames: (void *)frames amount:(unsigned int)nframes;
 - (void) addFrameToBufferWithSession:(NSUInteger)session data:(NSData *)data sequence:(NSUInteger)seq type:(MKUDPMessageType)msgType;

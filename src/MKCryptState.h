@@ -13,6 +13,7 @@ struct MKCryptStatePrivate;
 - (void) generateKey;
 - (void) setKey:(NSData *)key eiv:(NSData *)enc div:(NSData *)dec;
 - (void) setDecryptIV:(NSData *)dec;
+- (NSData *) encryptIV;
 - (NSData *) encryptData:(NSData *)data;
 - (NSData *) decryptData:(NSData *)data;
 

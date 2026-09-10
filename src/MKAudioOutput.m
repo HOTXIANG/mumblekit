@@ -201,6 +201,8 @@ static float MKAudioOutputPerceptualVolumeGain(float volume) {
         speex_resampler_destroy(_inputMonitorResampler);
         _inputMonitorResampler = NULL;
     }
+    free(_speakerVolume);
+    _speakerVolume = NULL;
     free(_inputMonitorResamplerOutput);
     _inputMonitorResamplerOutput = NULL;
     [super dealloc];
@@ -641,12 +643,31 @@ static float MKAudioOutputPerceptualVolumeGain(float volume) {
     return retVal;
 }
 
+- (void)resetConnectionState {
+    [_outputLock lock];
+    [_outputs removeAllObjects];
+    [_remoteSessionOrder removeAllObjects];
+    [_sessionVolumes removeAllObjects];
+    [_sessionMutes removeAllObjects];
+    [_remoteTrackProcessors removeAllObjects];
+    [_remoteTrackProcessorContexts removeAllObjects];
+    [_sessionBusAssignment removeAllObjects];
+    [_sessionUsesTrackSendRouting removeAllObjects];
+    [_sessionTrackSendBusMasks removeAllObjects];
+    [_sessionDSPStatuses removeAllObjects];
+    [_outputLock unlock];
+}
+
 - (void) removeBuffer:(MKAudioOutputUser *)u {
     if ([u respondsToSelector:@selector(userSession)]) {
         NSNumber *sessionKey = [NSNumber numberWithUnsignedInteger:[(id)u userSession]];
         [_outputLock lock];
-        [_outputs removeObjectForKey:sessionKey];
-        [_remoteSessionOrder removeObject:sessionKey];
+        // A render cycle can finish deleting an old decoder after a connection
+        // swap installed a new decoder for the same session ID.
+        if ([_outputs objectForKey:sessionKey] == u) {
+            [_outputs removeObjectForKey:sessionKey];
+            [_remoteSessionOrder removeObject:sessionKey];
+        }
         // 注意：不清除 _remoteTrackProcessors / _remoteTrackProcessorContexts /
         // _sessionVolumes / _sessionMutes —— 这些是用户级持久设置，
         // 应在 VAD 静默→重新说话周期间保留。

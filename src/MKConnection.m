@@ -12,6 +12,7 @@
 #import "MKUtils.h"
 #import "MKAudioOutput.h"
 #import "MKCryptState.h"
+#import "MKConnectionTransport.h"
 #import "MKPacketDataStream.h"
 #import "MKAudio.h"
 #import "MKAudioOutput.h"
@@ -29,7 +30,9 @@
 
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <sys/time.h>
+#include <time.h>
+#include <stdatomic.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <math.h>
@@ -39,6 +42,11 @@
 // The bitstream we should send to the server.
 // It's currently hard-coded.
 #define MUMBLEKIT_CELT_BITSTREAM 0x8000000bUL
+static const uint64_t MKConnectionHandshakeTimeoutUsec = 20ULL * 1000000ULL;
+static const uint64_t MKConnectionServerSyncTimeoutUsec = 30ULL * 1000000ULL;
+static const uint64_t MKConnectionTCPTimeoutUsec = 30ULL * 1000000ULL;
+static const uint64_t MKConnectionWriteTimeoutUsec = 15ULL * 1000000ULL;
+static const uint64_t MKConnectionCryptResyncIntervalUsec = 5ULL * 1000000ULL;
 static const NSUInteger MKUDPRebuildFailureThreshold = 3;
 static const uint64_t MKUDPRebuildCooldownUsec = 2ULL * 1000ULL * 1000ULL;
 static const uint64_t MKUDPReceiveStallThresholdUsec = 8ULL * 1000ULL * 1000ULL;
@@ -60,15 +68,23 @@ static int MKConnectionSocketFamily(CFSocketNativeHandle nativeSocket) {
     MKCryptState   *_crypt;
 
     MKMessageType  packetType;
-    int            packetLength;
-    int            packetBufferOffset;
-    NSMutableData  *packetBuffer;
-    unsigned char  _headerBuf[6];
-    int            _headerBufLen;
+    MKConnectionReadState _readState;
+    MKConnectionWriteQueue _writeQueue;
+    CFRunLoopRef   _connectionRunLoop;
+    NSTimer        *_watchdogTimer;
+    uint64_t       _attemptStartUsec;
+    uint64_t       _handshakeCompleteUsec;
+    MKConnectionPingState _tcpPingState;
+    MKConnectionPingState _udpPingState;
+    uint64_t       _lastTcpWriteProgressUsec;
+    uint64_t       _lastCryptResyncRequestUsec;
+    uint64_t       _lastCryptSetupUsec;
+    BOOL           _waitingForTrust;
+    atomic_uint_fast64_t _connectionGeneration;
     NSString       *_hostname;
     NSUInteger     _port;
-    BOOL           _keepRunning;
-    BOOL           _reconnect;
+    atomic_bool    _keepRunning;
+    atomic_bool    _reconnect;
 
     BOOL           _forceTCP;
     BOOL           _enableQoS;
@@ -80,12 +96,12 @@ static int MKConnectionSocketFamily(CFSocketNativeHandle nativeSocket) {
     uint64_t       _lastUdpProbeUsec;
     uint64_t       _lastTcpTunnelKeepaliveUsec;
     uint64_t       _lastTcpTunnelReceiveUsec;
-    unsigned long  _connTime;
+    uint64_t       _connTime;
     NSTimer        *_pingTimer;
     NSOutputStream *_outputStream;
     NSInputStream  *_inputStream;
-    BOOL           _connectionEstablished;
-    BOOL           _ignoreSSLVerification;
+    atomic_bool    _connectionEstablished;
+    atomic_bool    _ignoreSSLVerification;
     BOOL           _readyVoice;
     id             _msgHandler;
     id             _delegate;
@@ -136,6 +152,9 @@ static int MKConnectionSocketFamily(CFSocketNativeHandle nativeSocket) {
 
 // TCP
 - (void) _sendMessageHelper:(NSDictionary *)dict;
+- (void) _flushTCPWrites;
+- (void) _watchdogTimerFired:(NSTimer *)timer;
+- (void) _performOnConnectionThread:(SEL)selector object:(id)object;
 - (void) _dataReady;
 - (void) _messageRecieved:(NSData *)data;
 
@@ -148,7 +167,7 @@ static int MKConnectionSocketFamily(CFSocketNativeHandle nativeSocket) {
 - (void) _applyQoSToTCPSocketIfAvailable;
 - (void) _applyQoSToUDPSocketIfAvailable;
 - (void) _udpDataReady:(NSData *)data;
-- (void) _udpMessageReceived:(NSData *)data;
+- (void) _udpMessageReceived:(NSData *)data viaUDP:(BOOL)viaUDP;
 - (BOOL) _sendUDPMessage:(NSData *)data;
 - (BOOL) _sendUDPPingWithTimestamp:(uint64_t)timeStamp;
 - (BOOL) _shouldProbeUDPAtTime:(uint64_t)now;
@@ -261,10 +280,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         _hostname = nil;
     }
     
-    if (packetBuffer) {
-        [packetBuffer release];
-        packetBuffer = nil;
-    }
+    MKConnectionResetReadState(&_readState);
+    MKConnectionResetWriteQueue(&_writeQueue);
     
     if (_crypt) {
         [_crypt release];
@@ -300,120 +317,145 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) main {
-    NSRunLoop *runLoop = [NSRunLoop currentRunLoop];
-
-    do {
-        if (_reconnect) {
-            _reconnect = NO;
-            _readyVoice = NO;
-            _udpAvailable = NO;
-            _udpTransportState = MKUDPTransportStateUnknown;
-            _udpConsecutiveSendFailures = 0;
-            _lastUdpRebuildAttemptUsec = 0;
-            _lastUdpReceiveUsec = 0;
-            _lastUdpProbeUsec = 0;
-            _lastTcpTunnelKeepaliveUsec = 0;
-            _lastTcpTunnelReceiveUsec = 0;
-            MKConnectionResetRunningStats(&_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
-            MKConnectionResetRunningStats(&_tcpPingMeanMs, &_tcpPingM2Ms, &_tcpPingSamples);
-            _udpPacketsSent = 0;
-            _tcpPacketsSent = 0;
-            _lastGood = 0;
-            _lastLate = 0;
-            _lastLost = 0;
-            _lastResync = 0;
+    @autoreleasepool {
+        NSRunLoop *runLoop = [NSRunLoop currentRunLoop];
+        @synchronized(self) {
+            _connectionRunLoop = (CFRunLoopRef)CFRetain([runLoop getCFRunLoop]);
         }
-
-        [_crypt release];
-        _crypt = [[MKCryptState alloc] init];
-
-        CFStreamCreatePairWithSocketToHost(kCFAllocatorDefault,
-                                           (CFStringRef)_hostname, (UInt32) _port,
-                                           (CFReadStreamRef *) &_inputStream,
-                                           (CFWriteStreamRef *) &_outputStream);
-
-        if (_inputStream == nil || _outputStream == nil) {
-            MKLogError(Connection, @"MKConnection: Unable to create stream pair.");
-            return;
-        }
-
-        [_inputStream setDelegate:self];
-        [_outputStream setDelegate:self];
-
-        [_inputStream scheduleInRunLoop:runLoop forMode:NSDefaultRunLoopMode];
-        [_outputStream scheduleInRunLoop:runLoop forMode:NSDefaultRunLoopMode];
-
-        [self _setupSsl];
-
-        [_inputStream open];
-        [_outputStream open];
-
-        while (_keepRunning) {
-            if (_reconnect)
-                break;
-            [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]];
-        }
-
-        if (_udpSock) {
-            [self _teardownUdpSock];
-        }
-
-        if (_inputStream) {
-            [_inputStream close];
-            [_inputStream release];
-            _inputStream = nil;
-        }
-
-        if (_outputStream) {
-            [_outputStream close];
-            [_outputStream release];
-            _outputStream = nil;
-        }
-
-        [_pingTimer invalidate];
-        _pingTimer = nil;
-    
-        if (_connectionEstablished && !_rejected) {
-            if ([_delegate respondsToSelector:@selector(connection:closedWithError:)]) {
-                NSError *err = [_connError retain];
+        do {
+            @autoreleasepool {
+                _reconnect = NO;
+                if (!_keepRunning) break;
+                _connectionGeneration += 1;
                 _connectionEstablished = NO;
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [_delegate connection:self closedWithError:err];
-                    [err release];
-                });
-            }
+                _readyVoice = NO;
+                _waitingForTrust = NO;
+                _trustedChain = NO;
+                _rejected = NO;
+                _socket = -1;
+                _udpAvailable = NO;
+                _udpTransportState = MKUDPTransportStateUnknown;
+                _udpConsecutiveSendFailures = 0;
+                _lastUdpRebuildAttemptUsec = 0;
+                _lastUdpReceiveUsec = 0;
+                _lastUdpProbeUsec = 0;
+                _lastTcpTunnelKeepaliveUsec = 0;
+                _lastTcpTunnelReceiveUsec = 0;
+                memset(&_tcpPingState, 0, sizeof(_tcpPingState));
+                memset(&_udpPingState, 0, sizeof(_udpPingState));
+                _lastTcpWriteProgressUsec = 0;
+                _lastCryptResyncRequestUsec = 0;
+                _lastCryptSetupUsec = 0;
+                _handshakeCompleteUsec = 0;
+                _attemptStartUsec = [self _currentTimeStamp];
+                _connTime = _attemptStartUsec;
+                MKConnectionResetReadState(&_readState);
+                MKConnectionResetWriteQueue(&_writeQueue);
+                MKConnectionResetRunningStats(&_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
+                MKConnectionResetRunningStats(&_tcpPingMeanMs, &_tcpPingM2Ms, &_tcpPingSamples);
+                _udpPacketsSent = _tcpPacketsSent = 0;
+                _lastGood = _lastLate = _lastLost = _lastResync = 0;
+                [_connError release]; _connError = nil;
+                [_peerCertificates release]; _peerCertificates = nil;
+                [_serverVersion release]; _serverVersion = nil;
+                [_serverRelease release]; _serverRelease = nil;
+                [_serverOSName release]; _serverOSName = nil;
+                [_serverOSVersion release]; _serverOSVersion = nil;
+                [_crypt release];
+                _crypt = [[MKCryptState alloc] init];
 
-        } else if (_connError != nil) {
-            if ([_delegate respondsToSelector:@selector(connection:unableToConnectWithError:)]) {
-                NSError *err = [_connError retain];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [_delegate connection:self unableToConnectWithError:err];
-                    [err release];
-                });
+                CFStreamCreatePairWithSocketToHost(kCFAllocatorDefault,
+                    (CFStringRef)_hostname, (UInt32)_port,
+                    (CFReadStreamRef *)&_inputStream, (CFWriteStreamRef *)&_outputStream);
+                if (!_inputStream || !_outputStream) {
+                    [self _handleError:[NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM
+                        userInfo:@{NSLocalizedDescriptionKey: @"Unable to create connection streams."}]];
+                } else {
+                    [_inputStream setDelegate:self];
+                    [_outputStream setDelegate:self];
+                    [_inputStream scheduleInRunLoop:runLoop forMode:NSDefaultRunLoopMode];
+                    [_outputStream scheduleInRunLoop:runLoop forMode:NSDefaultRunLoopMode];
+                    [self _setupSsl];
+                    _watchdogTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self
+                        selector:@selector(_watchdogTimerFired:) userInfo:nil repeats:YES];
+                    [_inputStream open];
+                    [_outputStream open];
+                    while (_keepRunning && !_reconnect) {
+                        @autoreleasepool {
+                            // A bounded run prevents a lost wake during startup from trapping shutdown.
+                            [runLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:1.0]];
+                        }
+                    }
+                }
+
+                [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_dataReady) object:nil];
+                [self _teardownUdpSock];
+                [_watchdogTimer invalidate]; _watchdogTimer = nil;
+                [_pingTimer invalidate]; _pingTimer = nil;
+                for (NSStream *stream in @[_inputStream ?: (id)[NSNull null], _outputStream ?: (id)[NSNull null]]) {
+                    if ((id)stream == [NSNull null]) continue;
+                    [stream setDelegate:nil];
+                    [stream removeFromRunLoop:runLoop forMode:NSDefaultRunLoopMode];
+                    [stream close];
+                }
+                [_inputStream release]; _inputStream = nil;
+                [_outputStream release]; _outputStream = nil;
+                _socket = -1;
+                MKConnectionResetReadState(&_readState);
+                MKConnectionResetWriteQueue(&_writeQueue);
+                BOOL wasEstablished = _connectionEstablished;
+                _connectionEstablished = NO;
+                _readyVoice = NO;
+                [[MKAudio sharedAudio] clearMainConnectionForAudioIfMatches:self];
+
+                if (!_reconnect && !_rejected) {
+                    NSError *error = [[_connError retain] autorelease];
+                    if (wasEstablished) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            id delegate = [self delegate];
+                            if ([delegate respondsToSelector:@selector(connection:closedWithError:)])
+                                [delegate connection:self closedWithError:error];
+                        });
+                    } else if (error) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            id delegate = [self delegate];
+                            if ([delegate respondsToSelector:@selector(connection:unableToConnectWithError:)])
+                                [delegate connection:self unableToConnectWithError:error];
+                        });
+                    }
+                }
             }
+        } while (_keepRunning && _reconnect);
+        @synchronized(self) {
+            CFRelease(_connectionRunLoop);
+            _connectionRunLoop = NULL;
         }
-
-        _connectionEstablished = NO;
-        _rejected = NO;
-
-        // Remove the connection as the main connection for audio.
-        [[MKAudio sharedAudio] setMainConnectionForAudio:nil];
-
-    } while (_reconnect);
-    
-    [_crypt release];
-    _crypt = nil;
-
-    [NSThread exit];
-}
-
-- (void) _wakeRunLoopHelper:(id)noObject {
-    CFRunLoopRef runLoop = [[NSRunLoop currentRunLoop] getCFRunLoop];
-    CFRunLoopWakeUp(runLoop);
+        [_crypt release]; _crypt = nil;
+    }
 }
 
 - (void) _wakeRunLoop {
-    [self performSelector:@selector(_wakeRunLoopHelper:) onThread:self withObject:nil waitUntilDone:NO];
+    @synchronized(self) {
+        if (_connectionRunLoop) CFRunLoopWakeUp(_connectionRunLoop);
+    }
+}
+
+// Run-loop blocks have the lifetime of this attempt; sending to a finished NSThread
+// with performSelector:onThread: can race shutdown and raise an exception.
+- (void) _performOnConnectionThread:(SEL)selector object:(id)object {
+    if ([NSThread currentThread] == self) {
+        if (_keepRunning && !_reconnect) [self performSelector:selector withObject:object];
+        return;
+    }
+    @synchronized(self) {
+        if (!_connectionRunLoop || !_keepRunning || _reconnect) return;
+        uint64_t generation = _connectionGeneration;
+        CFRunLoopPerformBlock(_connectionRunLoop, kCFRunLoopDefaultMode, ^{
+            if (_keepRunning && !_reconnect && generation == _connectionGeneration)
+                [self performSelector:selector withObject:object];
+        });
+        CFRunLoopWakeUp(_connectionRunLoop);
+    }
 }
 
 - (void) connectToHost:(NSString *)hostName port:(NSUInteger)portNumber {
@@ -428,8 +470,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     NSAssert(![self isExecuting], @"Thread is currently executing. Can't start another one.");
 
     _socket = -1;
-    packetLength = -1;
-    _headerBufLen = 0;
+    MKConnectionResetReadState(&_readState);
+    MKConnectionResetWriteQueue(&_writeQueue);
     _connectionEstablished = NO;
     _keepRunning = YES;
     _readyVoice = NO;
@@ -455,26 +497,20 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) stopConnectionThread {
-    if (![self isExecuting])
-        return;
+    // Also cancels the small window after start but before main begins executing.
     _keepRunning = NO;
+    _reconnect = NO;
     [self _wakeRunLoop];
 }
 
 - (void) disconnect {
+    // NSThread retains its target until main returns. Cleanup is performed there;
+    // callers (including the connection thread itself) must never join by spinning.
     [self stopConnectionThread];
-    int attempts = 0;
-    BOOL warned = NO;
-    while ([self isExecuting] && ![self isFinished]) {
-        if (!warned && ++attempts > 300) {
-            MKLogWarning(Connection, @"MKConnection: disconnect still waiting for thread after 3s.");
-            warned = YES;
-        }
-        usleep(10000);
-    }
 }
 
 - (void) reconnect {
+    if (!_keepRunning || [self isFinished]) return;
     _reconnect = YES;
     [self _wakeRunLoop];
 }
@@ -552,12 +588,20 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 #pragma mark NSStream event handlers
 
 - (void) stream:(NSStream *)stream handleEvent:(NSStreamEvent)eventCode {
-    if (stream == _inputStream) {
-        if (eventCode == NSStreamEventHasBytesAvailable)
-            [self _dataReady];
+    if (!_keepRunning || _reconnect || (stream != _inputStream && stream != _outputStream)) return;
+    if (eventCode == NSStreamEventErrorOccurred) {
+        [self _handleError:[stream streamError]];
         return;
     }
-
+    if (eventCode == NSStreamEventEndEncountered) {
+        [self _handleError:[NSError errorWithDomain:NSPOSIXErrorDomain code:ECONNRESET
+            userInfo:@{NSLocalizedDescriptionKey: @"The server closed the connection."}]];
+        return;
+    }
+    if (stream == _inputStream) {
+        if (eventCode == NSStreamEventHasBytesAvailable) [self _dataReady];
+        return;
+    }
     switch (eventCode) {
         case NSStreamEventOpenCompleted: {
             CFDataRef nativeHandle = CFWriteStreamCopyProperty((CFWriteStreamRef) _outputStream, kCFStreamPropertySocketNativeHandle);
@@ -571,6 +615,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
             if (_socket != -1) {
                 int val = 1;
                 setsockopt(_socket, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
+                setsockopt(_socket, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val));
+#ifdef SO_NOSIGPIPE
+                setsockopt(_socket, SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val));
+#endif
                 [self _applyQoSToTCPSocketIfAvailable];
             }
 
@@ -584,19 +632,25 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
         case NSStreamEventHasSpaceAvailable: {
             if (! _connectionEstablished) {
+                if (_waitingForTrust) break;
                 _connectionEstablished = YES;
+                _handshakeCompleteUsec = [self _currentTimeStamp];
                 [self _updateTLSTrustedStatus];
+                [self peerCertificates];
                 [[MKAudio sharedAudio] setMainConnectionForAudio:self];
                 
                 _pingTimer = [NSTimer timerWithTimeInterval:MKConnectionPingInterval target:self selector:@selector(_pingTimerFired:) userInfo:nil repeats:YES];
                 [[NSRunLoop currentRunLoop] addTimer:_pingTimer forMode:NSRunLoopCommonModes];
 
-                if ([_delegate respondsToSelector:@selector(connectionOpened:)]) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [_delegate connectionOpened:self];
-                    });
-                }
+                uint64_t generation = _connectionGeneration;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    id delegate = [self delegate];
+                    if (generation == _connectionGeneration && _keepRunning && !_reconnect &&
+                        [delegate respondsToSelector:@selector(connectionOpened:)])
+                        [delegate connectionOpened:self];
+                });
             }
+            [self _flushTCPWrites];
             break;
         }
 
@@ -620,10 +674,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
 #pragma mark -
 
-- (void) setDelegate:(id<MKConnectionDelegate>)delegate { _delegate = delegate; }
-- (id<MKConnectionDelegate>) delegate { return _delegate; }
-- (void) setMessageHandler:(id<MKMessageHandler>)messageHandler { _msgHandler = messageHandler; }
-- (id<MKMessageHandler>) messageHandler { return _msgHandler; }
+- (void) setDelegate:(id<MKConnectionDelegate>)delegate { @synchronized(self) { _delegate = delegate; } }
+- (id<MKConnectionDelegate>) delegate { @synchronized(self) { return [[_delegate retain] autorelease]; } }
+- (void) setMessageHandler:(id<MKMessageHandler>)messageHandler { @synchronized(self) { _msgHandler = messageHandler; } }
+- (id<MKMessageHandler>) messageHandler { @synchronized(self) { return [[_msgHandler retain] autorelease]; } }
 
 #pragma mark -
 
@@ -652,7 +706,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
     _udpAvailable = NO;
     _udpConsecutiveSendFailures = 0;
-    _lastUdpReceiveUsec = [self _currentTimeStamp];
+    _lastUdpReceiveUsec = 0;
     struct sockaddr_storage sa;
 
     socklen_t sl = sizeof(sa);
@@ -676,12 +730,16 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     [self _applyQoSToUDPSocketIfAvailable];
 
     CFRunLoopSourceRef src = CFSocketCreateRunLoopSource(NULL, _udpSock, 0);
+    if (!src) {
+        [self _teardownUdpSock];
+        return;
+    }
     CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopDefaultMode);
     CFRelease(src);
 
     NSData *_udpAddr = [[[NSData alloc] initWithBytes:&sa length:(NSUInteger)sl] autorelease];
     CFSocketError err = CFSocketConnectToAddress(_udpSock, (CFDataRef)_udpAddr, -1);
-    if (err == kCFSocketError) {
+    if (err != kCFSocketSuccess) {
         MKLogError(Connection, @"MKConnection: Unable to CFSocketConnectToAddress()");
         [self _teardownUdpSock];
         return;
@@ -689,6 +747,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) _teardownUdpSock {
+    memset(&_udpPingState, 0, sizeof(_udpPingState));
     _udpAvailable = NO;
     _udpConsecutiveSendFailures = 0;
     _lastUdpReceiveUsec = 0;
@@ -705,7 +764,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
 // ✅ FIXED: Use kCFStreamPropertySSLPeerTrust instead of kCFStreamPropertySSLPeerCertificates
 - (NSArray *) peerCertificates {
-    if (_peerCertificates != nil) {
+    if (_peerCertificates != nil || !_outputStream) {
         return _peerCertificates;
     }
 
@@ -774,8 +833,9 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) setQoSEnabled:(BOOL)flag {
+    if (![self isExecuting]) { _enableQoS = flag; return; }
     if ([NSThread currentThread] != self) {
-        [self performSelector:@selector(_applyQoSOnConnectionThread:) onThread:self withObject:@(flag) waitUntilDone:NO];
+        [self _performOnConnectionThread:@selector(_applyQoSOnConnectionThread:) object:@(flag)];
         return;
     }
 
@@ -836,8 +896,9 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) setForceTCP:(BOOL)flag {
+    if (![self isExecuting]) { _forceTCP = flag; return; }
     if ([NSThread currentThread] != self) {
-        [self performSelector:@selector(_applyForceTCPOnConnectionThread:) onThread:self withObject:@(flag) waitUntilDone:NO];
+        [self _performOnConnectionThread:@selector(_applyForceTCPOnConnectionThread:) object:@(flag)];
         return;
     }
 
@@ -850,8 +911,11 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     _forceTCP = flag;
     if (_forceTCP) {
         [self _teardownUdpSock];
+        [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
     } else if (_connectionEstablished && _socket != -1 && !_udpSock) {
         [self _setupUdpSock];
+        _lastUdpProbeUsec = 0;
+        if ([_crypt valid]) [self _sendUDPPingWithTimestamp:([self _currentTimeStamp] - _connTime)];
     }
 }
 
@@ -864,7 +928,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         return NO;
     }
 
-    if (![_crypt valid] || _udpSock == NULL || !CFSocketIsValid(_udpSock)) {
+    if (![_crypt valid]) return NO;
+    if (_udpSock == NULL || !CFSocketIsValid(_udpSock)) {
         MKLogWarning(Connection, @"MKConnection: Invalid CryptState or CFSocket.");
         _udpAvailable = NO;
         [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
@@ -883,9 +948,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         return NO;
     }
 
-    CFSocketError err = CFSocketSendData(_udpSock, NULL, (CFDataRef)crypted, -1.0f);
-    if (err != kCFSocketSuccess) {
-        MKLogWarning(Connection, @"MKConnection: CFSocketSendData failed with err=%i", (int)err);
+    // UDP must never wait on a full kernel send buffer on the connection thread.
+    ssize_t sent = send(CFSocketGetNative(_udpSock), [crypted bytes], [crypted length], MSG_DONTWAIT);
+    if (sent < 0 || (NSUInteger)sent != [crypted length]) {
+        MKLogWarning(Connection, @"MKConnection: UDP send failed with errno=%d", errno);
         _udpAvailable = NO;
         [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
         _udpConsecutiveSendFailures += 1;
@@ -901,7 +967,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 
 - (BOOL) _sendUDPPingWithTimestamp:(uint64_t)timeStamp {
     unsigned char buf[16];
-    MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:16];
+    MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:sizeof(buf)-1];
     buf[0] = UDPPingMessage << 5;
     [pds addVarint:timeStamp];
 
@@ -909,6 +975,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     if ([pds valid]) {
         NSData *data = [[NSData alloc] initWithBytesNoCopy:buf length:[pds size]+1 freeWhenDone:NO];
         sent = [self _sendUDPMessage:data];
+        if (sent) MKConnectionRecordPing(&_udpPingState, timeStamp, [self _currentTimeStamp]);
         [data release];
     }
 
@@ -917,7 +984,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (BOOL) _shouldProbeUDPAtTime:(uint64_t)now {
-    if (_forceTCP || _udpAvailable || _udpSock == NULL) {
+    if (_forceTCP || _udpAvailable || ![_crypt valid]) {
         return NO;
     }
 
@@ -940,7 +1007,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 
     unsigned char buf[16];
-    MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:16];
+    MKPacketDataStream *pds = [[MKPacketDataStream alloc] initWithBuffer:buf+1 length:sizeof(buf)-1];
     buf[0] = UDPPingMessage << 5;
     [pds addVarint:timeStamp];
 
@@ -970,6 +1037,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
 
     _lastUdpRebuildAttemptUsec = now;
+    _lastUdpProbeUsec = 0;
     BOOL shouldSurfaceRecovery = (_udpTransportState == MKUDPTransportStateAvailable ||
                                   _udpTransportState == MKUDPTransportStateStalled);
     if (shouldSurfaceRecovery) {
@@ -982,13 +1050,14 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) sendMessageWithType:(MKMessageType)messageType data:(NSData *)data {
+    if (!data || !_keepRunning || !_connectionEstablished) return;
     NSDictionary *dict = [[NSDictionary alloc] initWithObjectsAndKeys:
                             data, @"data",
                             [NSNumber numberWithInt:(int)messageType], @"messageType",
                             nil];
 
     if ([NSThread currentThread] != self) {
-        [self performSelector:@selector(_sendMessageHelper:) onThread:self withObject:dict waitUntilDone:NO];
+        [self _performOnConnectionThread:@selector(_sendMessageHelper:) object:dict];
     } else {
         [self _sendMessageHelper:dict];
     }
@@ -997,40 +1066,45 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) _sendMessageHelper:(NSDictionary *)dict {
-    if (!_connectionEstablished)
-        return;
-
+    if (!_keepRunning || _reconnect || !_connectionEstablished) return;
     NSData *data = [dict objectForKey:@"data"];
     MKMessageType messageType = (MKMessageType)[[dict objectForKey:@"messageType"] intValue];
-    
-    UInt16 type = CFSwapInt16HostToBig((UInt16)messageType);
-    UInt32 length = CFSwapInt32HostToBig((UInt32)[data length]);
-
-    NSUInteger expectedLength = sizeof(UInt16) + sizeof(UInt32) + [data length];
-    NSMutableData *msg = [[NSMutableData alloc] initWithCapacity:expectedLength];
-    [msg appendBytes:&type length:sizeof(UInt16)];
-    [msg appendBytes:&length length:sizeof(UInt32)];
-    [msg appendData:data];
-
-    NSInteger nwritten = [_outputStream write:[msg bytes] maxLength:[msg length]];
-    if (nwritten != expectedLength) {
-        MKLogError(Connection, @"MKConnection: write error, wrote %li, expected %lu", (long int)nwritten, (unsigned long)expectedLength);
-    } else if (_tcpPacketsSent < UINT32_MAX) {
-        _tcpPacketsSent += 1;
+    // New live voice may be shed under backpressure. Never drop part of a frame
+    // already queued, and never silently discard reliable control messages.
+    if (messageType == UDPTunnelMessage && _writeQueue.pendingBytes >= MKConnectionVoiceBacklogLimit) return;
+    BOOL wasEmpty = _writeQueue.pendingBytes == 0;
+    if (!MKConnectionEnqueueFrame(&_writeQueue, (uint16_t)messageType, data)) {
+        [self _handleError:[NSError errorWithDomain:NSPOSIXErrorDomain code:ENOBUFS
+            userInfo:@{NSLocalizedDescriptionKey: @"The connection send queue is full."}]];
+        return;
     }
-    [msg release];
+    if (wasEmpty) _lastTcpWriteProgressUsec = [self _currentTimeStamp];
+    [self _flushTCPWrites];
+}
+
+- (void) _flushTCPWrites {
+    if (!_keepRunning || _reconnect || !_connectionEstablished) return;
+    NSUInteger written = 0;
+    uint32_t frames = 0;
+    if (!MKConnectionFlushFrames(&_writeQueue, _outputStream, &written, &frames)) {
+        [self _handleError:[_outputStream streamError]];
+        return;
+    }
+    if (written) _lastTcpWriteProgressUsec = [self _currentTimeStamp];
+    _tcpPacketsSent += MIN(frames, UINT32_MAX - _tcpPacketsSent);
 }
 
 - (void) sendVoiceData:(NSData *)data {
+    if (!data || !_keepRunning || !_connectionEstablished) return;
     if ([NSThread currentThread] == self) {
         [self _sendVoiceDataOnConnectionThread:data];
     } else {
-        [self performSelector:@selector(_sendVoiceDataOnConnectionThread:) onThread:self withObject:data waitUntilDone:NO];
+        [self _performOnConnectionThread:@selector(_sendVoiceDataOnConnectionThread:) object:data];
     }
 }
 
 - (void) _sendVoiceDataOnConnectionThread:(NSData *)data {
-    if (!_readyVoice || !_connectionEstablished)
+    if (!_keepRunning || _reconnect || !_readyVoice || !_connectionEstablished)
         return;
     [self _checkUdpLivenessAndRecoverIfNeeded];
     if (!_forceTCP && _udpAvailable) {
@@ -1049,95 +1123,95 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     }
     _udpTransportState = newState;
 
-    if ([_delegate respondsToSelector:@selector(connection:udpTransportStateChanged:)]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [_delegate connection:self udpTransportStateChanged:newState];
-        });
-    }
+    uint64_t generation = _connectionGeneration;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        id delegate = [self delegate];
+        if (generation == _connectionGeneration && _keepRunning && !_reconnect &&
+            [delegate respondsToSelector:@selector(connection:udpTransportStateChanged:)])
+            [delegate connection:self udpTransportStateChanged:newState];
+    });
 }
 
 - (void) _udpDataReady:(NSData *)crypted {
-    if (! _udpAvailable) {
-        _udpAvailable = true;
-        [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateAvailable];
-        MKLogInfo(Connection, @"MKConnection: UDP is now available!");
-    }
-    _udpConsecutiveSendFailures = 0;
-    _lastUdpReceiveUsec = [self _currentTimeStamp];
-    _lastUdpProbeUsec = 0;
-
-    if ([crypted length] > 4) {
-        NSData *plain = [_crypt decryptData:crypted];
-        if (plain) {
-            [self _udpMessageReceived:plain];
+    if (!_keepRunning || _reconnect || _forceTCP || ![_crypt valid] || [crypted length] <= 4) return;
+    NSData *plain = [_crypt decryptData:crypted];
+    if (!plain) {
+        uint64_t now = [self _currentTimeStamp];
+        uint64_t lastGood = _lastUdpReceiveUsec ?: _lastCryptSetupUsec;
+        if (MKConnectionDeadlineExpired(now, lastGood, MKConnectionCryptResyncIntervalUsec) &&
+            (_lastCryptResyncRequestUsec == 0 || MKConnectionDeadlineExpired(now, _lastCryptResyncRequestUsec, MKConnectionCryptResyncIntervalUsec))) {
+            _lastCryptResyncRequestUsec = now;
+            [self sendMessageWithType:CryptSetupMessage data:[[[MPCryptSetup builder] build] data]];
+            MKLogWarning(Connection, @"MKConnection: Requesting UDP nonce resynchronization.");
         }
+        return;
     }
+    // Voice proves only the receive path. Only an echoed UDP probe may restore
+    // the send route; continuous downlink voice can otherwise mask uplink loss.
+    _lastUdpReceiveUsec = [self _currentTimeStamp];
+    [self _udpMessageReceived:plain viaUDP:YES];
 }
 
 - (void) _dataReady {
-    if (!packetBuffer) {
-        packetBuffer = [[NSMutableData alloc] initWithLength:0];
-    }
-
-    if (packetLength == -1) {
-        NSInteger need = 6 - _headerBufLen;
-        NSInteger got = [_inputStream read:&_headerBuf[_headerBufLen] maxLength:need];
-        if (got <= 0) {
-            return;
+    if (!_keepRunning || _reconnect || _waitingForTrust) return;
+    @try {
+        MKConnectionReadResult result = MKConnectionReadFrames(&_readState, _inputStream, ^BOOL(uint16_t type, NSData *data) {
+            packetType = (MKMessageType)type;
+            [self _messageRecieved:data];
+            return _keepRunning && !_reconnect;
+        });
+        switch (result) {
+            case MKConnectionReadContinue:
+                [self performSelector:@selector(_dataReady) withObject:nil afterDelay:0];
+                break;
+            case MKConnectionReadError:
+                [self _handleError:[_inputStream streamError]];
+                break;
+            case MKConnectionReadEOF:
+            case MKConnectionReadOversized:
+                [self _handleError:[NSError errorWithDomain:NSPOSIXErrorDomain
+                    code:result == MKConnectionReadEOF ? ECONNRESET : EMSGSIZE
+                    userInfo:@{NSLocalizedDescriptionKey: result == MKConnectionReadEOF ?
+                        @"The server closed the connection." : @"The server sent an oversized protocol message."}]];
+                break;
+            case MKConnectionReadDrained: break;
         }
-        _headerBufLen += got;
-        if (_headerBufLen < 6) {
-            return;
-        }
-
-        packetType = (MKMessageType) CFSwapInt16BigToHost(*(UInt16 *)(&_headerBuf[0]));
-        UInt32 rawLen = CFSwapInt32BigToHost(*(UInt32 *)(&_headerBuf[2]));
-        _headerBufLen = 0;
-
-        if (rawLen > 8 * 1024 * 1024) {
-            MKLogError(Connection, @"MKConnection: Received absurd packet length (%u). Dropping connection.", (unsigned)rawLen);
-            _keepRunning = NO;
-            return;
-        }
-
-        packetLength = (int)rawLen;
-        packetBufferOffset = 0;
-        [packetBuffer setLength:packetLength];
-    }
-
-    if (packetLength > 0) {
-        UInt8 *packetBytes = [packetBuffer mutableBytes];
-        if (!packetBytes) {
-            MKLogWarning(Connection, @"MKConnection: NSMutableData is stubborn.");
-            return;
-        }
-
-        NSInteger availableBytes = [_inputStream read:packetBytes + packetBufferOffset maxLength:packetLength];
-        if (availableBytes <= 0) {
-            return;
-        }
-        packetLength -= availableBytes;
-        packetBufferOffset += availableBytes;
-    }
-
-    if (packetLength == 0) {
-        [self _messageRecieved:packetBuffer];
-        [packetBuffer setLength:0];
-        packetLength = -1;
+    } @catch (NSException *exception) {
+        MKLogError(Connection, @"MKConnection: Invalid protocol message (%@).", [exception name]);
+        [self _handleError:[NSError errorWithDomain:NSPOSIXErrorDomain code:EPROTO
+            userInfo:@{NSLocalizedDescriptionKey: @"The server sent an invalid protocol message."}]];
     }
 }
 
 - (uint64_t) _currentTimeStamp {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
+    // Includes sleep but is unaffected by wall-clock corrections.
+    return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1000ULL;
+}
 
-    uint64_t ret = tv.tv_sec * 1000000ULL;
-    ret += tv.tv_usec;
-
-    return ret;
+- (void) _watchdogTimerFired:(NSTimer *)timer {
+    if (!_keepRunning || _reconnect || _waitingForTrust) return;
+    uint64_t now = [self _currentTimeStamp];
+    NSString *reason = nil;
+    if (!_connectionEstablished && MKConnectionDeadlineExpired(now, _attemptStartUsec, MKConnectionHandshakeTimeoutUsec))
+        reason = @"The TCP/TLS connection timed out.";
+    else if (_connectionEstablished && !_readyVoice && MKConnectionDeadlineExpired(now, _handshakeCompleteUsec, MKConnectionServerSyncTimeoutUsec))
+        reason = @"The server did not complete authentication in time.";
+    else if (_connectionEstablished && MKConnectionDeadlineExpired(now, _tcpPingState.lastReplyUsec ?: _handshakeCompleteUsec, MKConnectionTCPTimeoutUsec))
+        reason = @"The server stopped responding to connection heartbeats.";
+    else if (_writeQueue.pendingBytes && MKConnectionDeadlineExpired(now, _lastTcpWriteProgressUsec, MKConnectionWriteTimeoutUsec))
+        reason = @"The connection stopped accepting outgoing data.";
+    if (reason) {
+        MKLogWarning(Connection, @"MKConnection: %@", reason);
+        [self _handleError:[NSError errorWithDomain:NSPOSIXErrorDomain code:ETIMEDOUT
+            userInfo:@{NSLocalizedDescriptionKey: reason}]];
+    } else {
+        [self _flushTCPWrites];
+        [self _checkUdpLivenessAndRecoverIfNeeded];
+    }
 }
 
 - (void) _pingTimerFired:(NSTimer *)timer {
+    if (!_keepRunning || _reconnect || !_connectionEstablished) return;
     NSData *data;
     uint64_t now = [self _currentTimeStamp];
     uint64_t timeStamp = now - _connTime;
@@ -1177,6 +1251,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     [ping setTcpPackets:_tcpPacketsSent];
 
     data = [[ping build] data];
+    MKConnectionRecordPing(&_tcpPingState, timeStamp, now);
     [self sendMessageWithType:PingMessage data:data];
 
     MKLogDebug(Connection, @"MKConnection: Sent ping message (udpAvg=%.2fms, tcpAvg=%.2fms, udpPackets=%u, tcpPackets=%u).",
@@ -1184,17 +1259,11 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) _checkUdpLivenessAndRecoverIfNeeded {
-    if (_forceTCP || !_connectionEstablished || _socket == -1) {
-        return;
-    }
-
+    if (_forceTCP || !_connectionEstablished || _socket == -1 || ![_crypt valid]) return;
     uint64_t now = [self _currentTimeStamp];
-    if (_lastUdpReceiveUsec == 0) {
-        _lastUdpReceiveUsec = now;
-        return;
-    }
-
-    uint64_t idleUsec = now - _lastUdpReceiveUsec;
+    uint64_t baseline = _udpPingState.lastReplyUsec ?: _lastCryptSetupUsec;
+    if (baseline == 0) return;
+    uint64_t idleUsec = now >= baseline ? now - baseline : 0;
     if (_udpAvailable && idleUsec >= MKUDPReceiveStallThresholdUsec) {
         MKLogWarning(Connection, @"MKConnection: UDP stalled for %.2fs, forcing TCP fallback and rebuilding UDP socket.",
               (double)idleUsec / 1000000.0);
@@ -1207,7 +1276,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         return;
     }
 
-    if (!_udpAvailable && idleUsec >= MKUDPReceiveStallThresholdUsec) {
+    if (!_udpAvailable && idleUsec >= MKUDPProbeIntervalUsec &&
+        (_lastUdpRebuildAttemptUsec == 0 || MKConnectionDeadlineExpired(now, _lastUdpRebuildAttemptUsec, MKUDPProbeIntervalUsec))) {
         [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateUnavailable];
         [self _sendTcpTunnelKeepaliveWithTimestamp:(now - _connTime)];
         _udpConsecutiveSendFailures = MKUDPRebuildFailureThreshold;
@@ -1216,17 +1286,13 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) _pingResponseFromServer:(MPPing *)pingMessage {
-    uint64_t nowUsec = [self _currentTimeStamp] - _connTime;
-
-    if ([pingMessage hasTimestamp]) {
-        uint64_t sentUsec = [pingMessage timestamp];
-        if (nowUsec >= sentUsec) {
-            uint64_t rttUsec = nowUsec - sentUsec;
-            // Guard against obviously stale/invalid timestamps.
-            if (rttUsec <= 5ULL * 60ULL * 1000000ULL) {
-                MKConnectionAddSample((double)rttUsec / 1000.0, &_tcpPingMeanMs, &_tcpPingM2Ms, &_tcpPingSamples);
-            }
-        }
+    uint64_t now = [self _currentTimeStamp];
+    if ([pingMessage hasTimestamp] &&
+        MKConnectionAcceptPingReply(&_tcpPingState, [pingMessage timestamp], now, MKConnectionTCPTimeoutUsec)) {
+        uint64_t elapsed = now - _connTime;
+        uint64_t timestamp = [pingMessage timestamp];
+        if (elapsed >= timestamp)
+            MKConnectionAddSample((double)(elapsed - timestamp) / 1000.0, &_tcpPingMeanMs, &_tcpPingM2Ms, &_tcpPingSamples);
     }
 
     if ([pingMessage hasGood]) {
@@ -1252,36 +1318,65 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     if ([rejectMessage hasReason])
         explanationString = [rejectMessage reason];
 
-    if ([_delegate respondsToSelector:@selector(connection:rejectedWithReason:explanation:)]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [_delegate connection:self rejectedWithReason:reason explanation:explanationString];
-        });
-    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        id delegate = [self delegate];
+        if ([delegate respondsToSelector:@selector(connection:rejectedWithReason:explanation:)])
+            [delegate connection:self rejectedWithReason:reason explanation:explanationString];
+    });
 
     _rejected = YES;
     [self stopConnectionThread];
 }
 
 - (void) _doCryptSetup:(MPCryptSetup *)cryptSetup {
-    MKLogInfo(Connection, @"MKConnection: Got CryptSetup from server.");
-
+    // Mumble supports full setup, server nonce resync, and an empty request
+    // asking the client to report its current encryption nonce.
     if ([cryptSetup hasKey] && [cryptSetup hasClientNonce] && [cryptSetup hasServerNonce]) {
+        if ([[cryptSetup key] length] != 16 || [[cryptSetup clientNonce] length] != 16 ||
+            [[cryptSetup serverNonce] length] != 16) {
+            [self _handleError:[NSError errorWithDomain:NSPOSIXErrorDomain code:EPROTO
+                userInfo:@{NSLocalizedDescriptionKey: @"The server sent invalid voice encryption parameters."}]];
+            return;
+        }
         [_crypt setKey:[cryptSetup key] eiv:[cryptSetup clientNonce] div:[cryptSetup serverNonce]];
+        _lastCryptSetupUsec = [self _currentTimeStamp];
+        _udpAvailable = NO;
+        _lastUdpReceiveUsec = 0;
+        memset(&_udpPingState, 0, sizeof(_udpPingState));
         MKLogInfo(Connection, @"MKConnection: CryptState initialized.");
+    } else if ([cryptSetup hasServerNonce] && ![cryptSetup hasKey] && ![cryptSetup hasClientNonce] && [_crypt valid]) {
+        if ([[cryptSetup serverNonce] length] != 16) {
+            [self _handleError:[NSError errorWithDomain:NSPOSIXErrorDomain code:EPROTO
+                userInfo:@{NSLocalizedDescriptionKey: @"The server sent an invalid voice encryption nonce."}]];
+            return;
+        }
+        [_crypt setDecryptIV:[cryptSetup serverNonce]];
+        MKLogInfo(Connection, @"MKConnection: UDP decrypt nonce resynchronized.");
+    } else if (![cryptSetup hasKey] && ![cryptSetup hasClientNonce] && ![cryptSetup hasServerNonce] && [_crypt valid]) {
+        MPCryptSetup_Builder *response = [MPCryptSetup builder];
+        [response setClientNonce:[_crypt encryptIV]];
+        [self sendMessageWithType:CryptSetupMessage data:[[response build] data]];
+        return;
+    } else {
+        [self _handleError:[NSError errorWithDomain:NSPOSIXErrorDomain code:EPROTO
+            userInfo:@{NSLocalizedDescriptionKey: @"The server sent incomplete voice encryption parameters."}]];
+        return;
+    }
+    if (!_forceTCP) {
+        _lastUdpProbeUsec = [self _currentTimeStamp];
+        [self _sendUDPPingWithTimestamp:(_lastUdpProbeUsec - _connTime)];
     }
 }
 
 - (void) _versionMessageReceived:(MPVersion *)msg {
     if ([msg hasVersion]) {
         int32_t version = [msg version];
-        _serverVersion = [[NSString alloc] initWithFormat:@"%i.%i.%i", (version >> 8) & 0xff, (version >> 4) & 0xff, version & 0xff, nil];
+        [_serverVersion release];
+        _serverVersion = [[NSString alloc] initWithFormat:@"%i.%i.%i", (version >> 16) & 0xffff, (version >> 8) & 0xff, version & 0xff];
     }
-    if ([msg hasRelease])
-        _serverRelease = [[msg release] copy];
-    if ([msg hasOs])
-        _serverOSName = [[msg os] copy];
-    if ([msg hasOsVersion])
-        _serverOSVersion = [[msg osVersion] copy];
+    if ([msg hasRelease]) { [_serverRelease release]; _serverRelease = [[msg release] copy]; }
+    if ([msg hasOs]) { [_serverOSName release]; _serverOSName = [[msg os] copy]; }
+    if ([msg hasOsVersion]) { [_serverOSVersion release]; _serverOSVersion = [[msg osVersion] copy]; }
 }
 
 - (void) _codecChange:(MPCodecVersion *)codec {
@@ -1324,6 +1419,7 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 }
 
 - (void) _handleError:(NSError *)streamError {
+    if (!_keepRunning || _waitingForTrust) return;
     NSInteger errorCode = [streamError code];
 
     if (errorCode <= errSSLProtocol && errorCode > errSSLLast) {
@@ -1333,8 +1429,10 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         }
     }
 
+    if (!_keepRunning || _waitingForTrust) return;
     [_connError release];
-    _connError = [streamError retain];
+    _connError = [(streamError ?: [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO
+        userInfo:@{NSLocalizedDescriptionKey: @"The connection stream failed."}]) retain];
     [self stopConnectionThread];
 }
 
@@ -1371,12 +1469,16 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 #pragma clang diagnostic pop
 
             case kSecTrustResultRecoverableTrustFailure: {
-                if ([_delegate respondsToSelector:@selector(connection:trustFailureInCertificateChain:)]) {
+                id delegate = [self delegate];
+                if ([delegate respondsToSelector:@selector(connection:trustFailureInCertificateChain:)]) {
+                    _waitingForTrust = YES;
+                    NSArray *chain = [self peerCertificates];
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        [_delegate connection:self trustFailureInCertificateChain:[self peerCertificates]];
+                        if ([self delegate] == delegate)
+                            [delegate connection:self trustFailureInCertificateChain:chain];
                     });
+                    handled = YES;
                 }
-                handled = YES;
                 break;
             }
         }
@@ -1388,7 +1490,8 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
     return NO;
 }
 
-- (void) _udpMessageReceived:(NSData *)data {
+- (void) _udpMessageReceived:(NSData *)data viaUDP:(BOOL)viaUDP {
+    if ([data length] == 0) return;
     unsigned char *buf = (unsigned char *)[data bytes];
     MKUDPMessageType messageType = ((buf[0] >> 5) & 0x7);
     unsigned int messageFlags = buf[0] & 0x1f;
@@ -1407,30 +1510,32 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
             }
             NSUInteger session = [pds getUnsignedInt];
             NSUInteger seq = [pds getUnsignedInt];
+            if (![pds valid] || [pds left] == 0) break;
             NSMutableData *voicePacketData = [[NSMutableData alloc] initWithCapacity:[pds left]+1];
             [voicePacketData setLength:[pds left]+1];
             unsigned char *bytes = [voicePacketData mutableBytes];
             bytes[0] = (unsigned char)messageFlags;
             memcpy(bytes+1, [pds dataPtr], [pds left]);
-            [[MKAudio sharedAudio] addFrameToBufferWithSession:session data:voicePacketData sequence:seq type:messageType];
+            [[MKAudio sharedAudio] addFrameToBufferWithSession:session data:voicePacketData sequence:seq type:messageType connection:self];
             [voicePacketData release];
             break;
         }
 
         case UDPPingMessage: {
             uint64_t timeStamp = [pds getVarint];
-            uint64_t now = [self _currentTimeStamp] - _connTime;
+            if (![pds valid] || [pds left] != 0 || !viaUDP) break;
+            uint64_t now = [self _currentTimeStamp];
+            if (!MKConnectionAcceptPingReply(&_udpPingState, timeStamp, now, MKUDPReceiveStallThresholdUsec)) break;
             if (!_udpAvailable) {
-                MKLogVerbose(Connection, @"TCP tunnel ping response received while UDP is unavailable.");
-                break;
+                _udpAvailable = YES;
+                [self _notifyUDPTransportStateIfChanged:MKUDPTransportStateAvailable];
+                MKLogInfo(Connection, @"MKConnection: Bidirectional UDP probe confirmed.");
             }
-            if (now >= timeStamp) {
-                uint64_t rttUsec = now - timeStamp;
-                if (rttUsec <= 5ULL * 60ULL * 1000000ULL) {
-                    MKConnectionAddSample((double)rttUsec / 1000.0, &_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
-                }
-                MKLogVerbose(Connection, @"UDP ping = %llu usec", rttUsec);
-            }
+            _udpConsecutiveSendFailures = 0;
+            _lastUdpProbeUsec = 0;
+            uint64_t elapsed = now - _connTime;
+            if (elapsed >= timeStamp)
+                MKConnectionAddSample((double)(elapsed - timeStamp) / 1000.0, &_udpPingMeanMs, &_udpPingM2Ms, &_udpPingSamples);
             break;
         }
 
@@ -1445,13 +1550,12 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
 - (void) _messageRecieved:(NSData *)data {
     dispatch_queue_t main_queue = dispatch_get_main_queue();
 
-    if (! _msgHandler)
-        return;
-
+    id messageHandler = [self messageHandler];
+    uint64_t generation = _connectionGeneration;
     switch (packetType) {
         case UDPTunnelMessage: {
             _lastTcpTunnelReceiveUsec = [self _currentTimeStamp];
-            [self _udpMessageReceived:data];
+            [self _udpMessageReceived:data viaUDP:NO];
             break;
         }
         case ServerSyncMessage: {
@@ -1461,117 +1565,130 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
                 [self _sendTcpTunnelKeepaliveWithTimestamp:([self _currentTimeStamp] - _connTime)];
             }
             MPServerSync *serverSync = [MPServerSync parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleServerSyncMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleServerSyncMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleServerSyncMessage:serverSync];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleServerSyncMessage:serverSync];
                 });
             }
             break;
         }
         case ChannelRemoveMessage: {
             MPChannelRemove *channelRemove = [MPChannelRemove parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleChannelRemoveMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleChannelRemoveMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleChannelRemoveMessage:channelRemove];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleChannelRemoveMessage:channelRemove];
                 });
             }
             break;
         }
         case ChannelStateMessage: {
             MPChannelState *channelState = [MPChannelState parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleChannelStateMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleChannelStateMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleChannelStateMessage:channelState];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleChannelStateMessage:channelState];
                 });
             }
             break;
         }
         case UserRemoveMessage: {
             MPUserRemove *userRemove = [MPUserRemove parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleUserRemoveMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleUserRemoveMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleUserRemoveMessage:userRemove];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleUserRemoveMessage:userRemove];
                 });
             }
             break;
         }
         case UserStateMessage: {
             MPUserState *userState = [MPUserState parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleUserStateMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleUserStateMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleUserStateMessage:userState];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleUserStateMessage:userState];
                 });
             }
             break;
         }
         case BanListMessage: {
             MPBanList *banList = [MPBanList parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleBanListMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleBanListMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleBanListMessage:banList];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleBanListMessage:banList];
                  });
             }
             break;
         }
         case TextMessageMessage: {
             MPTextMessage *textMessage = [MPTextMessage parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleTextMessageMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleTextMessageMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleTextMessageMessage:textMessage];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleTextMessageMessage:textMessage];
                 });
             }
             break;
         }
         case PermissionDeniedMessage: {
             MPPermissionDenied *permissionDenied = [MPPermissionDenied parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handlePermissionDeniedMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handlePermissionDeniedMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handlePermissionDeniedMessage:permissionDenied];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handlePermissionDeniedMessage:permissionDenied];
                 });
             }
             break;
         }
         case ACLMessage: {
             MPACL *aclMessage = [MPACL parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleACLMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleACLMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleACLMessage:aclMessage];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleACLMessage:aclMessage];
                 });
             }
             break;
         }
         case QueryUsersMessage: {
             MPQueryUsers *queryUsers = [MPQueryUsers parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleQueryUsersMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleQueryUsersMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleQueryUsersMessage:queryUsers];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleQueryUsersMessage:queryUsers];
                 });
             }
             break;
         }
         case ContextActionModifyMessage: {
             MPContextActionModify *contextActionModify = [MPContextActionModify parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleContextActionModifyMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleContextActionModifyMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleContextActionModifyMessage:contextActionModify];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleContextActionModifyMessage:contextActionModify];
                 });
             }
             break;
         }
         case ContextActionMessage: {
             MPContextAction *contextAction = [MPContextAction parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleContextActionMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleContextActionMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleContextActionMessage:contextAction];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleContextActionMessage:contextAction];
                 });
             }
             break;
         }
         case UserListMessage: {
             MPUserList *userList = [MPUserList parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleUserListMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleUserListMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleUserListMessage:userList];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleUserListMessage:userList];
                 });
             }
             break;
@@ -1579,18 +1696,20 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         case VoiceTargetMessage: {
             MPVoiceTarget *voiceTarget = [MPVoiceTarget parseFromData:data];
             // ✅ FIXED: Correct selector name
-            if ([_msgHandler respondsToSelector:@selector(connection:handleVoiceTargetMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleVoiceTargetMessage:)]) {
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    [_msgHandler connection:self handleVoiceTargetMessage:voiceTarget];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleVoiceTargetMessage:voiceTarget];
                 });
             }
             break;
         }
         case PermissionQueryMessage: {
             MPPermissionQuery *permissionQuery = [MPPermissionQuery parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handlePermissionQueryMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handlePermissionQueryMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handlePermissionQueryMessage:permissionQuery];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handlePermissionQueryMessage:permissionQuery];
                 });
             }
             break;
@@ -1623,27 +1742,30 @@ static void MKConnectionUDPCallback(CFSocketRef sock, CFSocketCallBackType type,
         }
         case ServerConfigMessage: {
             MPServerConfig *serverConfig = [MPServerConfig parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleServerConfigMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleServerConfigMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleServerConfigMessage:serverConfig];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleServerConfigMessage:serverConfig];
                 });
             }
             break;
         }
         case UserStatsMessage: {
             MPUserStats *userStats = [MPUserStats parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleUserStatsMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleUserStatsMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleUserStatsMessage:userStats];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleUserStatsMessage:userStats];
                 });
             }
             break;
         }
         case SuggestConfigMessage: {
             MPSuggestConfig *suggestConfig = [MPSuggestConfig parseFromData:data];
-            if ([_msgHandler respondsToSelector:@selector(connection:handleSuggestConfigMessage:)]) {
+            if ([messageHandler respondsToSelector:@selector(connection:handleSuggestConfigMessage:)]) {
                 dispatch_async(main_queue, ^{
-                    [_msgHandler connection:self handleSuggestConfigMessage:suggestConfig];
+                    if (generation != _connectionGeneration || [self messageHandler] != messageHandler) return;
+                    [messageHandler connection:self handleSuggestConfigMessage:suggestConfig];
                 });
             }
             break;

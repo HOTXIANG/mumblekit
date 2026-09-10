@@ -41,6 +41,7 @@
 
 NSString *MKAudioDidRestartNotification = @"MKAudioDidRestartNotification";
 NSString *MKAudioErrorNotification = @"MKAudioErrorNotification";
+NSString *MKAudioHealthChangedNotification = @"MKAudioHealthChangedNotification";
 #if TARGET_OS_OSX == 1
 static NSString *const MUMacAudioInputDevicesChangedNotification = @"MUMacAudioInputDevicesChanged";
 static NSString *const MUMacAudioVPIOToHALTransitionNotification = @"MUMacAudioVPIOToHALTransition";
@@ -60,6 +61,15 @@ typedef struct _MKAudioPreviewGainProcessorState {
     MKConnection             *_connection;
     MKAudioSettings          _audioSettings;
     BOOL                     _running;
+    BOOL                     _audioRequested;
+    BOOL                     _sessionInterrupted;
+    BOOL                     _mediaServicesLost;
+    NSUInteger               _recoveryGeneration;
+    NSUInteger               _recoveryAttempt;
+    dispatch_source_t        _healthTimer;
+    uint64_t                 _healthStartedAt;
+    NSString                 *_healthState;
+    BOOL                     _cachedForceTransmit;
 
     // 保存闭麦/不听状态，在 audio restart 后恢复
     BOOL                     _cachedSelfMuted;
@@ -84,13 +94,9 @@ typedef struct _MKAudioPreviewGainProcessorState {
     CFAbsoluteTime           _lastDefaultOutputSwitchTime;
     CFAbsoluteTime           _lastCurrentDeviceConfigurationChangeTime;
     CFAbsoluteTime           _suppressCurrentDeviceConfigurationChangesUntil;
-    BOOL                     _isRestartingForDeviceChange;
-    BOOL                     _lastDeviceWasVPIO;
-    NSUInteger               _macRestartGeneration;
-    NSUInteger               _macDeviceRecoveryGeneration;
 #elif TARGET_OS_IPHONE == 1
-    BOOL                     _isRestartingForRouteChange;
-    CFAbsoluteTime           _lastRouteChangeRestartTime;
+    NSString                 *_configuredRouteFingerprint;
+    NSUInteger               _routeRecoveryGeneration;
     dispatch_queue_t         _audioSessionQueue;
 #endif
 
@@ -149,6 +155,16 @@ typedef struct _MKAudioPreviewGainProcessorState {
 - (BOOL)setAudioSessionActive:(BOOL)active options:(AVAudioSessionSetActiveOptions)options error:(NSError **)outError;
 - (void)configureIdleAudioSessionCategory;
 - (void)stopNotifyingOthers:(BOOL)notifyOthers;
+- (void)startAudioDeviceGraphLocked;
+- (void)stopAudioDeviceGraphLockedNotifyingOthers:(BOOL)notifyOthers;
+- (void)scheduleAudioRecoveryLockedAfter:(NSTimeInterval)delay;
+- (void)publishHealthStateLocked:(NSString *)state;
+- (void)startHealthWatchdogLocked;
+- (void)checkCallbackHealthLocked;
+- (void)replaceMainConnectionForAudioLocked:(MKConnection *)connection;
+#if TARGET_OS_IPHONE == 1
+- (NSString *)currentRouteFingerprint;
+#endif
 @end
 
 #if TARGET_OS_OSX == 1
@@ -416,6 +432,17 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     return SAMPLE_RATE;
 }
 
+// Every graph mutation and reader shares this queue. Audio render callbacks only
+// touch their own DSP locks and must never synchronously enter this control queue.
+static const void *kMKAudioAccessQueueKey = &kMKAudioAccessQueueKey;
+static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
+    if (dispatch_get_specific(kMKAudioAccessQueueKey) == queue) {
+        block();
+    } else {
+        dispatch_sync(queue, block);
+    }
+}
+
 @implementation MKAudio
 
 #pragma mark - Singleton & Init
@@ -437,6 +464,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         // P0 修复：创建串行队列用于线程安全访问，替代 @synchronized
         NSString *queueName = [NSString stringWithFormat:@"com.mumble.audio.%p", self];
         _accessQueue = dispatch_queue_create([queueName UTF8String], DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_set_specific(_accessQueue, kMKAudioAccessQueueKey, _accessQueue, NULL);
 #if TARGET_OS_IPHONE == 1
         _audioSessionQueue = dispatch_queue_create("com.mumble.audio.session", DISPATCH_QUEUE_SERIAL);
         dispatch_queue_set_specific(_audioSessionQueue, kMKAudioSessionQueueKey, kMKAudioSessionQueueKey, NULL);
@@ -501,8 +529,6 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         _inputMonitorPPSampleRate = 0;
 
 #if TARGET_OS_IOS
-        [self configureIdleAudioSessionCategory];
-
         // 注册通知监听 (替代旧的 C 回调)
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(handleInterruption:)
@@ -514,6 +540,10 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
                                                      name:AVAudioSessionRouteChangeNotification
                                                    object:nil];
 
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleMediaServicesLost:)
+                                                     name:AVAudioSessionMediaServicesWereLostNotification
+                                                   object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(handleMediaServicesReset:)
                                                      name:AVAudioSessionMediaServicesWereResetNotification
@@ -537,6 +567,16 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #endif
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 
+    if (_healthTimer) {
+        dispatch_source_cancel(_healthTimer);
+        dispatch_release(_healthTimer);
+    }
+    [_healthState release];
+    [self teardownAudioDeviceGraphLocked];
+    [_connection release];
+#if TARGET_OS_IPHONE == 1
+    [_configuredRouteFingerprint release];
+#endif
     // P0 修复：清理访问队列
     if (_accessQueue) {
         dispatch_release(_accessQueue);
@@ -702,88 +742,89 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (void)updateAudioSessionSettings {
     // 只有音频正在运行时才重新应用录音会话，避免未连接时进入 VoiceChat/通话模式。
-    if (_running) {
-        [self setupAudioSession];
-    }
+    MKAudioAccessSync(_accessQueue, ^{
+        if (_running) [self setupAudioSession];
+    });
 }
 
 #pragma mark - Notification Handlers
 
 #if TARGET_OS_IOS
-- (void)handleInterruption:(NSNotification *)notification {
-    NSDictionary *userInfo = notification.userInfo;
-    AVAudioSessionInterruptionType type = [userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
-
-    if (type == AVAudioSessionInterruptionTypeBegan) {
-        MKLogInfo(Audio, @"MKAudio: Interruption BEGAN (Phone call etc.)");
-        [self stop];
-    } else if (type == AVAudioSessionInterruptionTypeEnded) {
-        MKLogInfo(Audio, @"MKAudio: Interruption ENDED. Restarting audio engine...");
-        // 不再依赖 ShouldResume 标志位。电话挂断后该标志经常不被设置，
-        // 导致音频引擎永远无法恢复。只要中断结束且连接仍然活跃，就无条件重启。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (![self _audioShouldBeRunning]) {
-                MKLogInfo(Audio, @"MKAudio: Interruption ended but audio should stay idle.");
-                [self resetAudioSessionToIdle];
-                return;
-            }
-
-            [self restart];
-        });
+- (NSString *)currentRouteFingerprint {
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSMutableString *fingerprint = [NSMutableString stringWithFormat:@"%.0f/%lu/%lu", session.sampleRate,
+        (unsigned long)session.inputNumberOfChannels, (unsigned long)session.outputNumberOfChannels];
+    for (AVAudioSessionPortDescription *port in session.currentRoute.inputs) {
+        [fingerprint appendFormat:@"/in:%@:%@", port.UID, port.selectedDataSource.dataSourceID];
     }
+    for (AVAudioSessionPortDescription *port in session.currentRoute.outputs) {
+        [fingerprint appendFormat:@"/out:%@:%@", port.UID, port.selectedDataSource.dataSourceID];
+    }
+    return fingerprint;
+}
+
+- (void)handleInterruption:(NSNotification *)notification {
+    AVAudioSessionInterruptionType type = [notification.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
+    dispatch_async(_accessQueue, ^{
+        if (type == AVAudioSessionInterruptionTypeBegan) {
+            MKLogInfo(Audio, @"MKAudio: Audio session interrupted; preserving requested audio state.");
+            self->_sessionInterrupted = YES;
+            if (self->_audioRequested) [self publishHealthStateLocked:@"interrupted"];
+            ++self->_recoveryGeneration;
+            [self stopAudioDeviceGraphLockedNotifyingOthers:NO];
+        } else if (type == AVAudioSessionInterruptionTypeEnded) {
+            self->_sessionInterrupted = NO;
+            [self scheduleAudioRecoveryLockedAfter:0.5];
+        }
+    });
 }
 
 - (void)handleRouteChange:(NSNotification *)notification {
-    NSDictionary *userInfo = notification.userInfo;
-    AVAudioSessionRouteChangeReason reason = [userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
-
-    MKLogInfo(Audio, @"MKAudio: Route Changed. Reason: %lu", (unsigned long)reason);
-
-    // 以下情况通常不需要重启：
-    // kAudioSessionRouteChangeReasonOverride (我们自己代码改的)
-    // kAudioSessionRouteChangeReasonCategoryChange (Category 改变)
-
+    AVAudioSessionRouteChangeReason reason = [notification.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
     switch (reason) {
-        case AVAudioSessionRouteChangeReasonNewDeviceAvailable: // 插入耳机
-        case AVAudioSessionRouteChangeReasonOldDeviceUnavailable: // 拔出耳机
-            // 只有音频引擎已经在运行时才重启，避免在未连接服务器时激活麦克风
-            if (_running) {
-                if (![self _audioShouldBeRunning]) {
-                    MKLogInfo(Audio, @"MKAudio: Route changed while audio should be idle. Stopping instead of restarting.");
-                    [self stop];
-                    break;
-                }
-
-                CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-                if (_isRestartingForRouteChange || (now - _lastRouteChangeRestartTime) < 1.0) {
-                    MKLogDebug(Audio, @"MKAudio: Route-change restart suppressed by throttle.");
-                    break;
-                }
-
-                _isRestartingForRouteChange = YES;
-                _lastRouteChangeRestartTime = now;
-                MKLogInfo(Audio, @"MKAudio: Restarting audio due to device change.");
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(350 * NSEC_PER_MSEC)),
-                               dispatch_get_main_queue(), ^{
-                    if (self->_running && [self _audioShouldBeRunning]) {
-                        [self restart];
-                    }
-                    self->_isRestartingForRouteChange = NO;
+        case AVAudioSessionRouteChangeReasonNewDeviceAvailable:
+        case AVAudioSessionRouteChangeReasonOldDeviceUnavailable:
+        case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory:
+        case AVAudioSessionRouteChangeReasonRouteConfigurationChange:
+        case AVAudioSessionRouteChangeReasonWakeFromSleep:
+            dispatch_async(_accessQueue, ^{
+                if (!self->_audioRequested || self->_sessionInterrupted || self->_mediaServicesLost) return;
+                // Debounce the trailing event: dropping events during a throttle
+                // window could leave the graph bound to an already removed route.
+                MKLogInfo(Audio, @"MKAudio: Scheduling audio recovery for route change %lu.", (unsigned long)reason);
+                NSUInteger routeGeneration = ++self->_routeRecoveryGeneration;
+                NSUInteger recoveryGeneration = self->_recoveryGeneration;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), self->_accessQueue, ^{
+                    if (routeGeneration != self->_routeRecoveryGeneration ||
+                        recoveryGeneration != self->_recoveryGeneration) return;
+                    if (self->_running && [[self currentRouteFingerprint] isEqualToString:self->_configuredRouteFingerprint] &&
+                        reason != AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory) return;
+                    [self scheduleAudioRecoveryLockedAfter:0];
                 });
-            }
+            });
             break;
         default:
             break;
     }
 }
 
+- (void)handleMediaServicesLost:(NSNotification *)notification {
+    dispatch_async(_accessQueue, ^{
+        self->_mediaServicesLost = YES;
+        if (self->_audioRequested) [self publishHealthStateLocked:@"interrupted"];
+        ++self->_recoveryGeneration;
+        [self stopAudioDeviceGraphLockedNotifyingOthers:NO];
+    });
+}
+
 - (void)handleMediaServicesReset:(NSNotification *)notification {
-    MKLogWarning(Audio, @"MKAudio: Media Services Reset (Audio daemon crashed). Re-initializing.");
-    // 彻底重置
-    [self stop];
-    if ([self _audioShouldBeRunning]) {
-        [self start];
-    }
+    dispatch_async(_accessQueue, ^{
+        MKLogWarning(Audio, @"MKAudio: Media services reset; rebuilding requested audio graph.");
+        self->_mediaServicesLost = NO;
+        self->_sessionInterrupted = NO;
+        [self stopAudioDeviceGraphLockedNotifyingOthers:NO];
+        [self scheduleAudioRecoveryLockedAfter:0.35];
+    });
 }
 #endif // TARGET_OS_IOS
 
@@ -1016,145 +1057,56 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 }
 
 - (void)handleCurrentAudioDeviceConfigurationChanged {
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now < _suppressCurrentDeviceConfigurationChangesUntil) {
-        _lastCurrentDeviceConfigurationChangeTime = now;
-        MKLogDebug(Audio, @"MKAudio: Suppressing current-device configuration change during audio graph settle.");
-        return;
-    }
-    if (now - _lastCurrentDeviceConfigurationChangeTime < 0.5) {
-        return;
-    }
-    _lastCurrentDeviceConfigurationChangeTime = now;
-
-    dispatch_async(dispatch_get_main_queue(), ^{
+    dispatch_async(_accessQueue, ^{
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now < self->_suppressCurrentDeviceConfigurationChangesUntil) return;
         [self updateCurrentAudioDeviceObservers];
         [self scheduleMacAudioRecoveryRestartWithReason:@"current audio device configuration changed" delay:1.2];
     });
 }
 
 - (void)suppressCurrentAudioDeviceConfigurationChangesForDuration:(NSTimeInterval)duration {
-    CFAbsoluteTime until = CFAbsoluteTimeGetCurrent() + duration;
-    if (until > _suppressCurrentDeviceConfigurationChangesUntil) {
-        _suppressCurrentDeviceConfigurationChangesUntil = until;
-    }
+    _suppressCurrentDeviceConfigurationChangesUntil = MAX(_suppressCurrentDeviceConfigurationChangesUntil,
+                                                        CFAbsoluteTimeGetCurrent() + duration);
 }
 
 - (void)scheduleMacAudioRecoveryRestartWithReason:(NSString *)reason delay:(NSTimeInterval)delay {
-    if (!_running) {
-        return;
-    }
-    if (_isRestartingForDeviceChange) {
-        return;
-    }
-    if (![self _audioShouldBeRunning]) {
-        MKLogInfo(Audio, @"MKAudio: %@ while audio should be idle. Stopping instead of restarting.", reason);
-        [self stop];
-        return;
-    }
-
-    _isRestartingForDeviceChange = YES;
-    NSUInteger recoveryGeneration = ++_macDeviceRecoveryGeneration;
-    [self suppressCurrentAudioDeviceConfigurationChangesForDuration:delay + 3.0];
-    MKLogInfo(Audio, @"MKAudio: %@. Scheduling macOS audio recovery restart.", reason);
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (recoveryGeneration != self->_macDeviceRecoveryGeneration) {
-            MKLogDebug(Audio, @"MKAudio: Skipping stale macOS audio recovery restart.");
-            return;
-        }
-
-        if (self->_running && [self _audioShouldBeRunning]) {
-            [self suppressCurrentAudioDeviceConfigurationChangesForDuration:3.0];
-            [self restart];
-        }
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (recoveryGeneration == self->_macDeviceRecoveryGeneration) {
-                self->_isRestartingForDeviceChange = NO;
-            }
-        });
-    });
+    if (!_audioRequested) return;
+    MKLogInfo(Audio, @"MKAudio: Scheduling recovery because %@.", reason);
+    [self scheduleAudioRecoveryLockedAfter:delay];
 }
 
 - (void)handleDefaultInputDeviceChanged {
-    // 节流：避免系统在切换过程中短时间多次回调导致重复 restart
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - _lastDefaultInputSwitchTime < 0.8) {
-        return;
-    }
-    _lastDefaultInputSwitchTime = now;
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioInputDevicesChangedNotification object:nil];
+    dispatch_async(_accessQueue, ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioInputDevicesChangedNotification object:nil];
+        });
         [self updateCurrentAudioDeviceObservers];
-
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        BOOL followSystemInput = YES;
-        if ([defaults objectForKey:@"AudioFollowSystemInputDevice"] != nil) {
-            followSystemInput = [defaults boolForKey:@"AudioFollowSystemInputDevice"];
-        }
-
-        if (!followSystemInput) {
+        BOOL followSystem = [defaults objectForKey:@"AudioFollowSystemInputDevice"] == nil ||
+                            [defaults boolForKey:@"AudioFollowSystemInputDevice"];
+        if (!followSystem) {
             NSString *preferredUID = [[defaults stringForKey:@"AudioPreferredInputDeviceUID"]
                 stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if ([preferredUID length] > 0 && MKAudioInputDeviceExistsForUID(preferredUID)) {
-                // 固定设备仍存在时，忽略系统默认设备变化
-                return;
-            }
-
-            // 固定设备已经不存在，自动回退到“跟随系统”
+            if (MKAudioInputDeviceExistsForUID(preferredUID)) return;
             [defaults setBool:YES forKey:@"AudioFollowSystemInputDevice"];
             [defaults setObject:@"" forKey:@"AudioPreferredInputDeviceUID"];
-            MKLogInfo(Audio, @"MKAudio: Preferred input device missing. Auto-fallback to follow system default.");
         }
-
-        if (!self->_running) {
-            return;
-        }
-        if (self->_isRestartingForDeviceChange) {
-            return;
-        }
-        self->_isRestartingForDeviceChange = YES;
+        if (!self->_audioRequested) return;
         BOOL wasVPIO = [self->_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
-        BOOL nowExternal = !MKAudioSystemDefaultInputIsBuiltInOrBluetooth();
-        MKLogInfo(Audio, @"MKAudio: Default input device changed. Restarting audio to apply new microphone.");
-        [self suppressCurrentAudioDeviceConfigurationChangesForDuration:4.0];
-        [self restart];
-        if (wasVPIO && nowExternal) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioVPIOToHALTransitionNotification object:self];
+        if (wasVPIO && !MKAudioSystemDefaultInputIsBuiltInOrBluetooth()) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioVPIOToHALTransitionNotification object:self];
+            });
         }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            self->_isRestartingForDeviceChange = NO;
-        });
+        [self scheduleMacAudioRecoveryRestartWithReason:@"default input device changed" delay:0.7];
     });
 }
 
 - (void)handleDefaultOutputDeviceChanged {
-    // 节流：避免切换输出设备时系统短时间多次回调导致重复 restart
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - _lastDefaultOutputSwitchTime < 0.6) {
-        return;
-    }
-    _lastDefaultOutputSwitchTime = now;
-
-    dispatch_async(dispatch_get_main_queue(), ^{
+    dispatch_async(_accessQueue, ^{
         [self updateCurrentAudioDeviceObservers];
-        if (!self->_running) {
-            return;
-        }
-        if (self->_isRestartingForDeviceChange) {
-            return;
-        }
-        self->_isRestartingForDeviceChange = YES;
-        MKLogInfo(Audio, @"MKAudio: Default output device changed. Restarting audio to apply new speaker/output.");
-        [self suppressCurrentAudioDeviceConfigurationChangesForDuration:4.0];
-        [self restart];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            self->_isRestartingForDeviceChange = NO;
-        });
+        [self scheduleMacAudioRecoveryRestartWithReason:@"default output device changed" delay:0.7];
     });
 }
 #endif // TARGET_OS_OSX
@@ -1163,27 +1115,85 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 // Should audio be running?
 - (BOOL) _audioShouldBeRunning {
-    __block id<MKAudioDelegate> delegate;
-    dispatch_sync(_accessQueue, ^{
-        delegate = _delegate;
-    });
-
-    if ([(id)delegate respondsToSelector:@selector(audioShouldBeRunning:)]) {
-        return [delegate audioShouldBeRunning:self];
-    }
-
-#if TARGET_OS_IPHONE == 1
-    return NO;
-#else
-    return YES;
-#endif
+    __block BOOL requested;
+    MKAudioAccessSync(_accessQueue, ^{ requested = self->_audioRequested; });
+    return requested;
 }
 
 - (BOOL) isRunning {
-    return _running;
+    __block BOOL running;
+    MKAudioAccessSync(_accessQueue, ^{ running = self->_running; });
+    return running;
 }
 
+- (void)publishHealthStateLocked:(NSString *)state {
+    if ([_healthState isEqualToString:state]) return;
+    [_healthState release];
+    _healthState = [state copy];
+    NSDictionary *info = @{ @"state": state };
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioHealthChangedNotification object:self userInfo:info];
+    });
+}
+
+- (NSDictionary *)healthSnapshot {
+    __block NSDictionary *snapshot;
+    MKAudioAccessSync(_accessQueue, ^{
+        uint64_t now = MKAudioHealthNow();
+        uint64_t input = self->_audioDevice ? atomic_load_explicit(&self->_audioDevice->_callbackHealth.inputCompleted, memory_order_relaxed) : 0;
+        uint64_t output = self->_audioDevice ? atomic_load_explicit(&self->_audioDevice->_callbackHealth.outputCompleted, memory_order_relaxed) : 0;
+        snapshot = [@{ @"state": self->_healthState ?: @"stopped", @"requested": @(self->_audioRequested),
+            @"inputCallbackAge": input && now >= input ? @((double)(now - input) / 1e9) : [NSNull null],
+            @"outputCallbackAge": output && now >= output ? @((double)(now - output) / 1e9) : [NSNull null],
+            @"callbackTimeout": @5, @"recoveryAttempt": @(self->_recoveryAttempt) } retain];
+    });
+    return [snapshot autorelease];
+}
+
+- (void)startHealthWatchdogLocked {
+    if (_healthTimer) return;
+    _healthTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _accessQueue);
+    dispatch_source_set_timer(_healthTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_SEC / 10);
+    dispatch_source_set_event_handler(_healthTimer, ^{ [self checkCallbackHealthLocked]; });
+    dispatch_resume(_healthTimer);
+}
+
+- (void)checkCallbackHealthLocked {
+    if (!_audioRequested) return;
+    if (_sessionInterrupted || _mediaServicesLost) {
+        [self publishHealthStateLocked:@"interrupted"];
+        return;
+    }
+    AVAuthorizationStatus authorization = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    if (authorization != AVAuthorizationStatusAuthorized) {
+        [self publishHealthStateLocked:@"unavailable"];
+        return;
+    }
+    if (!_running || !_audioDevice) return;
+    uint64_t now = MKAudioHealthNow();
+    uint64_t input = atomic_load_explicit(&_audioDevice->_callbackHealth.inputCompleted, memory_order_relaxed);
+    uint64_t output = atomic_load_explicit(&_audioDevice->_callbackHealth.outputCompleted, memory_order_relaxed);
+    if (MKAudioHealthExpired(now, _healthStartedAt, input) || MKAudioHealthExpired(now, _healthStartedAt, output)) {
+        MKLogWarning(Audio, @"MKAudio: Audio callbacks stalled; rebuilding capture and playback graph.");
+        [self publishHealthStateLocked:@"recovering"];
+        [self stopAudioDeviceGraphLockedNotifyingOthers:NO];
+        [self scheduleAudioRecoveryLockedAfter:1.0];
+    } else if (input && output) {
+        [self publishHealthStateLocked:@"healthy"];
+    }
+}
+
+#if DEBUG
+- (void)simulateDeviceCallbackStallForTesting {
+    MKAudioAccessSync(_accessQueue, ^{
+        if (self->_running) [self->_audioDevice teardownDevice];
+        // Keep the engine flags unchanged: only completed callback health can detect this fault.
+    });
+}
+#endif
+
 - (void)teardownAudioDeviceGraphLocked {
+    _running = NO;
     if (_audioDevice != nil) {
         [_audioDevice teardownDevice];
     }
@@ -1217,51 +1227,66 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 }
 
 - (void) stopNotifyingOthers:(BOOL)notifyOthers {
-    dispatch_sync(_accessQueue, ^{
-        for (NSValue *value in [_remoteTrackPreviewStates allValues]) {
-            MKAudioPreviewGainProcessorState *state = (MKAudioPreviewGainProcessorState *)[value pointerValue];
-            if (state != NULL) {
-                free(state);
-            }
+    MKAudioAccessSync(_accessQueue, ^{
+        self->_audioRequested = NO;
+        self->_cachedForceTransmit = NO;
+        if (self->_healthTimer) {
+            dispatch_source_cancel(self->_healthTimer);
+            dispatch_release(self->_healthTimer);
+            self->_healthTimer = NULL;
         }
-        [_remoteTrackPreviewStates removeAllObjects];
-    });
-
-    @synchronized(self) {
+        [self publishHealthStateLocked:@"stopped"];
+        ++self->_recoveryGeneration;
+        self->_recoveryAttempt = 0;
 #if TARGET_OS_OSX == 1
-        _lastDeviceWasVPIO = [_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
+        self->_suppressCurrentDeviceConfigurationChangesUntil = 0;
 #endif
-        [self teardownAudioDeviceGraphLocked];
-        os_unfair_lock_lock(&_sidechainInputLock);
-        _sidechainInputReadPos = 0;
-        _sidechainInputWritePos = 0;
-        _sidechainInputBufferedFrames = 0;
-        _sidechainInputPPChannels = 0;
-        _sidechainInputPPSampleRate = 0;
-        os_unfair_lock_unlock(&_sidechainInputLock);
-        os_unfair_lock_lock(&_sidechainSidetoneLock);
-        _sidechainSidetoneReadPos = 0;
-        _sidechainSidetoneWritePos = 0;
-        _sidechainSidetoneBufferedFrames = 0;
-        _sidechainSidetonePPChannels = 0;
-        _sidechainSidetonePPSampleRate = 0;
-        os_unfair_lock_unlock(&_sidechainSidetoneLock);
-        os_unfair_lock_lock(&_inputMonitorLock);
-        _inputMonitorReadPos = 0;
-        _inputMonitorWritePos = 0;
-        _inputMonitorBufferedFrames = 0;
-        _inputMonitorPPChannels = 0;
-        _inputMonitorPPSampleRate = 0;
-        os_unfair_lock_unlock(&_inputMonitorLock);
-        _running = NO;
-    }
+        [self stopAudioDeviceGraphLockedNotifyingOthers:notifyOthers];
+    });
+}
 
+- (void)stopAudioDeviceGraphLockedNotifyingOthers:(BOOL)notifyOthers {
+    [self teardownAudioDeviceGraphLocked];
+    os_unfair_lock_lock(&_sidechainInputLock);
+    _sidechainInputReadPos = 0;
+    _sidechainInputWritePos = 0;
+    _sidechainInputBufferedFrames = 0;
+    _sidechainInputPPChannels = 0;
+    _sidechainInputPPSampleRate = 0;
+    os_unfair_lock_unlock(&_sidechainInputLock);
+    os_unfair_lock_lock(&_sidechainSidetoneLock);
+    _sidechainSidetoneReadPos = 0;
+    _sidechainSidetoneWritePos = 0;
+    _sidechainSidetoneBufferedFrames = 0;
+    _sidechainSidetonePPChannels = 0;
+    _sidechainSidetonePPSampleRate = 0;
+    os_unfair_lock_unlock(&_sidechainSidetoneLock);
+    os_unfair_lock_lock(&_inputMonitorLock);
+    _inputMonitorReadPos = 0;
+    _inputMonitorWritePos = 0;
+    _inputMonitorBufferedFrames = 0;
+    _inputMonitorPPChannels = 0;
+    _inputMonitorPPSampleRate = 0;
+    os_unfair_lock_unlock(&_inputMonitorLock);
+    _running = NO;
 #if TARGET_OS_IPHONE == 1
     [self resetAudioSessionToIdleNotifyingOthers:notifyOthers];
 #endif
 }
 
-- (void) start {
+- (void)start {
+    MKAudioAccessSync(_accessQueue, ^{
+        self->_audioRequested = YES;
+        [self startHealthWatchdogLocked];
+        if (self->_running || self->_sessionInterrupted || self->_mediaServicesLost) return;
+        ++self->_recoveryGeneration;
+        [self startAudioDeviceGraphLocked];
+        if (!self->_running) [self scheduleAudioRecoveryLockedAfter:1.0];
+    });
+}
+
+- (void)startAudioDeviceGraphLocked {
+    [self publishHealthStateLocked:@"starting"];
 #if TARGET_OS_IPHONE == 1
     // ✅ 现代 API 激活 Session
     // 每次开始前，重新应用一次设置以确保 Option 正确（如扬声器设置）
@@ -1271,6 +1296,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     BOOL success = [self setAudioSessionActive:YES options:0 error:&error];
     if (!success || error) {
         MKLogError(Audio, @"MKAudio: Failed to activate AVAudioSession: %@", error);
+        [self resetAudioSessionToIdle];
         NSDictionary *info = @{@"message": [NSString stringWithFormat:@"Audio session activation failed: %@", error.localizedDescription]};
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioErrorNotification object:nil userInfo:info];
@@ -1281,7 +1307,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
     __block MKAudioSettings settingsSnapshot;
     __block MKConnection *connSnapshot = nil;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         memcpy(&settingsSnapshot, &_audioSettings, sizeof(MKAudioSettings));
         connSnapshot = [_connection retain];
     });
@@ -1291,11 +1317,8 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     [self suppressCurrentAudioDeviceConfigurationChangesForDuration:3.0];
 #endif
 
-    @synchronized(self) {
-        if (_running) {
-#if TARGET_OS_OSX == 1
-            _lastDeviceWasVPIO = [_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
-#endif
+    {
+        if (_audioDevice != nil) {
             [self teardownAudioDeviceGraphLocked];
         }
 
@@ -1331,6 +1354,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #if TARGET_OS_OSX == 1
         if (!setupSuccess && ![_audioDevice isKindOfClass:[MKMacAudioDevice class]]) {
             MKLogWarning(Audio, @"MKAudio: VPIO setup failed on macOS, falling back to HALOutput.");
+            [_audioDevice teardownDevice];
             [_audioDevice release];
             _audioDevice = [[MKMacAudioDevice alloc] initWithSettings:&settingsSnapshot];
             setupSuccess = [_audioDevice setupDevice];
@@ -1338,8 +1362,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 #endif
         if (!setupSuccess) {
             MKLogError(Audio, @"MKAudio: Failed to setup audio device.");
-            [_audioDevice release];
-            _audioDevice = nil;
+            [self stopAudioDeviceGraphLockedNotifyingOthers:YES];
             [connSnapshot release];
             NSDictionary *info = @{@"message": @"Failed to initialize audio device. Check microphone permissions."};
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -1359,6 +1382,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         [_sidetoneRackBridge updateSampleRate:MKAudioInputProcessingSampleRateForSettings(&settingsSnapshot)];
         [_audioInput setSidetoneTrackProcessor:MKAudioInputRackBridgeProcess context:_sidetoneRackBridge];
 
+        [_audioInput setForceTransmit:_cachedForceTransmit];
         [_audioInput setSelfMuted:_cachedSelfMuted];
         [_audioInput setSuppressed:_cachedSuppressed];
         [_audioInput setMuted:_cachedMuted];
@@ -1383,7 +1407,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
         if (![_audioDevice startDevice]) {
             MKLogError(Audio, @"MKAudio: Failed to start audio device.");
-            [self teardownAudioDeviceGraphLocked];
+            [self stopAudioDeviceGraphLockedNotifyingOthers:YES];
             [connSnapshot release];
             NSDictionary *info = @{@"message": @"Failed to start audio device. Check microphone permissions."};
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -1393,6 +1417,12 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
         }
 
         _running = YES;
+        _healthStartedAt = MKAudioHealthNow();
+        _recoveryAttempt = 0;
+#if TARGET_OS_IPHONE == 1
+        [_configuredRouteFingerprint release];
+        _configuredRouteFingerprint = [[self currentRouteFingerprint] copy];
+#endif
 #if TARGET_OS_OSX == 1
         [self suppressCurrentAudioDeviceConfigurationChangesForDuration:2.5];
 #endif
@@ -1401,64 +1431,53 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     [connSnapshot release];
 }
 
+- (void)scheduleAudioRecoveryLockedAfter:(NSTimeInterval)delay {
+    if (!_audioRequested || _sessionInterrupted || _mediaServicesLost) return;
+    [self publishHealthStateLocked:@"recovering"];
+    NSUInteger generation = ++_recoveryGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), _accessQueue, ^{
+        if (generation != self->_recoveryGeneration || !self->_audioRequested ||
+            self->_sessionInterrupted || self->_mediaServicesLost) return;
+        [self stopAudioDeviceGraphLockedNotifyingOthers:NO];
+        [self startAudioDeviceGraphLocked];
+        if (self->_running) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if ([self isRunning]) {
+                    [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
+                }
+            });
+        } else {
+            // Temporary session/route/HAL failures must recover without requiring
+            // another UI action. Explicit stop invalidates this entire chain.
+            self->_recoveryAttempt = MIN(self->_recoveryAttempt + 1, (NSUInteger)4);
+            NSTimeInterval retryDelay = (NSTimeInterval)(1u << self->_recoveryAttempt);
+            MKLogWarning(Audio, @"MKAudio: Audio recovery deferred for %.0f seconds.", retryDelay);
+            [self scheduleAudioRecoveryLockedAfter:retryDelay];
+        }
+    });
+}
+
 - (void) restart {
-    [self stopNotifyingOthers:NO];
+    MKAudioAccessSync(_accessQueue, ^{
+        self->_audioRequested = YES;
+        [self startHealthWatchdogLocked];
+        [self stopAudioDeviceGraphLockedNotifyingOthers:NO];
 #if TARGET_OS_OSX == 1
-    [self suppressCurrentAudioDeviceConfigurationChangesForDuration:4.0];
-    BOOL lastDeviceWasVPIO = _lastDeviceWasVPIO;
-    _lastDeviceWasVPIO = NO;
-    NSUInteger restartGeneration = ++_macRestartGeneration;
-    uint64_t restartDelayMs = lastDeviceWasVPIO ? 700 : 650;
-    if (lastDeviceWasVPIO) {
-        MKLogInfo(Audio, @"MKAudio: VPIO teardown detected, delaying start for pipeline release...");
-    } else {
-        MKLogInfo(Audio, @"MKAudio: macOS audio restart delayed %llu ms for HAL IOProc release.", restartDelayMs);
-    }
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(restartDelayMs * NSEC_PER_MSEC)),
-                   dispatch_get_main_queue(), ^{
-        if (restartGeneration != self->_macRestartGeneration) {
-            MKLogDebug(Audio, @"MKAudio: Skipping stale macOS audio restart.");
-            return;
-        }
-        [self start];
-        if ([self isRunning]) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
-            return;
-        }
-
-        MKLogWarning(Audio, @"MKAudio: macOS audio restart did not start. Retrying once after HAL backoff.");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(900 * NSEC_PER_MSEC)),
-                       dispatch_get_main_queue(), ^{
-            if (restartGeneration != self->_macRestartGeneration) {
-                MKLogDebug(Audio, @"MKAudio: Skipping stale macOS audio restart retry.");
-                return;
-            }
-            [self start];
-            if ([self isRunning]) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
-            } else {
-                MKLogError(Audio, @"MKAudio: macOS audio restart retry failed.");
-            }
-        });
-    });
-    return;
+        [self scheduleAudioRecoveryLockedAfter:0.7];
 #else
-    [self start];
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioDidRestartNotification object:self];
-    });
+        [self scheduleAudioRecoveryLockedAfter:0.1];
 #endif
+    });
 }
 
 #pragma mark - Properties & Accessors
 
 - (MKAudioOutput *) output {
     __block MKAudioOutput *result;
-    dispatch_sync(_accessQueue, ^{
-        result = _audioOutput;
+    MKAudioAccessSync(_accessQueue, ^{
+        result = [_audioOutput retain];
     });
-    return result;
+    return [result autorelease];
 }
 
 // P0 修复：使用 dispatch_async/sync 替代 @synchronized，提升性能
@@ -1470,7 +1489,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (id<MKAudioDelegate>) delegate {
     __block id<MKAudioDelegate> delegate;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         delegate = _delegate;
     });
     return delegate;
@@ -1478,7 +1497,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (void) readAudioSettings:(MKAudioSettings *)settings {
     if (settings == NULL) return;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         memcpy(settings, &_audioSettings, sizeof(MKAudioSettings));
     });
 }
@@ -1509,24 +1528,44 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (void) refreshInputRoutingSettings {
     __block MKAudioSettings settingsSnapshot;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         memcpy(&settingsSnapshot, &_audioSettings, sizeof(MKAudioSettings));
     });
     MKAudioNormalizeSettings(&settingsSnapshot);
 
-    @synchronized(self) {
-        if (_audioInput != nil) {
-            [_audioInput refreshRoutingWithSettings:&settingsSnapshot];
-        }
+    MKAudioAccessSync(_accessQueue, ^{
+        [_audioInput refreshRoutingWithSettings:&settingsSnapshot];
+    });
+}
+
+- (void)replaceMainConnectionForAudioLocked:(MKConnection *)connection {
+    if (_connection == connection) return;
+    [_audioInput setMainConnectionForAudio:connection];
+    [connection retain];
+    _cachedForceTransmit = NO;
+    [_audioInput setForceTransmit:NO];
+    [_connection release];
+    _connection = connection;
+    // Session IDs belong to a connection, so jitter buffers and per-session
+    // processors must never survive replacement by another server connection.
+    [_audioOutput resetConnectionState];
+    for (MKAudioRemoteTrackRackBridge *bridge in [_remoteTrackRackBridges allValues]) {
+        [bridge setSidechainAudioOutput:nil];
     }
+    [_remoteTrackRackBridges removeAllObjects];
+    for (NSValue *value in [_remoteTrackPreviewStates allValues]) {
+        free([value pointerValue]);
+    }
+    [_remoteTrackPreviewStates removeAllObjects];
 }
 
 - (void) setMainConnectionForAudio:(MKConnection *)conn {
-    MKConnection *retainedConn = [conn retain];
+    dispatch_async(_accessQueue, ^{ [self replaceMainConnectionForAudioLocked:conn]; });
+}
+
+- (void)clearMainConnectionForAudioIfMatches:(MKConnection *)conn {
     dispatch_async(_accessQueue, ^{
-        [_audioInput setMainConnectionForAudio:retainedConn];
-        [_connection release];
-        _connection = retainedConn;
+        if (self->_connection == conn) [self replaceMainConnectionForAudioLocked:nil];
     });
 }
 
@@ -1536,17 +1575,26 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     });
 }
 
+- (void)addFrameToBufferWithSession:(NSUInteger)session data:(NSData *)data sequence:(NSUInteger)seq
+                             type:(MKUDPMessageType)msgType connection:(MKConnection *)connection {
+    dispatch_async(_accessQueue, ^{
+        if (self->_connection == connection && connection != nil) {
+            [self->_audioOutput addFrameToBufferWithSession:session data:data sequence:seq type:msgType];
+        }
+    });
+}
+
 - (MKAudioOutputSidetone *) sidetoneOutput {
     __block MKAudioOutputSidetone *result;
-    dispatch_sync(_accessQueue, ^{
-        result = _sidetoneOutput;
+    MKAudioAccessSync(_accessQueue, ^{
+        result = [_sidetoneOutput retain];
     });
-    return result;
+    return [result autorelease];
 }
 
 - (MKTransmitType) transmitType {
     __block MKTransmitType result;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         result = _audioSettings.transmitType;
     });
     return result;
@@ -1554,31 +1602,28 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (BOOL) forceTransmit {
     __block BOOL result;
-    dispatch_sync(_accessQueue, ^{
-        result = [_audioInput forceTransmit];
+    MKAudioAccessSync(_accessQueue, ^{
+        result = _cachedForceTransmit;
     });
     return result;
 }
 
 - (void) setForceTransmit:(BOOL)flag {
     dispatch_async(_accessQueue, ^{
+        _cachedForceTransmit = flag;
         [_audioInput setForceTransmit:flag];
     });
 }
 
 - (float) speechProbablity {
     __block float result;
-    @synchronized(self) {
-        result = [_audioInput speechProbability];
-    }
+    MKAudioAccessSync(_accessQueue, ^{ result = [_audioInput speechProbability]; });
     return result;
 }
 
 - (float) peakCleanMic {
     __block float result;
-    @synchronized(self) {
-        result = [_audioInput peakCleanMic];
-    }
+    MKAudioAccessSync(_accessQueue, ^{ result = [_audioInput peakCleanMic]; });
     return result;
 }
 
@@ -1619,7 +1664,9 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 }
 
 - (NSDictionary *) copyAudioOutputMixerDebugInfo {
-    return [_audioOutput copyMixerInfo];
+    __block NSDictionary *info;
+    MKAudioAccessSync(_accessQueue, ^{ info = [_audioOutput copyMixerInfo]; });
+    return info;
 }
 
 - (void)setPluginHostBufferFrames:(NSUInteger)frames {
@@ -1651,7 +1698,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (NSUInteger)pluginHostBufferFrames {
     __block NSUInteger result = 256;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         result = _pluginHostBufferFrames > 0 ? _pluginHostBufferFrames : 256;
     });
     return result;
@@ -1663,7 +1710,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
     }
 
     __block NSUInteger result = SAMPLE_RATE;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         if ([trackKey isEqualToString:@"input"]) {
             result = MKAudioInputProcessingSampleRateForSettings(&_audioSettings);
             return;
@@ -1696,7 +1743,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (NSDictionary *)copyInputTrackDSPStatus {
     __block NSDictionary *result = nil;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         result = [_inputTrackRackBridge copyStatus];
     });
     return result;
@@ -1704,7 +1751,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (NSDictionary *)copyRemoteBusDSPStatus {
     __block NSDictionary *result = nil;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         result = [_remoteBusRackBridge copyStatus];
     });
     return result;
@@ -1914,7 +1961,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (NSUInteger) busAssignmentForSession:(NSUInteger)session {
     __block NSUInteger result = 0;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         if (_audioOutput != nil) {
             result = [_audioOutput busAssignmentForSession:session];
         }
@@ -2114,7 +2161,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (NSArray<NSNumber *> *) copyRemoteSessionOrder {
     __block NSArray *order = nil;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         if (_audioOutput != nil) {
             order = [_audioOutput copyRemoteSessionOrder];
         } else {
@@ -2126,7 +2173,7 @@ static NSUInteger MKAudioInputProcessingSampleRateForSettings(const MKAudioSetti
 
 - (NSDictionary *)copyDSPStatus:(NSUInteger)session {
     __block NSDictionary *status = nil;
-    dispatch_sync(_accessQueue, ^{
+    MKAudioAccessSync(_accessQueue, ^{
         MKAudioRemoteTrackRackBridge *bridge = [self remoteTrackRackBridgeForSessionLocked:session createIfNeeded:NO];
         if (bridge != nil) {
             status = [bridge copyStatus];

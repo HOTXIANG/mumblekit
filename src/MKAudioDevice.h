@@ -3,11 +3,15 @@
 // license that can be found in the LICENSE file.
 
 #import <MumbleKit/MKAudio.h>
+#import "MKAudioCallbackHealth.h"
 
 typedef BOOL (^MKAudioDeviceOutputFunc)(short *frames, unsigned int nsamp);
 typedef BOOL (^MKAudioDeviceInputFunc)(short *frames, unsigned int nsamp);
 
-@interface MKAudioDevice : NSObject
+@interface MKAudioDevice : NSObject {
+@public
+    MKAudioCallbackHealth _callbackHealth;
+}
 - (id) initWithSettings:(MKAudioSettings *)settings;
 - (BOOL) setupDevice;
 - (BOOL) startDevice;

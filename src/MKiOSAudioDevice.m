@@ -7,6 +7,7 @@
 
 #import "MKiOSAudioDevice.h"
 #import "MKAudioPerfStats.h"
+#import "MKAudioDeviceIO.h"
 #import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #import <AudioUnit/AudioUnit.h>
@@ -18,6 +19,9 @@
     MKAudioSettings              _settings;
     AudioUnit                    _audioUnit;
     AudioBufferList              _buflist;
+    UInt32                       _inputBufferCapacity;
+    MKAudioPerfStats              _inputPerfStats;
+    MKAudioPerfStats              _outputPerfStats;
     int                          _micFrequency;
     int                          _micSampleSize;
     int                          _numMicChannels;
@@ -26,9 +30,6 @@
     MKAudioDeviceInputFunc       _inputFunc;
 }
 @end
-
-static MKAudioPerfStats sInputPerfStats;
-static MKAudioPerfStats sOutputPerfStats;
 
 static void MKAudioPerfLogAndReset(NSString *label, MKAudioPerfStats *stats) {
     if (stats->sampledCount == 0) {
@@ -50,50 +51,33 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
                               UInt32 busnum, UInt32 nframes, AudioBufferList *buflist) {
     MKiOSAudioDevice *dev = (MKiOSAudioDevice *)udata;
     OSStatus err;
-    bool shouldSample = MKAudioPerfShouldSample(&sInputPerfStats);
+    bool shouldSample = MKAudioPerfShouldSample(&dev->_inputPerfStats);
     uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
     
-    if (! dev->_buflist.mBuffers->mData) {
-        MKLogDebug(Audio, @"MKiOSAudioDevice: No buffer allocated. Allocating for %d frames.", (int)nframes);
-        dev->_buflist.mNumberBuffers = 1;
-        AudioBuffer *b = dev->_buflist.mBuffers;
-        b->mNumberChannels = dev->_numMicChannels;
-        b->mDataByteSize = dev->_micSampleSize * nframes;
-        b->mData = calloc(1, b->mDataByteSize);
+    if (dev->_audioUnit == NULL || dev->_buflist.mBuffers[0].mData == NULL ||
+        dev->_micSampleSize <= 0 || nframes > dev->_inputBufferCapacity / dev->_micSampleSize) {
+        return kAudioUnitErr_TooManyFramesToProcess;
     }
-    
-    if (dev->_buflist.mBuffers->mDataByteSize < (dev->_micSampleSize * nframes)) {
-        MKLogDebug(Audio, @"MKiOSAudioDevice: Buffer too small. Allocating more space.");
-        AudioBuffer *b = dev->_buflist.mBuffers;
-        free(b->mData);
-        b->mDataByteSize = dev->_micSampleSize * nframes;
-        b->mData = calloc(1, b->mDataByteSize);
-    }
-    
-    /*
-     AudioUnitRender modifies the mDataByteSize members with the
-     actual read bytes count. We need to write it back otherwise
-     we'll reallocate the buffer even if not needed.
-     */
-    UInt32 dataByteSize = dev->_buflist.mBuffers->mDataByteSize;
+    AudioBuffer *inputBuffer = &dev->_buflist.mBuffers[0];
+    UInt32 expectedBytes = nframes * dev->_micSampleSize;
+    inputBuffer->mDataByteSize = expectedBytes;
     err = AudioUnitRender(dev->_audioUnit, flags, ts, busnum, nframes, &dev->_buflist);
-    if (err != noErr) {
-#ifndef TARGET_IPHONE_SIMULATOR
-        MKLogError(Audio, @"MKiOSAudioDevice: AudioUnitRender failed. err = %d", (int)err);
-#endif
-        return err;
+    if (err != noErr) return err;
+    if (inputBuffer->mDataByteSize < expectedBytes) {
+        // Short input must not expose samples left over from an earlier callback.
+        return noErr;
     }
-    dev->_buflist.mBuffers->mDataByteSize = dataByteSize;
-    
+
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     short *buf = (short *) dev->_buflist.mBuffers->mData;
     MKAudioDeviceInputFunc inputFunc = dev->_inputFunc;
     if (inputFunc) {
         inputFunc(buf, nframes);
+        if (nframes > 0) MKAudioHealthRecord(&dev->_callbackHealth.inputCompleted);
     }
     [pool release];
     if (shouldSample) {
-        MKAudioPerfRecordTicks(&sInputPerfStats, MKAudioPerfNowTicks() - startTicks);
+        MKAudioPerfRecordTicks(&dev->_inputPerfStats, MKAudioPerfNowTicks() - startTicks);
     }
     
     return noErr;
@@ -101,46 +85,21 @@ static OSStatus inputCallback(void *udata, AudioUnitRenderActionFlags *flags, co
 
 static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts,
                                UInt32 busnum, UInt32 nframes, AudioBufferList *buflist) {
-    MKiOSAudioDevice *dev = (MKiOSAudioDevice *) udata;
-    AudioBuffer *buf = buflist->mBuffers;
-    MKAudioDeviceOutputFunc outputFunc = dev->_outputFunc;
-    BOOL done;
-    bool shouldSample = MKAudioPerfShouldSample(&sOutputPerfStats);
+    MKiOSAudioDevice *dev = (MKiOSAudioDevice *)udata;
+    if (!MKAudioDeviceCanRender(buflist, nframes, dev->_numOutputChannels) || dev->_outputFunc == NULL) {
+        MKAudioDeviceSilence(buflist, flags);
+        return noErr;
+    }
+    bool shouldSample = MKAudioPerfShouldSample(&dev->_outputPerfStats);
     uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
-    
-    if (outputFunc == NULL) {
-        // No frames available yet.
-        buf->mDataByteSize = 0;
-        return -1;
-    }
-    
-    // P0 修复：验证音频缓冲区指针有效性，防止 EXC_BAD_ACCESS
-    if (buf->mData == NULL || buf->mDataByteSize == 0) {
-        MKLogWarning(Audio, @"MKiOSAudioDevice: outputCallback received invalid buffer (data=%p, size=%u). Skipping.",
-              buf->mData, (unsigned int)buf->mDataByteSize);
-        buf->mDataByteSize = 0;
-        return -1;
-    }
-    
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    @try {
-        done = outputFunc(buf->mData, nframes);
-    } @catch (NSException *exception) {
-        MKLogError(Audio, @"MKiOSAudioDevice: outputFunc threw exception: %@. Audio playback interrupted.", exception);
-        done = NO;
-    } @finally {
-        if (! done) {
-            // No frames available yet.
-            buf->mDataByteSize = 0;
-        }
-        [pool release];
+    if (!dev->_outputFunc(buflist->mBuffers[0].mData, nframes)) {
+        MKAudioDeviceSilence(buflist, flags);
     }
-
-    if (shouldSample) {
-        MKAudioPerfRecordTicks(&sOutputPerfStats, MKAudioPerfNowTicks() - startTicks);
-    }
-    
-    return done ? noErr : -1;
+    MKAudioHealthRecord(&dev->_callbackHealth.outputCompleted);
+    [pool release];
+    if (shouldSample) MKAudioPerfRecordTicks(&dev->_outputPerfStats, MKAudioPerfNowTicks() - startTicks);
+    return noErr;
 }
 
 @implementation MKiOSAudioDevice
@@ -153,12 +112,14 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 }
 
 - (void) dealloc {
+    [self teardownDevice];
     [_inputFunc release];
     [_outputFunc release];
     [super dealloc];
 }
 
 - (BOOL) setupDevice {
+    if (_audioUnit != NULL) [self teardownDevice];
     UInt32 len;
     UInt32 val;
     OSStatus err;
@@ -167,8 +128,8 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
     AudioStreamBasicDescription inputFmt;
     AudioStreamBasicDescription outputFmt;
 
-    MKAudioPerfReset(&sInputPerfStats);
-    MKAudioPerfReset(&sOutputPerfStats);
+    MKAudioPerfReset(&_inputPerfStats);
+    MKAudioPerfReset(&_outputPerfStats);
 
     desc.componentType = kAudioUnitType_Output;
     desc.componentSubType = kAudioUnitSubType_RemoteIO;
@@ -283,6 +244,23 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
         return NO;
     }
     
+    // Background and route changes can increase the slice size. Allocate on
+    // the control thread before callbacks are enabled, with a bounded fallback.
+    UInt32 maximumFrames = 4096;
+    len = sizeof(maximumFrames);
+    if (AudioUnitGetProperty(_audioUnit, kAudioUnitProperty_MaximumFramesPerSlice,
+                             kAudioUnitScope_Global, 0, &maximumFrames, &len) != noErr) {
+        maximumFrames = 4096;
+    }
+    maximumFrames = MAX(maximumFrames, (UInt32)4096);
+    if (maximumFrames > 65536) return NO;
+    _inputBufferCapacity = maximumFrames * _micSampleSize;
+    _buflist.mNumberBuffers = 1;
+    _buflist.mBuffers[0].mNumberChannels = _numMicChannels;
+    _buflist.mBuffers[0].mDataByteSize = _inputBufferCapacity;
+    _buflist.mBuffers[0].mData = calloc(1, _inputBufferCapacity);
+    if (_buflist.mBuffers[0].mData == NULL) return NO;
+
     err = AudioUnitInitialize(_audioUnit);
     if (err != noErr) {
         MKLogError(Audio, @"MKiOSAudioDevice: Unable to initialize AudioUnit.");
@@ -304,29 +282,27 @@ static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, c
 }
 
 - (BOOL) teardownDevice {
-    OSStatus err;
-
-    MKAudioPerfLogAndReset(@"ios_remoteio_input", &sInputPerfStats);
-    MKAudioPerfLogAndReset(@"ios_remoteio_output", &sOutputPerfStats);
-    
-    err = AudioOutputUnitStop(_audioUnit);
-    if (err != noErr) {
-        MKLogError(Audio, @"MKiOSAudioDevice: unable to stop AudioUnit.");
-        return NO;
+    BOOL ok = YES;
+    AudioUnit unit = _audioUnit;
+    if (unit != NULL) {
+        // Keep the refCon and buffers alive until disposal has drained callbacks.
+        // In particular, a media-services reset may make Stop/Uninitialize fail;
+        // cleanup must still reach Dispose rather than releasing a live refCon.
+        OSStatus stopError = AudioOutputUnitStop(unit);
+        AudioUnitUninitialize(unit);
+        OSStatus disposeError = AudioComponentInstanceDispose(unit);
+        _audioUnit = NULL;
+        ok = (disposeError == noErr);
+        if (stopError != noErr || disposeError != noErr) {
+            MKLogWarning(Audio, @"MKiOSAudioDevice: teardown stop=%d dispose=%d", (int)stopError, (int)disposeError);
+        }
     }
-    
-    err = AudioComponentInstanceDispose(_audioUnit);
-    if (err != noErr) {
-        MKLogError(Audio, @"MKiOSAudioDevice: unable to dispose of AudioUnit.");
-        return NO;
-    }
-    
-    AudioBuffer *b = _buflist.mBuffers;
-    if (b && b->mData)
-        free(b->mData);
-    
-    MKLogInfo(Audio, @"MKiOSAudioDevice: teardown finished.");
-    return YES;
+    MKAudioPerfLogAndReset(@"ios_remoteio_input", &_inputPerfStats);
+    MKAudioPerfLogAndReset(@"ios_remoteio_output", &_outputPerfStats);
+    free(_buflist.mBuffers[0].mData);
+    memset(&_buflist, 0, sizeof(_buflist));
+    _inputBufferCapacity = 0;
+    return ok;
 }
 
 - (void) setupOutput:(MKAudioDeviceOutputFunc)outf {

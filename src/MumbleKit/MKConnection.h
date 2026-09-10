@@ -308,7 +308,8 @@ typedef enum {
 /// for self-signed certificates.
 - (void) reconnect;
 
-/// Disconnect from the server.
+/// Request disconnection without blocking the caller.
+/// Streams and sockets are released on the connection thread before its terminal callback.
 - (void) disconnect;
 
 /// The current status of the connection.

@@ -10,6 +10,7 @@
 
 #import "MKMacAudioDevice.h"
 #import "MKAudioPerfStats.h"
+#import "MKAudioDeviceIO.h"
 #import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
 
 #import <AudioUnit/AudioUnit.h>
@@ -210,58 +211,19 @@ static BOOL MUFindInputDeviceByUID(NSString *uid, AudioDeviceID *outDevId) {
 
 static OSStatus outputCallback(void *udata, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts,
                                UInt32 busnum, UInt32 nframes, AudioBufferList *buflist) {
-    
-    MKMacAudioDevice *dev = (MKMacAudioDevice *) udata;
-    AudioBuffer *buf = buflist->mBuffers;
-    MKAudioDeviceOutputFunc outputFunc = dev->_outputFunc;
-    BOOL done;
+    MKMacAudioDevice *dev = (MKMacAudioDevice *)udata;
+    if (!MKAudioDeviceCanRender(buflist, nframes, dev->_playbackChannels) || dev->_outputFunc == NULL) {
+        MKAudioDeviceSilence(buflist, flags);
+        return noErr;
+    }
     bool shouldSample = MKAudioPerfShouldSample(&sOutputPerfStats);
     uint64_t startTicks = shouldSample ? MKAudioPerfNowTicks() : 0;
-    
-    if (outputFunc == NULL) {
-        // No frames available yet.
-        buf->mDataByteSize = 0;
-        return -1;
-    }
-    
-    // P0 修复：验证音频缓冲区指针有效性，防止 EXC_BAD_ACCESS
-    if (buf->mData == NULL || buf->mDataByteSize == 0) {
-        MKLogWarning(Audio, @"MKMacAudioDevice: outputCallback received invalid buffer (data=%p, size=%u). Skipping.",
-              buf->mData, (unsigned int)buf->mDataByteSize);
-        buf->mDataByteSize = 0;
-        return -1;
-    }
-    
-    // 额外检查：确保数据指针是合理的内存地址（不是明显的无效地址）
-    // 0x400000000 以上的地址通常是无效的（在 macOS 用户空间）
-    uintptr_t dataPtr = (uintptr_t)buf->mData;
-    if (dataPtr < 0x1000 || (dataPtr & 0x7) != 0) {
-        // 指针未对齐或明显无效
-        MKLogWarning(Audio, @"MKMacAudioDevice: outputCallback received suspicious buffer pointer %p. Skipping.",
-              buf->mData);
-        buf->mDataByteSize = 0;
-        return -1;
-    }
-    
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    @try {
-        done = outputFunc(buf->mData, nframes);
-    } @catch (NSException *exception) {
-        MKLogError(Audio, @"MKMacAudioDevice: outputFunc threw exception: %@. Audio playback interrupted.", exception);
-        done = NO;
-    } @finally {
-        if (! done) {
-            // No frames available yet.
-            buf->mDataByteSize = 0;
-        }
-        [pool release];
-    }
-
-    if (shouldSample) {
-        MKAudioPerfRecordTicks(&sOutputPerfStats, MKAudioPerfNowTicks() - startTicks);
-    }
-    
-    return done ? noErr : -1;
+    if (!dev->_outputFunc(buflist->mBuffers[0].mData, nframes)) MKAudioDeviceSilence(buflist, flags);
+    MKAudioHealthRecord(&dev->_callbackHealth.outputCompleted);
+    [pool release];
+    if (shouldSample) MKAudioPerfRecordTicks(&sOutputPerfStats, MKAudioPerfNowTicks() - startTicks);
+    return noErr;
 }
 
 static void inputQueueCallback(void *udata,
@@ -292,6 +254,7 @@ static void inputQueueCallback(void *udata,
             MKAudioDeviceInputFunc inputFunc = dev->_inputFunc;
             if (inputFunc) {
                 inputFunc((short *)buffer->mAudioData, frames);
+                MKAudioHealthRecord(&dev->_callbackHealth.inputCompleted);
             }
         } @catch (NSException *exception) {
             MKLogError(Audio, @"MKMacAudioDevice: inputFunc threw exception: %@. Audio recording interrupted.", exception);
@@ -322,6 +285,7 @@ static void inputQueueCallback(void *udata,
 }
 
 - (void) dealloc {
+    [self teardownDevice];
     [_inputFunc release];
     [_outputFunc release];
     [super dealloc];
@@ -444,13 +408,6 @@ static void inputQueueCallback(void *udata,
         }
     }
 
-    err = AudioQueueStart(_recordQueue, NULL);
-    if (err != noErr) {
-        MKLogError(Audio, @"MKMacAudioDevice: Unable to start AudioQueue input (err=%d).", (int)err);
-        return NO;
-    }
-
-    MKLogInfo(Audio, @"MKMacAudioDevice: AudioQueue input started at %dHz, %d channel(s).", _recordFrequency, _recordMicChannels);
     return YES;
 }
 
@@ -567,12 +524,6 @@ static void inputQueueCallback(void *udata,
         return NO;
     }
     
-    err = AudioOutputUnitStart(_playbackAudioUnit);
-    if (err != noErr) {
-        MKLogError(Audio, @"MKMacAudioDevice: Unable to start AudioUnit");
-        return NO;
-    }
-    
     return YES;
 }
 
@@ -585,6 +536,7 @@ static void inputQueueCallback(void *udata,
             ok = NO;
         }
 
+        AudioUnitUninitialize(_playbackAudioUnit);
         err = AudioComponentInstanceDispose(_playbackAudioUnit);
         if (err != noErr) {
             MKLogError(Audio, @"MKMacAudioDevice: unable to dispose of playback AudioUnit (err=%d).", (int)err);
@@ -616,11 +568,23 @@ static void inputQueueCallback(void *udata,
     return YES;
 }
 
+- (BOOL)startDevice {
+    if (_recordQueue == NULL || _playbackAudioUnit == NULL) return NO;
+    OSStatus err = AudioOutputUnitStart(_playbackAudioUnit);
+    if (err == noErr) err = AudioQueueStart(_recordQueue, NULL);
+    if (err != noErr) {
+        MKLogError(Audio, @"MKMacAudioDevice: Unable to start audio IO (err=%d).", (int)err);
+        [self teardownDevice];
+        return NO;
+    }
+    return YES;
+}
+
 - (BOOL) teardownDevice {
-    MKAudioPerfLogAndReset(@"mac_hal_input", &sInputPerfStats);
-    MKAudioPerfLogAndReset(@"mac_hal_output", &sOutputPerfStats);
     BOOL recordingOK = [self teardownRecording];
     BOOL playbackOK = [self teardownPlayback];
+    MKAudioPerfLogAndReset(@"mac_hal_input", &sInputPerfStats);
+    MKAudioPerfLogAndReset(@"mac_hal_output", &sOutputPerfStats);
     return recordingOK && playbackOK;
 }
 
