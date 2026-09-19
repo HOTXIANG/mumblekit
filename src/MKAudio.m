@@ -25,6 +25,7 @@
 #elif TARGET_OS_OSX == 1
 # import "MKVoiceProcessingDevice.h"
 # import "MKMacAudioDevice.h"
+# import "MKAudioMacRecovery.h"
 #endif
 
 #if TARGET_OS_OSX == 1
@@ -68,6 +69,7 @@ typedef struct _MKAudioPreviewGainProcessorState {
     NSUInteger               _recoveryAttempt;
     dispatch_source_t        _healthTimer;
     uint64_t                 _healthStartedAt;
+    NSUInteger               _graphStartCount;
     NSString                 *_healthState;
     BOOL                     _cachedForceTransmit;
 
@@ -90,10 +92,10 @@ typedef struct _MKAudioPreviewGainProcessorState {
     BOOL                     _isObservingCurrentAudioDevices;
     AudioDeviceID            _observedInputDeviceID;
     AudioDeviceID            _observedOutputDeviceID;
-    CFAbsoluteTime           _lastDefaultInputSwitchTime;
-    CFAbsoluteTime           _lastDefaultOutputSwitchTime;
-    CFAbsoluteTime           _lastCurrentDeviceConfigurationChangeTime;
-    CFAbsoluteTime           _suppressCurrentDeviceConfigurationChangesUntil;
+    MKAudioMacRouteState     _configuredMacRoute;
+    BOOL                     _hasConfiguredMacRoute;
+    NSUInteger               _macDeviceCheckGeneration;
+    BOOL                     _macDeviceCheckPending;
 #elif TARGET_OS_IPHONE == 1
     NSString                 *_configuredRouteFingerprint;
     NSUInteger               _routeRecoveryGeneration;
@@ -146,7 +148,6 @@ typedef struct _MKAudioPreviewGainProcessorState {
 - (void)handleDefaultOutputDeviceChanged;
 - (void)handleCurrentAudioDeviceConfigurationChanged;
 - (void)scheduleMacAudioRecoveryRestartWithReason:(NSString *)reason delay:(NSTimeInterval)delay;
-- (void)suppressCurrentAudioDeviceConfigurationChangesForDuration:(NSTimeInterval)duration;
 #endif
 - (void)rebindRemoteTrackProcessorsToOutputLocked;
 - (NSUInteger)currentOutputProcessingSampleRateLocked;
@@ -359,6 +360,47 @@ static AudioDeviceID MKAudioSelectedInputDevice(void) {
     return devId;
 }
 
+static MKAudioMacDeviceState MKAudioReadMacDeviceState(AudioDeviceID deviceID, AudioObjectPropertyScope scope) {
+    MKAudioMacDeviceState state = { .deviceID = deviceID };
+    if (deviceID == kAudioObjectUnknown) return state;
+    AudioObjectPropertyAddress address = { kAudioDevicePropertyDeviceIsAlive,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 size = sizeof(state.alive);
+    if (AudioObjectGetPropertyData(deviceID, &address, 0, NULL, &size, &state.alive) != noErr) state.alive = 0;
+    address.mSelector = kAudioDevicePropertyNominalSampleRate;
+    size = sizeof(state.sampleRate);
+    if (AudioObjectGetPropertyData(deviceID, &address, 0, NULL, &size, &state.sampleRate) != noErr ||
+        !isfinite(state.sampleRate)) state.sampleRate = 0;
+    address.mSelector = kAudioDevicePropertyStreamConfiguration;
+    address.mScope = scope;
+    size = 0;
+    if (AudioObjectGetPropertyDataSize(deviceID, &address, 0, NULL, &size) == noErr &&
+        size >= offsetof(AudioBufferList, mBuffers) && size <= 65536) {
+        AudioBufferList *buffers = calloc(1, size);
+        if (buffers) {
+            UInt32 capacity = size;
+            if (AudioObjectGetPropertyData(deviceID, &address, 0, NULL, &size, buffers) == noErr &&
+                size <= capacity && buffers->mNumberBuffers <=
+                (capacity - offsetof(AudioBufferList, mBuffers)) / sizeof(AudioBuffer)) {
+                for (UInt32 index = 0; index < buffers->mNumberBuffers; ++index) {
+                    uint32_t channels = buffers->mBuffers[index].mNumberChannels;
+                    if (channels > UINT32_MAX - state.channels) { state.channels = 0; break; }
+                    state.channels += channels;
+                }
+            }
+            free(buffers);
+        }
+    }
+    return state;
+}
+
+static MKAudioMacRouteState MKAudioCurrentMacRoute(void) {
+    return (MKAudioMacRouteState) {
+        .input = MKAudioReadMacDeviceState(MKAudioSelectedInputDevice(), kAudioDevicePropertyScopeInput),
+        .output = MKAudioReadMacDeviceState(MKAudioSystemDefaultOutputDevice(), kAudioDevicePropertyScopeOutput)
+    };
+}
+
 static BOOL MKAudioSystemDefaultInputIsBuiltInOrBluetooth(void) {
     AudioDeviceID devId = MKAudioSystemDefaultInputDevice();
     if (devId == kAudioObjectUnknown) {
@@ -549,10 +591,6 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
                                                      name:AVAudioSessionMediaServicesWereResetNotification
                                                    object:nil];
 #elif TARGET_OS_OSX == 1
-        _lastDefaultInputSwitchTime = 0;
-        _lastDefaultOutputSwitchTime = 0;
-        _lastCurrentDeviceConfigurationChangeTime = 0;
-        _suppressCurrentDeviceConfigurationChangesUntil = 0;
         _observedInputDeviceID = kAudioObjectUnknown;
         _observedOutputDeviceID = kAudioObjectUnknown;
         [self startObservingDefaultInputDeviceChanges];
@@ -1058,22 +1096,55 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
 
 - (void)handleCurrentAudioDeviceConfigurationChanged {
     dispatch_async(_accessQueue, ^{
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (now < self->_suppressCurrentDeviceConfigurationChangesUntil) return;
         [self updateCurrentAudioDeviceObservers];
         [self scheduleMacAudioRecoveryRestartWithReason:@"current audio device configuration changed" delay:1.2];
     });
 }
 
-- (void)suppressCurrentAudioDeviceConfigurationChangesForDuration:(NSTimeInterval)duration {
-    _suppressCurrentDeviceConfigurationChangesUntil = MAX(_suppressCurrentDeviceConfigurationChangesUntil,
-                                                        CFAbsoluteTimeGetCurrent() + duration);
-}
-
 - (void)scheduleMacAudioRecoveryRestartWithReason:(NSString *)reason delay:(NSTimeInterval)delay {
-    if (!_audioRequested) return;
-    MKLogInfo(Audio, @"MKAudio: Scheduling recovery because %@.", reason);
-    [self scheduleAudioRecoveryLockedAfter:delay];
+    if (!_audioRequested || _macDeviceCheckPending) return;
+    // These notifications may be produced by our own VPIO aggregate device.
+    // Debounce independently: advisory events must not cancel a pending retry
+    // for an actual callback failure, or announce recovery before comparison.
+    // Keep the first deadline so a continuous device-list notification storm
+    // cannot indefinitely postpone detection of a real route switch.
+    _macDeviceCheckPending = YES;
+    NSUInteger generation = ++_macDeviceCheckGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), _accessQueue, ^{
+        if (generation != self->_macDeviceCheckGeneration) return;
+        self->_macDeviceCheckPending = NO;
+        if (!self->_audioRequested || !self->_running || !self->_hasConfiguredMacRoute) return;
+        MKAudioMacRouteState current = MKAudioCurrentMacRoute();
+        BOOL usingVPIO = [self->_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
+        uint64_t now = MKAudioHealthNow();
+        uint64_t input = atomic_load_explicit(&self->_audioDevice->_callbackHealth.inputCompleted, memory_order_relaxed);
+        uint64_t output = atomic_load_explicit(&self->_audioDevice->_callbackHealth.outputCompleted, memory_order_relaxed);
+        BOOL callbacksFresh = input && output &&
+            !MKAudioHealthExpired(now, self->_healthStartedAt, input) &&
+            !MKAudioHealthExpired(now, self->_healthStartedAt, output);
+        BOOL sameLiveDevices = current.input.deviceID == self->_configuredMacRoute.input.deviceID &&
+            current.output.deviceID == self->_configuredMacRoute.output.deviceID && current.input.alive && current.output.alive;
+        if (usingVPIO && sameLiveDevices && !callbacksFresh &&
+            !MKAudioHealthExpired(now, self->_healthStartedAt, 0)) {
+            // Allow first callbacks to arrive before deciding whether a VPIO
+            // startup format notification signifies a failure.
+            [self scheduleMacAudioRecoveryRestartWithReason:reason delay:0.5];
+            return;
+        }
+        if (!MKAudioMacRouteNeedsRestart(self->_configuredMacRoute, current, usingVPIO, callbacksFresh)) {
+            self->_configuredMacRoute = current;
+            return;
+        }
+        MKLogInfo(Audio, @"MKAudio: Effective audio route changed (%@); rebuilding input=%u output=%u.",
+            reason, (unsigned int)current.input.deviceID, (unsigned int)current.output.deviceID);
+        if (usingVPIO && !MKAudioSystemDefaultInputIsBuiltInOrBluetooth()) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioVPIOToHALTransitionNotification object:self];
+            });
+        }
+        // We already debounced and re-read the route. Schedule one graph rebuild.
+        [self scheduleAudioRecoveryLockedAfter:0];
+    });
 }
 
 - (void)handleDefaultInputDeviceChanged {
@@ -1093,12 +1164,6 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
             [defaults setObject:@"" forKey:@"AudioPreferredInputDeviceUID"];
         }
         if (!self->_audioRequested) return;
-        BOOL wasVPIO = [self->_audioDevice isKindOfClass:[MKVoiceProcessingDevice class]];
-        if (wasVPIO && !MKAudioSystemDefaultInputIsBuiltInOrBluetooth()) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:MUMacAudioVPIOToHALTransitionNotification object:self];
-            });
-        }
         [self scheduleMacAudioRecoveryRestartWithReason:@"default input device changed" delay:0.7];
     });
 }
@@ -1143,6 +1208,8 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
         uint64_t input = self->_audioDevice ? atomic_load_explicit(&self->_audioDevice->_callbackHealth.inputCompleted, memory_order_relaxed) : 0;
         uint64_t output = self->_audioDevice ? atomic_load_explicit(&self->_audioDevice->_callbackHealth.outputCompleted, memory_order_relaxed) : 0;
         snapshot = [@{ @"state": self->_healthState ?: @"stopped", @"requested": @(self->_audioRequested),
+            @"backend": self->_audioDevice ? NSStringFromClass([self->_audioDevice class]) : @"none",
+            @"graphStartCount": @(self->_graphStartCount),
             @"inputCallbackAge": input && now >= input ? @((double)(now - input) / 1e9) : [NSNull null],
             @"outputCallbackAge": output && now >= output ? @((double)(now - output) / 1e9) : [NSNull null],
             @"callbackTimeout": @5, @"recoveryAttempt": @(self->_recoveryAttempt) } retain];
@@ -1193,6 +1260,11 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
 #endif
 
 - (void)teardownAudioDeviceGraphLocked {
+#if TARGET_OS_OSX == 1
+    ++_macDeviceCheckGeneration;
+    _macDeviceCheckPending = NO;
+    _hasConfiguredMacRoute = NO;
+#endif
     _running = NO;
     if (_audioDevice != nil) {
         [_audioDevice teardownDevice];
@@ -1238,9 +1310,6 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
         [self publishHealthStateLocked:@"stopped"];
         ++self->_recoveryGeneration;
         self->_recoveryAttempt = 0;
-#if TARGET_OS_OSX == 1
-        self->_suppressCurrentDeviceConfigurationChangesUntil = 0;
-#endif
         [self stopAudioDeviceGraphLockedNotifyingOthers:notifyOthers];
     });
 }
@@ -1287,6 +1356,9 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
 
 - (void)startAudioDeviceGraphLocked {
     [self publishHealthStateLocked:@"starting"];
+#if TARGET_OS_OSX == 1
+    MKAudioMacRouteState setupRoute = MKAudioCurrentMacRoute();
+#endif
 #if TARGET_OS_IPHONE == 1
     // ✅ 现代 API 激活 Session
     // 每次开始前，重新应用一次设置以确保 Option 正确（如扬声器设置）
@@ -1313,9 +1385,6 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
     });
     MKAudioNormalizeSettings(&settingsSnapshot);
 
-#if TARGET_OS_OSX == 1
-    [self suppressCurrentAudioDeviceConfigurationChangesForDuration:3.0];
-#endif
 
     {
         if (_audioDevice != nil) {
@@ -1417,6 +1486,7 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
         }
 
         _running = YES;
+        ++_graphStartCount;
         _healthStartedAt = MKAudioHealthNow();
         _recoveryAttempt = 0;
 #if TARGET_OS_IPHONE == 1
@@ -1424,7 +1494,15 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
         _configuredRouteFingerprint = [[self currentRouteFingerprint] copy];
 #endif
 #if TARGET_OS_OSX == 1
-        [self suppressCurrentAudioDeviceConfigurationChangesForDuration:2.5];
+        // Capture after starting VPIO so its own synchronous device changes are
+        // part of the baseline seen by the queued CoreAudio notifications.
+        MKAudioMacRouteState currentRoute = MKAudioCurrentMacRoute();
+        _configuredMacRoute = MKAudioMacRouteAfterStart(setupRoute, currentRoute);
+        _hasConfiguredMacRoute = YES;
+        [self updateCurrentAudioDeviceObservers];
+        if (!MKAudioMacRouteEqual(_configuredMacRoute, currentRoute)) {
+            [self scheduleMacAudioRecoveryRestartWithReason:@"devices changed during audio startup" delay:0.7];
+        }
 #endif
     }
 

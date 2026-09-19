@@ -4,139 +4,156 @@
 
 #import "MKServerPinger.h"
 #import "../../Source/Classes/SwiftUI/Core/MumbleLogger.h"
-
-#if TARGET_OS_IPHONE == 1
-# import <CFNetwork/CFNetwork.h>
-# import <CoreFoundation/CoreFoundation.h>
-#endif
-
+#import <CoreFoundation/CoreFoundation.h>
+#include <dispatch/dispatch.h>
 #include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/time.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <netdb.h>
 #include <fcntl.h>
+#include <unistd.h>
+#include <math.h>
 
-@interface MKServerPinger () {
-    NSData                      *_address;
-    id<MKServerPingerDelegate>  _delegate;
+static void MKServerPingerOnMain(dispatch_block_t block) {
+    if ([NSThread isMainThread]) block();
+    else dispatch_sync(dispatch_get_main_queue(), block);
 }
 
-- (id) initWithAddress:(NSData *)address;
-- (NSData *) address;
+// Ignore padding and IPv6 flow information when matching DNS results to recvfrom.
+static NSData *MKServerPingerAddress(const struct sockaddr *address, socklen_t length) {
+    if (address->sa_family == AF_INET && length >= sizeof(struct sockaddr_in)) {
+        const struct sockaddr_in *source = (const struct sockaddr_in *)address;
+        struct sockaddr_in value = { 0 };
+        value.sin_len = sizeof(value);
+        value.sin_family = AF_INET;
+        value.sin_port = source->sin_port;
+        value.sin_addr = source->sin_addr;
+        return [NSData dataWithBytes:&value length:sizeof(value)];
+    }
+    if (address->sa_family == AF_INET6 && length >= sizeof(struct sockaddr_in6)) {
+        const struct sockaddr_in6 *source = (const struct sockaddr_in6 *)address;
+        struct sockaddr_in6 value = { 0 };
+        value.sin6_len = sizeof(value);
+        value.sin6_family = AF_INET6;
+        value.sin6_port = source->sin6_port;
+        value.sin6_addr = source->sin6_addr;
+        value.sin6_scope_id = source->sin6_scope_id;
+        return [NSData dataWithBytes:&value length:sizeof(value)];
+    }
+    return nil;
+}
 
+@interface MKServerPinger () {
+    NSData *_address;
+    NSHashTable *_delegates;
+    BOOL _started; // Main queue only; the controller retains registered pingers.
+}
+- (NSData *)address;
 @end
 
 @interface MKServerPingerController : NSObject {
-    NSMutableDictionary  *_randvalues;
-    NSMutableDictionary  *_pingers;
-    int                  _sock4;
-    int                  _sock6;
-    dispatch_source_t    _reader4;
-    dispatch_source_t    _reader6;
-    dispatch_source_t    _timer;
+    NSMutableDictionary *_randvalues;
+    NSMutableDictionary *_pingers;
+    int _sock4;
+    int _sock6;
+    dispatch_source_t _reader4;
+    dispatch_source_t _reader6;
+    dispatch_source_t _timer;
+    NSUInteger _stateGeneration;
 }
-
-- (void) socketReader:(int)sock;
-- (void) timerTicked;
-- (void) setupPingerState;
-- (void) teardownPingerState;
-- (void) addPinger:(MKServerPinger *)pinger;
-- (void) removePinger:(MKServerPinger *)pinger;
-
++ (MKServerPingerController *)sharedController;
+- (BOOL)addPinger:(MKServerPinger *)pinger;
+- (void)removePinger:(MKServerPinger *)pinger;
+- (void)setupPingerState;
+- (void)teardownPingerState;
+- (void)socketReader:(int)sock;
+- (void)timerTicked;
 @end
 
 @implementation MKServerPingerController
 
-+ (MKServerPingerController *) sharedController {
-    static MKServerPingerController *serverPingerController;
++ (MKServerPingerController *)sharedController {
+    static MKServerPingerController *controller;
     static dispatch_once_t token;
-    dispatch_once(&token, ^{
-        serverPingerController = [[MKServerPingerController alloc] init];
-    });
-    return serverPingerController;
+    dispatch_once(&token, ^{ controller = [[MKServerPingerController alloc] init]; });
+    return controller;
 }
 
-- (id) init {
+- (id)init {
     if ((self = [super init])) {
         _pingers = [[NSMutableDictionary alloc] init];
         _randvalues = [[NSMutableDictionary alloc] init];
+        _sock4 = _sock6 = -1;
     }
     return self;
 }
 
-- (void) dealloc {
+- (void)dealloc {
+    [self teardownPingerState];
     [_pingers release];
     [_randvalues release];
-    [self teardownPingerState];
     [super dealloc];
 }
 
-- (void) setupPingerState {
-    _sock6 = socket(AF_INET6, SOCK_DGRAM, 0);
-    if (_sock6 > 0) {
-        int val = 1;
-        if (setsockopt(_sock6, SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val)) == -1)
-            MKLogWarning(Network, @"MKServerPinger: unable to set SO_NOSIGPIPE for _sock6: %s", strerror(errno));
-        int flags = fcntl(_sock6, F_GETFL, 0);
-        if (flags != -1) {
-            fcntl(_sock6, F_SETFL, flags | O_NONBLOCK);
-        }
-        struct sockaddr_in6 sa6;
-        memset(&sa6, 0, sizeof(struct sockaddr_in6));
-        sa6.sin6_len = sizeof(struct sockaddr_in6);
-        sa6.sin6_family = AF_INET6;
-        sa6.sin6_port = 0;
-        sa6.sin6_addr = in6addr_any;
-        if (bind(_sock6, (struct sockaddr *)&sa6, sizeof(struct sockaddr_in6)) == -1) {
-            MKLogWarning(Network, @"MKServerPinger: unable to bind _sock6: %s", strerror(errno));
-        }
-        _reader6 = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, _sock6, 0, dispatch_get_main_queue());
-        if (_reader6 != NULL) {
-            dispatch_source_set_event_handler(_reader6, ^{
-                [self socketReader:_sock6];
-            });
-            dispatch_resume(_reader6);
-        }
+- (int)createSocketForFamily:(int)family reader:(dispatch_source_t *)reader {
+    int sock = socket(family, SOCK_DGRAM, 0);
+    if (sock < 0) return -1;
+    int value = 1;
+    setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &value, sizeof(value));
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags == -1 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+        close(sock);
+        return -1;
     }
+    struct sockaddr_storage storage = { 0 };
+    socklen_t length;
+    if (family == AF_INET) {
+        struct sockaddr_in *address = (struct sockaddr_in *)&storage;
+        address->sin_len = length = sizeof(*address);
+        address->sin_family = AF_INET;
+    } else {
+        struct sockaddr_in6 *address = (struct sockaddr_in6 *)&storage;
+        address->sin6_len = length = sizeof(*address);
+        address->sin6_family = AF_INET6;
+    }
+    if (bind(sock, (struct sockaddr *)&storage, length) != 0) {
+        close(sock);
+        return -1;
+    }
+    *reader = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)sock, 0, dispatch_get_main_queue());
+    if (!*reader) { close(sock); return -1; }
+    NSUInteger generation = _stateGeneration;
+    dispatch_source_set_event_handler(*reader, ^{
+        if (generation == self->_stateGeneration) [self socketReader:sock];
+    });
+    // Close after Dispatch relinquishes its descriptor registration. Capturing
+    // this descriptor prevents an old cancellation from closing a new socket.
+    dispatch_source_set_cancel_handler(*reader, ^{ close(sock); });
+    dispatch_resume(*reader);
+    return sock;
+}
 
-    _sock4 = socket(AF_INET, SOCK_DGRAM, 0);
-    if (_sock4 > 0) {
-        int val = 1;
-        if (setsockopt(_sock4, SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val)) == -1)
-            MKLogWarning(Network, @"MKServerPinger: unable to set SO_NOSIGPIPE for _sock4: %s", strerror(errno));
-        int flags = fcntl(_sock4, F_GETFL, 0);
-        if (flags != -1) {
-            fcntl(_sock4, F_SETFL, flags | O_NONBLOCK);
-        }
-        struct sockaddr_in sa4;
-        memset(&sa4, 0, sizeof(struct sockaddr_in));
-        sa4.sin_len = sizeof(struct sockaddr_in);
-        sa4.sin_family = AF_INET;
-        sa4.sin_port = 0;
-        sa4.sin_addr.s_addr = INADDR_ANY;
-        if (bind(_sock4, (struct sockaddr *)&sa4, sizeof(struct sockaddr_in)) == -1) {
-            MKLogWarning(Network, @"MKServerPinger: unable to bind _sock4: %s", strerror(errno));
-        }
-        _reader4 = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, _sock4, 0, dispatch_get_main_queue());
-        if (_reader4 != NULL) {
-            dispatch_source_set_event_handler(_reader4, ^{
-                [self socketReader:_sock4];
-            });
-            dispatch_resume(_reader4);
-        }
-    }
-    
+- (void)setupPingerState {
+    if (_timer != NULL) return;
+    ++_stateGeneration;
+    _sock4 = [self createSocketForFamily:AF_INET reader:&_reader4];
+    _sock6 = [self createSocketForFamily:AF_INET6 reader:&_reader6];
+    if (_sock4 < 0 && _sock6 < 0) MKLogWarning(Network, @"MKServerPinger: unable to create UDP sockets.");
     _timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(_timer, DISPATCH_TIME_NOW, 1000000000ULL, 3000000000ULL);
+    NSUInteger generation = _stateGeneration;
+    dispatch_source_set_timer(_timer, DISPATCH_TIME_NOW, NSEC_PER_SEC, NSEC_PER_SEC / 10);
     dispatch_source_set_event_handler(_timer, ^{
-        [self timerTicked];
+        if (generation == self->_stateGeneration) [self timerTicked];
     });
     dispatch_resume(_timer);
 }
 
-- (void) teardownPingerState {
+- (void)teardownPingerState {
+    ++_stateGeneration;
+    if (_timer) {
+        dispatch_source_cancel(_timer);
+        dispatch_release(_timer);
+        _timer = NULL;
+    }
     if (_reader4) {
         dispatch_source_cancel(_reader4);
         dispatch_release(_reader4);
@@ -147,182 +164,152 @@
         dispatch_release(_reader6);
         _reader6 = NULL;
     }
-    if (_timer) {
-        dispatch_source_cancel(_timer);
-        dispatch_release(_timer);
-        _timer = NULL;
-    }
-    if (_sock4 > 0) {
-        close(_sock4);
-        _sock4 = 0;
-    }
-    if (_sock6 > 0) {
-        close(_sock6);
-        _sock6 = 0;
+    _sock4 = _sock6 = -1;
+}
+
+- (void)socketReader:(int)sock {
+    for (unsigned packet = 0; packet < 32; ++packet) {
+        struct sockaddr_storage address = { 0 };
+        socklen_t length = sizeof(address);
+        UInt32 ping[6];
+        ssize_t received = recvfrom(sock, ping, sizeof(ping), 0, (struct sockaddr *)&address, &length);
+        if (received < 0) break;
+        if (received != sizeof(ping)) continue;
+        NSData *key = MKServerPingerAddress((struct sockaddr *)&address, length);
+        NSNumber *random = key ? [_randvalues objectForKey:key] : nil;
+        if (!random) continue;
+        UInt64 timestamp = (((UInt64)ping[1] << 32) | ping[2]) ^ [random unsignedLongLongValue];
+        NSTimeInterval original;
+        memcpy(&original, &timestamp, sizeof(original));
+        NSTimeInterval elapsed = [NSProcessInfo processInfo].systemUptime - original;
+        if (!isfinite(elapsed) || elapsed < 0 || elapsed > 60) continue;
+        MKServerPingerResult result = {
+            .version = CFSwapInt32BigToHost(ping[0]),
+            .cur_users = CFSwapInt32BigToHost(ping[3]),
+            .max_users = CFSwapInt32BigToHost(ping[4]),
+            .bandwidth = CFSwapInt32BigToHost(ping[5]),
+            .ping = elapsed
+        };
+        NSUInteger generation = _stateGeneration;
+        // A callback may stop itself or every pinger at this address.
+        NSArray *targets = [[_pingers objectForKey:key] copy];
+        for (MKServerPinger *pinger in targets) {
+            id<MKServerPingerDelegate> delegate = [[pinger delegate] retain];
+            [delegate serverPingerResult:&result];
+            [delegate release];
+        }
+        [targets release];
+        if (generation != _stateGeneration) break;
     }
 }
 
-- (void) socketReader:(int)sock {
-    struct sockaddr_storage addr;
-    socklen_t addrlen = sizeof(struct sockaddr_storage);
-    char buf[64];
-    ssize_t nread = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *) &addr, &addrlen);
-    if (nread == 24) {
-        NSData *recvAddr = [NSData dataWithBytesNoCopy:&addr length:addrlen freeWhenDone:NO];
-        NSArray *addrPingers = [_pingers objectForKey:recvAddr];
-        NSNumber *randNumber = [_randvalues objectForKey:recvAddr];
-        UInt64 randValue = (UInt64) [randNumber unsignedLongLongValue];
-
-        UInt32 *ping = (UInt32 *)buf;
-        UInt64 pingRand = ((UInt64) ping[1] << 32) | (UInt64) ping[2];
-        UInt64 timeStamp =  pingRand ^ randValue;
-        // Get the raw bits, don't do integer -> double conversion;
-        NSTimeInterval origInterval = *((NSTimeInterval *) &timeStamp);
-        NSTimeInterval pingTime = [NSDate timeIntervalSinceReferenceDate] - origInterval;
-
-        MKServerPingerResult res;
-        res.version = CFSwapInt32BigToHost(ping[0]);
-        res.cur_users = CFSwapInt32BigToHost(ping[3]);
-        res.max_users = CFSwapInt32BigToHost(ping[4]);
-        res.bandwidth = CFSwapInt32BigToHost(ping[5]);
-        res.ping = (double) pingTime;
-
-        for (MKServerPinger *pinger in addrPingers) {
-            [[pinger delegate] serverPingerResult:&res];
+- (void)timerTicked {
+    for (NSData *address in [_randvalues allKeys]) {
+        NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+        UInt64 bits;
+        memcpy(&bits, &now, sizeof(bits));
+        UInt64 random = bits ^ [[_randvalues objectForKey:address] unsignedLongLongValue];
+        UInt32 ping[3] = { 0, (UInt32)(random >> 32), (UInt32)random };
+        const struct sockaddr *destination = (const struct sockaddr *)address.bytes;
+        int sock = destination->sa_family == AF_INET ? _sock4 : _sock6;
+        if (sock >= 0 && sendto(sock, ping, sizeof(ping), 0, destination, (socklen_t)address.length) < 0) {
+            MKLogWarning(Network, @"MKServerPinger: sendto failed: %s", strerror(errno));
         }
     }
 }
 
-- (void) timerTicked {
-    char buf[12];
-    for (NSData *addr in [_randvalues allKeys]) {
-        memset(buf, 0, 12);
-
-        NSNumber *randNumber = [_randvalues objectForKey:addr];
-        UInt64 randValue = (UInt64) [randNumber unsignedLongLongValue];
-
-        NSTimeInterval origInterval = [NSDate timeIntervalSinceReferenceDate];
-        // Get the raw bits, don't do double -> integer conversion.
-        UInt64 intervalBits = *((UInt64 *) &origInterval);
-        UInt64 rand = randValue ^ intervalBits;
-
-        UInt32 *ping = (UInt32 *)buf;
-        ping[0] = 0;
-        ping[1] = (rand >> 32) & 0xffffffff;
-        ping[2] = rand & 0xffffffff;
-
-        struct sockaddr *sa = (struct sockaddr *) [addr bytes];
-        if (sa->sa_family == AF_INET) {
-            if (sendto(_sock4, buf, 12, 0, [addr bytes], (socklen_t)[addr length]) == -1)
-                MKLogWarning(Network, @"MKServerPinger: sendto (IPv4) failed: %s", strerror(errno));
-        } else if (sa->sa_family == AF_INET6) {
-            if (sendto(_sock6, buf, 12, 0, [addr bytes], (socklen_t)[addr length]) == -1)
-                MKLogWarning(Network, @"MKServerPinger: sendto (IPv6) failed: %s", strerror(errno));
-        }
+- (BOOL)addPinger:(MKServerPinger *)pinger {
+    NSData *address = [pinger address];
+    if (!address) return NO;
+    NSMutableArray *targets = [_pingers objectForKey:address];
+    if (!targets) {
+        UInt64 random = ((UInt64)arc4random() << 32) | arc4random();
+        [_randvalues setObject:[NSNumber numberWithUnsignedLongLong:random] forKey:address];
+        targets = [NSMutableArray array];
+        [_pingers setObject:targets forKey:address];
     }
+    if ([targets indexOfObjectIdenticalTo:pinger] == NSNotFound) [targets addObject:pinger];
+    // Address count is not registration count: many rows may share one server.
+    [self setupPingerState];
+    return YES;
 }
 
-- (void) addPinger:(MKServerPinger *)pinger {
-    NSData *addr = [pinger address];
-
-    if (addr != nil) {
-        NSNumber *randData = [_randvalues objectForKey:addr];
-        if (randData == nil) {
-            UInt64 randValue = (UInt64) arc4random() << 32 | (UInt64) arc4random();
-            randData = [NSNumber numberWithUnsignedLongLong:(unsigned long long)randValue];
-            [_randvalues setObject:randData forKey:addr];
-            [_pingers setObject:[NSMutableArray arrayWithObject:pinger] forKey:addr];
-        } else {
-            NSMutableArray *addrPingers = [_pingers objectForKey:addr];
-            [addrPingers addObject:pinger];
-        }
-
-        [pinger release];
-        if ([_pingers count] == 1)
-            [self setupPingerState];
+- (void)removePinger:(MKServerPinger *)pinger {
+    NSData *address = [pinger address];
+    if (!address) return;
+    NSMutableArray *targets = [_pingers objectForKey:address];
+    [targets removeObjectIdenticalTo:pinger];
+    if (targets && targets.count == 0) {
+        [_pingers removeObjectForKey:address];
+        [_randvalues removeObjectForKey:address];
     }
+    if (_pingers.count == 0) [self teardownPingerState];
 }
-
-- (void) removePinger:(MKServerPinger *)pinger {
-    [pinger retain];
-
-    NSData *addr = [pinger address];
-    if (addr != nil) {
-        NSMutableArray *addrPingers = [_pingers objectForKey:addr];
-        [addrPingers removeObject:pinger];
-        if ([addrPingers count] == 0) {
-            [_pingers removeObjectForKey:addr];
-            [_randvalues removeObjectForKey:addr];
-        }
-
-        if ([_pingers count] == 0) {
-            [self teardownPingerState];
-        }
-    }
-}
-
 @end
 
 @implementation MKServerPinger
 
-- (id) initWithHostname:(NSString *)hostname port:(NSString *)port {
-    struct addrinfo *ai = NULL, *iter = NULL;
-    struct addrinfo hints;
-
-    memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family = PF_UNSPEC;
-    hints.ai_flags = AI_ADDRCONFIG;
-
-    if (getaddrinfo([hostname UTF8String], [port UTF8String], &hints, &ai) == 0) {
-        iter = ai;
-        NSData *addrData = nil;
-        while (iter != NULL) {
-            if (iter->ai_family == AF_INET || iter->ai_family == AF_INET6) {
-                addrData = [NSData dataWithBytes:iter->ai_addr length:iter->ai_addrlen];
-                break;
-            }
-            iter = iter->ai_next;
-        }
-        freeaddrinfo(ai);
-        return [self initWithAddress:addrData];
-    }
-    return [self initWithAddress:nil];
+- (id)initWithHostname:(NSString *)hostname port:(NSString *)port {
+    return [self initWithHostname:hostname port:port startImmediately:YES];
 }
 
-- (id) initWithAddress:(NSData *)address {
+- (id)initWithHostname:(NSString *)hostname port:(NSString *)port startImmediately:(BOOL)startImmediately {
     if ((self = [super init])) {
-        _address = [address copy];
-
-        // The pinger controller uses dispatch sources/timers on the main queue.
-        // When pingers are created off-main (e.g. async DNS resolution), ensure
-        // controller state is mutated on the main thread to avoid races.
-        if ([NSThread isMainThread]) {
-            [[MKServerPingerController sharedController] addPinger:self];
-        } else {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [[MKServerPingerController sharedController] addPinger:self];
-            });
+        _delegates = [[NSHashTable weakObjectsHashTable] retain];
+        struct addrinfo *addresses = NULL;
+        struct addrinfo hints = { 0 };
+        hints.ai_family = PF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;
+        hints.ai_flags = AI_ADDRCONFIG;
+        if (hostname.length && port.length && getaddrinfo(hostname.UTF8String, port.UTF8String, &hints, &addresses) == 0) {
+            for (struct addrinfo *candidate = addresses; candidate; candidate = candidate->ai_next) {
+                _address = [MKServerPingerAddress(candidate->ai_addr, (socklen_t)candidate->ai_addrlen) retain];
+                if (_address) break;
+            }
+            freeaddrinfo(addresses);
         }
+        if (startImmediately) [self start];
     }
     return self;
 }
 
-- (void) dealloc {
-    [[MKServerPingerController sharedController] removePinger:self];
+- (void)dealloc {
+    // Active instances belong to the controller until explicit stop. Deferred or
+    // stopped instances have no registration to mutate from their dealloc thread.
+    [_delegates release];
     [_address release];
     [super dealloc];
 }
 
-- (void) setDelegate:(id<MKServerPingerDelegate>)delegate {
-    _delegate = delegate;
+- (void)start {
+    MKServerPingerOnMain(^{
+        if (!self->_started) self->_started = [[MKServerPingerController sharedController] addPinger:self];
+    });
+}
+
+- (void)stop {
+    [self retain];
+    // Clear immediately, including during an owner's off-main deinit. Delegates
+    // are zeroing weak references; an already executing callback holds its own retain.
+    @synchronized(self) { [_delegates removeAllObjects]; }
+    MKServerPingerOnMain(^{
+        if (!self->_started) return;
+        self->_started = NO;
+        [[MKServerPingerController sharedController] removePinger:self];
+    });
+    [self release];
+}
+
+- (void)setDelegate:(id<MKServerPingerDelegate>)delegate {
+    @synchronized(self) {
+        [_delegates removeAllObjects];
+        if (delegate) [_delegates addObject:delegate];
+    }
 }
 
 - (id<MKServerPingerDelegate>)delegate {
-    return _delegate;
+    @synchronized(self) { return [[[_delegates anyObject] retain] autorelease]; }
 }
 
-- (NSData *) address {
-    return _address;
-}
-
+- (NSData *)address { return _address; }
 @end
