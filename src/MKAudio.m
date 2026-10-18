@@ -510,6 +510,10 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
 #if TARGET_OS_IPHONE == 1
         _audioSessionQueue = dispatch_queue_create("com.mumble.audio.session", DISPATCH_QUEUE_SERIAL);
         dispatch_queue_set_specific(_audioSessionQueue, kMKAudioSessionQueueKey, kMKAudioSessionQueueKey, NULL);
+        // Cold launch must not inherit the system's nonmixing SoloAmbient policy.
+        // Set only the idle category before any rack/plugin can touch audio;
+        // activation and VoiceChat still belong to startAudioDeviceGraphLocked.
+        [self configureIdleAudioSessionCategory];
 #endif
 
         // 安全默认值：避免首个设置更新尚未应用时读取到未定义配置。
@@ -747,7 +751,7 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
     NSError *error = nil;
     BOOL success = [session setCategory:AVAudioSessionCategoryAmbient
                                    mode:AVAudioSessionModeDefault
-                                options:AVAudioSessionCategoryOptionMixWithOthers
+                                options:0 // Ambient mixes implicitly; explicit mixing is for playback/record categories.
                                   error:&error];
     if (!success) {
         MKLogWarning(Audio, @"MKAudio: Failed to configure idle Ambient/MixWithOthers session category: %@", error.localizedDescription);
