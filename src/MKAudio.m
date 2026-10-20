@@ -1343,7 +1343,9 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
     os_unfair_lock_unlock(&_inputMonitorLock);
     _running = NO;
 #if TARGET_OS_IPHONE == 1
-    [self resetAudioSessionToIdleNotifyingOthers:notifyOthers];
+    // Device recovery is not the end of the call. Deactivation here changes
+    // other apps' playback route and can revoke our background audio session.
+    if (!_audioRequested) [self resetAudioSessionToIdleNotifyingOthers:notifyOthers];
 #endif
 }
 
@@ -1372,7 +1374,7 @@ static void MKAudioAccessSync(dispatch_queue_t queue, dispatch_block_t block) {
     BOOL success = [self setAudioSessionActive:YES options:0 error:&error];
     if (!success || error) {
         MKLogError(Audio, @"MKAudio: Failed to activate AVAudioSession: %@", error);
-        [self resetAudioSessionToIdle];
+        if (!_audioRequested) [self resetAudioSessionToIdle];
         NSDictionary *info = @{@"message": [NSString stringWithFormat:@"Audio session activation failed: %@", error.localizedDescription]};
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:MKAudioErrorNotification object:nil userInfo:info];
